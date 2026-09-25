@@ -1683,7 +1683,7 @@ fn render_unauth(title: &str, body: &str) -> Response {
     response
 }
 fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
-    let account_stylesheet = if body.contains("class='panel account-settings") {
+    let account_stylesheet = if body.contains("class='panel account-settings") || body.contains("custom-styles-panel") {
         "<link rel='stylesheet' href='/static/account.css'>"
     } else {
         ""
@@ -5950,10 +5950,22 @@ async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let translation = profile_translation_button(
+        "Add custom CSS styles. Use Caution: you could break things.",
+        [
+            "Agrega estilos CSS personalizados. Usa precaución: podrías romper cosas.",
+            "Ajoutez des styles CSS personnalisés. Utilisez avec précaution : vous pourriez casser des choses.",
+            "कस्टम CSS स्टाइल जोड़ें। सावधानी बरतें: आप चीज़ों को तोड़ सकते हैं।",
+            "Fügen Sie benutzerdefinierte CSS-Stile hinzu. Vorsicht: Sie könnten Dinge kaputt machen.",
+            "Adicione estilos CSS personalizados. Use com cuidado: você pode quebrar coisas.",
+            "カスタムCSSスタイルを追加。注意: サイトが壊れる可能性があります。",
+        ],
+    );
+    let action = esc(&public_url(&headers, "/account/custom_styles"));
     Ok(render(
         "Custom styles",
         &format!(
-            "<section class='form-card'><h1>Custom styles</h1><form method='post' action='/account/custom_styles'><label>CSS<textarea name='account[custom_styles]' rows='20' spellcheck='false'>{}</textarea></label><button class='button'>Save styles</button></form><p><a href='/account'>Back to account</a></p></section>",
+            "<nav class='account-settings-nav custom-styles-nav'><a href='/account/edit' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></nav><section class='panel panel--wide custom-styles-panel txt-align-center flex flex-column position-relative' style='view-transition-name: custom-styles'><form class='flex flex-column gap' data-controller='form' data-action='keydown.ctrl+enter->form#submit keydown.meta+enter->form#submit' action='{action}' method='post'><input type='hidden' name='_method' value='patch'><div class='panel__button'>{translation}</div><div class='pad-inline-double margin-inline'><h1 class='margin-none'>Custom CSS</h1><p class='flex flex-wrap align-center justify-center gap margin-none-block-start' style='--column-gap: 0.5ch; --row-gap: 0'><span>Add custom CSS styles.</span><img src='/assets/alert.svg' class='flex-inline colorize--black' width='16' height='16' aria-hidden='true'><span>Use Caution: you could break things.</span></p></div><label class='flex align-start gap flex-item-grow'><textarea name='account[custom_styles]' id='account_custom_styles' class='input input--code txt--small' placeholder='Add CSS styles…' autocomplete='off' spellcheck='false' autocorrect='off' autocapitalize='off' rows='16'>\n{}</textarea></label><button class='btn btn--reversed center txt-large' type='submit'><img src='/assets/check-7897ff7e.svg' aria-hidden='true' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></form></section>",
             esc(&styles)
         ),
         Some(&u),
@@ -5972,13 +5984,12 @@ async fn custom_styles_update(
         .get("account[custom_styles]")
         .or_else(|| f.get("custom_styles"))
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if css.len() > 64 * 1024 {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-    pool(&s)?
-        .execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css])
-        .map_err(db_err)?;
-    Ok(Redirect::to("/account/custom_styles/edit").into_response())
+    let mut db = pool(&s)?;
+    let tx = db.transaction().map_err(db_err)?;
+    tx.execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css]).map_err(db_err)?;
+    tx.execute("UPDATE accounts SET updated_at=?1 WHERE id=1", [now()]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    Ok(found_redirect(&public_url(&headers, "/account/custom_styles/edit")))
 }
 async fn custom_styles_css(State(s): State<Arc<AppState>>) -> AppResult {
     let css: String = pool(&s)?
@@ -9257,7 +9268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/custom_styles/edit", get(custom_styles_get))
         .route(
             "/account/custom_styles",
-            post(custom_styles_update).put(custom_styles_update),
+            post(custom_styles_update).put(custom_styles_update).patch(custom_styles_update),
         )
         .route("/account/custom_styles.css", get(custom_styles_css))
         .route(
