@@ -145,6 +145,14 @@ body:has(.app-shell)>header { display: none; }
   .composer trix-toolbar { left: 12px; right: 12px; }
   .composer .button { width: 42px; height: 42px; }
 }
+.boosts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; white-space: normal; }
+.boost-item { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 3px 7px 3px 3px; border: 1px solid var(--chat-border); border-radius: 999px; background: var(--chat-bg); color: var(--chat-text); }
+.boost-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.boost-content { line-height: 1.2; }
+.boost-item.mine .boost-content { cursor: pointer; }
+.boost-item.mine .boost-content:focus-visible { outline: 2px solid var(--chat-text); outline-offset: 3px; border-radius: 4px; }
+.boost-delete { border: 0; border-radius: 50%; width: 22px; height: 22px; line-height: 1; background: #a83f31; color: white; padding: 0; }
+.boost-delete[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: none; }
 }

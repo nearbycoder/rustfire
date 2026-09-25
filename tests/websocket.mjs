@@ -69,7 +69,9 @@ try{
   assert.equal(streamBoost.status,303);
   const boostEvents=[await nextFrame(),await nextFrame()];
   const streamBoostId=Number(execFileSync('python',['-c','import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute("select max(id) from boosts").fetchone()[0])',path.join(temp,'test.db')]).toString().trim());
-  assert(boostEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="append" target="boosts_message_${streamClientId}">`)&&frame.message.includes(`id='boost_${streamBoostId}'`)&&frame.message.includes('🔥')));
+  assert(boostEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="append" target="boosts_message_${streamClientId}">`)&&frame.message.includes(`id='boost_${streamBoostId}'`)&&frame.message.includes("alt='Socket boosted 🔥'")&&frame.message.includes(`data-delete-boost='/messages/${streamMessageId}/boosts/${streamBoostId}'`)));
+  const roomWithBoost=await (await fetch(base+'/rooms/1',{headers:{Cookie:cookie}})).text();
+  assert(roomWithBoost.includes(`id='boost_${streamBoostId}'`)&&roomWithBoost.includes("alt='Socket boosted 🔥'")&&roomWithBoost.includes(`data-delete-boost='/messages/${streamMessageId}/boosts/${streamBoostId}'`));
   const streamBoostDelete=await fetch(base+`/messages/${streamMessageId}/boosts/${streamBoostId}`,{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf,Accept:'text/vnd.turbo-stream.html'},redirect:'manual'});
   assert.equal(streamBoostDelete.status,200);
   const boostDeleteEvents=[await nextFrame(),await nextFrame()];

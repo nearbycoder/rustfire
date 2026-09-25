@@ -186,6 +186,7 @@ struct ChatMessage {
 struct BoostSummary {
     id: i64,
     booster_id: i64,
+    booster_name: String,
     content: String,
 }
 #[derive(Clone, Serialize)]
@@ -1947,7 +1948,7 @@ fn message_list(
         })
         .transpose()?;
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
@@ -1962,7 +1963,7 @@ fn message_list(
 fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
     let db = pool(s)?;
     db.query_row(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
         params![rid, mid],
         chat_message_from_row,
     )
@@ -1989,7 +1990,7 @@ fn messages_after_position(
     } else {
         i64::MIN
     };
-    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
+    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
     query
         .query_map(
             params![rid, cursor_time, after, limit],
@@ -2044,7 +2045,7 @@ fn messages_since(
         ("m.created_at_ns>?2", "ASC", "idx_messages_room_created_ns")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
@@ -2056,9 +2057,17 @@ fn messages_since(
     }
     Ok(messages)
 }
-fn boost_html(id: i64, booster_id: i64, content: &str) -> String {
+fn boost_html(
+    id: i64,
+    message_id: i64,
+    booster_id: i64,
+    booster_name: &str,
+    content: &str,
+) -> String {
     format!(
-        "<span class='boost-item' id='boost_{id}' data-booster-id='{booster_id}'>{}</span> ",
+        "<div class='boost boost-item' id='boost_{id}' data-booster-id='{booster_id}'><img class='boost-avatar' src='/users/{booster_id}/avatar' alt='{} boosted {}'><span class='boost-content' role='button' tabindex='0' aria-expanded='false' data-boost-reveal>{}</span><button class='boost-delete' type='button' data-delete-boost='/messages/{message_id}/boosts/{id}' aria-label='Delete this boost' hidden>−</button></div>",
+        esc(booster_name),
+        esc(content),
         esc(content)
     )
 }
@@ -2117,7 +2126,15 @@ fn message_html(m: &ChatMessage) -> String {
     let boosts = m
         .boosts
         .iter()
-        .map(|boost| boost_html(boost.id, boost.booster_id, &boost.content))
+        .map(|boost| {
+            boost_html(
+                boost.id,
+                m.id,
+                boost.booster_id,
+                &boost.booster_name,
+                &boost.content,
+            )
+        })
         .collect::<String>();
     format!(
         "<div id='message_{}' data-stream-message><article class='message' id='message-{}' data-message-id='{}' data-creator-id='{}'><div class='avatar'><img src='/users/{}/avatar' alt='{}'></div><div class='message-main'><div class='message-meta'><strong>{}</strong><a href='/rooms/{}/@{}'><time datetime='{}' data-local-datetime>{}</time></a></div><div class='message-body'>{}</div><div class='boosts' id='boosts_message_{}'>{}</div></div><div class='message-actions'>{actions}</div></article></div>",
@@ -5704,7 +5721,7 @@ async fn boost_create(
     let bid = db.last_insert_rowid();
     touch_message(&db, mid, rid)?;
     drop(db);
-    let boost_html = boost_html(bid, u.id, content);
+    let boost_html = boost_html(bid, mid, u.id, &u.name, content);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
@@ -5861,7 +5878,7 @@ async fn bot_boost_create(
     let id = db.last_insert_rowid();
     touch_message(&db, mid, rid)?;
     drop(db);
-    let boost_html = boost_html(id, bot.id, content);
+    let boost_html = boost_html(id, mid, bot.id, &bot.name, content);
     s.events.send(Event {
         room_id: rid,
         payload: json!({"type":"boost","room_id":rid,"message_id":mid,"client_message_id":client_message_id,"id":id,"content":content,"user_id":bot.id,"boost_html":boost_html})

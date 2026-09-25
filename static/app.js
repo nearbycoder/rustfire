@@ -58,7 +58,10 @@ const chat = document.querySelector('.chat');
 if (chat) {
   const roomId = Number(chat.dataset.roomId);
   const messages = chat.querySelector('.messages');
-  const decorateOwn=()=>messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.creatorId===document.body.dataset.userId));
+  const decorateOwn=()=>{
+    messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.creatorId===document.body.dataset.userId));
+    messages.querySelectorAll('.boost-item').forEach(node=>node.classList.toggle('mine',node.dataset.boosterId===document.body.dataset.userId));
+  };
   const formatMessageGroups=()=>{
     messages.querySelectorAll('.day-separator').forEach(node=>node.remove());
     let previous=null,previousDay=null;
@@ -249,7 +252,7 @@ if (chat) {
           if(scrollToLatest)messages.scrollTop=messages.scrollHeight;
           updateReturnButton();
           for(const node of addedMessages){const sound=node.querySelector('[data-sound]');if(sound)new Audio(sound.dataset.sound).play().catch(()=>{});}
-        }
+        }else decorateOwn();
       }else if(action==='replace'&&target!==messages){
         if(target.closest('.inline-edit'))continue;
         target.replaceWith(fragment);
@@ -319,7 +322,27 @@ if (chat) {
     const res=await fetch(form.action,{method:'POST',body:new FormData(form),headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
     if (res.ok) { bodyInput.value=''; typingInput.editor.loadHTML(''); file.value=''; form.querySelector('[name="message[client_message_id]"]').value=crypto.randomUUID(); if(historyMode)location.href=`/rooms/${roomId}`; } else alert('Could not send message');
   });
+  function revealBoost(node){
+    const boost=node.closest('.boost-item');
+    if(!boost?.classList.contains('mine'))return;
+    const shown=boost.classList.toggle('revealed');
+    boost.querySelector('.boost-delete').hidden=!shown;
+    node.setAttribute('aria-expanded',String(shown));
+  }
+  messages.addEventListener('keydown',event=>{
+    const content=event.target.closest('[data-boost-reveal]');
+    if(content&&(event.key==='Enter'||event.key===' ')){event.preventDefault();revealBoost(content);}
+  });
   messages.addEventListener('click', async e => {
+    const boostDelete=e.target.closest('[data-delete-boost]');
+    if(boostDelete){
+      const response=await fetch(boostDelete.dataset.deleteBoost,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken,Accept:'text/vnd.turbo-stream.html'}});
+      if(response.ok)boostDelete.closest('.boost-item')?.remove();
+      else alert('Could not delete boost');
+      return;
+    }
+    const boostReveal=e.target.closest('[data-boost-reveal]');
+    if(boostReveal){revealBoost(boostReveal);return;}
     const edit=e.target.closest('[data-edit-message]');
     if(edit){
       e.preventDefault();const article=edit.closest('.message');
