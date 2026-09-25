@@ -583,9 +583,11 @@ def main():
                         body, content_type = b"PK\x03\x04webhook archive", "application/zip"
                     elif plain == "send empty":
                         body, content_type = b"", "text/plain"
+                    elif plain == "send error":
+                        body, content_type = b"Upstream bot error", "text/plain"
                     else:
                         body, content_type = b"Bot reply from webhook", "text/plain"
-                    self.send_response(200)
+                    self.send_response(503 if plain == "send error" else 200)
                     self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -693,6 +695,13 @@ def main():
                 time.sleep(.05)
             else:
                 raise AssertionError("bot webhook empty text reply did not create a message")
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3, "send error"),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
+            for _ in range(100):
+                if "attachment.text" in request(admin, base, "/rooms/1")[2]:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("bot webhook non-200 text attachment did not arrive")
             code, direct_bot_url, _ = request(admin, base, "/rooms/directs", {"user_ids":"3"})
             assert code == 200
             direct_bot_room = int(re.search(r"/rooms/(\d+)", direct_bot_url).group(1))

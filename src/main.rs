@@ -4027,9 +4027,7 @@ async fn deliver_webhook(
             return;
         }
     };
-    if reply.status() != reqwest::StatusCode::OK {
-        return;
-    }
+    let text_reply = reply.status() == reqwest::StatusCode::OK;
     let kind = reply
         .headers()
         .get(header::CONTENT_TYPE)
@@ -4060,7 +4058,7 @@ async fn deliver_webhook(
     if bot.id != bot_id {
         return;
     }
-    if kind == "text/plain" || kind == "text/html" {
+    if text_reply && (kind == "text/plain" || kind == "text/html") {
         if let Ok(text) = String::from_utf8(data) {
             let _ = insert_message(&s, &bot, message.room_id, &text, None, None, true, None, true);
         }
@@ -4084,6 +4082,8 @@ async fn deliver_webhook(
 }
 fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
     Some(match kind {
+        "text/plain" => "text",
+        "text/html" => "html",
         "text/javascript" => "js",
         "text/css" => "css",
         "text/calendar" => "ics",
@@ -8594,6 +8594,8 @@ mod tests {
         assert_eq!(super::campfire_webhook_attachment_extension("image/jpeg"), Some("jpeg"));
         assert_eq!(super::campfire_webhook_attachment_extension("application/zip"), Some("zip"));
         assert_eq!(super::campfire_webhook_attachment_extension("audio/mpeg"), Some("mp3"));
+        assert_eq!(super::campfire_webhook_attachment_extension("text/plain"), Some("text"));
+        assert_eq!(super::campfire_webhook_attachment_extension("text/html"), Some("html"));
         assert_eq!(super::campfire_webhook_attachment_extension("application/octet-stream"), None);
     }
 
