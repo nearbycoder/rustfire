@@ -536,6 +536,56 @@ if(accountUsers){
   }
   observeNext();
 }
+const roomBell=document.querySelector('[data-room-notification]');
+if(roomBell){
+  const icon=roomBell.querySelector('img');
+  const dialog=roomBell.nextElementSibling;
+  const browserName=/Edg\//.test(navigator.userAgent)?'Edge':/Firefox\//.test(navigator.userAgent)?'Firefox':/Chrome\//.test(navigator.userAgent)?'Chrome':'Safari';
+  const browserLabel=dialog?.querySelector('[data-browser-settings-label]');
+  if(browserLabel)browserLabel.textContent=`Check your ${browserName} settings`;
+  const showHelp=()=>{if(dialog instanceof HTMLDialogElement&&!dialog.open)dialog.showModal()};
+  const setEnabled=()=>{roomBell.classList.add('notification-enabled');icon.src=`/static/icons/notification-bell-${roomBell.dataset.involvement}.svg`};
+  const hasSubscription=async()=>{
+    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)||Notification.permission!=='granted')return false;
+    const registration=await navigator.serviceWorker.getRegistration();
+    return !!(await registration?.pushManager?.getSubscription());
+  };
+  hasSubscription().then(enabled=>{if(enabled)setEnabled()}).catch(()=>{});
+  const subscribe=async()=>{
+    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))return false;
+    const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
+    if(permission!=='granted')return false;
+    const registration=await navigator.serviceWorker.getRegistration()||await navigator.serviceWorker.register('/service-worker');
+    let subscription=await registration.pushManager.getSubscription();
+    if(!subscription){
+      const key=document.querySelector('meta[name="vapid-public-key"]')?.content||'';
+      const padded=(key+'='.repeat((4-key.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/');
+      subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(atob(padded),char=>char.charCodeAt(0))});
+    }
+    const {endpoint,keys:{p256dh,auth}}=subscription.toJSON();
+    const response=await fetch('/users/me/push_subscriptions',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({push_subscription:{endpoint,p256dh_key:p256dh,auth_key:auth}})});
+    if(!response.ok)throw Error(`Subscription failed (${response.status})`);
+    return true;
+  };
+  roomBell.addEventListener('click',async()=>{
+    roomBell.disabled=true;
+    try{
+      if(!(await hasSubscription())){
+        if(await subscribe())setEnabled();else showHelp();
+        return;
+      }
+      const choices=roomBell.dataset.roomKind==='direct'?['everything','nothing']:['mentions','everything','nothing','invisible'];
+      const next=choices[(choices.indexOf(roomBell.dataset.involvement)+1)%choices.length];
+      const response=await fetch(`/rooms/${roomBell.dataset.roomId}/involvement?involvement=${next}`,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrfToken},body:new URLSearchParams({involvement:next})});
+      if(!response.ok)throw Error(`Could not update notifications (${response.status})`);
+      roomBell.dataset.involvement=next;
+      setEnabled();
+    }catch(error){showHelp()}
+    finally{roomBell.disabled=false}
+  });
+  dialog?.querySelector('[data-close-notifications]')?.addEventListener('click',()=>dialog.close());
+  dialog?.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});
+}
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker').catch(() => {});
 document.addEventListener('change',event=>{
   const control=event.target;

@@ -2945,6 +2945,15 @@ fn room_invitation(
         "<div id='system_welcome' class='message message--formatted txt-align-center center'><div class='message__body center'><div class='message__body-content position-relative'><figure class='account-logo avatar center margin-block-end txt-large'><img alt='Account logo' src='/account/logo?v={logo_version}' width='300' height='300'></figure><div class='flex align-center gap welcome-intro'><div class='system-welcome--translation'>{translate}</div><p><strong>Welcome to Rustfire</strong><br>To invite people to chat, share the join link below.</p></div><div class='flex flex-column align-center gap welcome-invite'><label class='flex flex-column gap full-width' style='--row-gap: 0.5em'><strong id='invite_label' class='invite-label'>Share to invite more people</strong><span class='flex align-center gap input input--actor fill-white'><img aria-hidden='true' class='colorize--black' src='/assets/person-add-1432b76b.svg' width='20' height='20'><input type='text' class='input' id='invite_url' value='{invite}' aria-labelledby='invite_label' readonly></span></label><div class='flex align-center gap welcome-actions'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{qr}' href='{qr}'><span class='for-screen-reader'>Show join link QR code</span><img aria-hidden='true' class='colorize--black' src='/assets/qr-code-dac3b273.svg' width='20' height='20'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{invite}'><span class='for-screen-reader'>Copy join link</span><img aria-hidden='true' class='colorize--black' src='/assets/copy-paste-4c379063.svg' width='20' height='20'></button><button class='btn' hidden data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{invite}' data-web-share-text-value='Hit this link to join me in Rustfire and start chatting.' data-web-share-title-value='Link to join Rustfire'><span class='for-screen-reader'>Share join link</span><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'></button>{regenerate}</div></div></div></div></div>"
     )
 }
+fn room_notifications_html(rid: i64, kind: &str, involvement: &str) -> String {
+    let direct = kind == "Rooms::Direct";
+    format!(
+        "<button class='icon-btn room-notification-button' type='button' data-room-notification data-room-id='{rid}' data-room-kind='{}' data-involvement='{}' aria-label='Notification settings for this {}'><img src='/static/icons/notification-bell-alert.svg' alt=''></button><dialog class='room-notifications-dialog'><button type='button' class='room-notifications-close' data-close-notifications aria-label='Close'><img src='/static/icons/remove.svg' alt=''></button><div class='room-notifications-emblem'><img src='/static/icons/notification-bell-alert.svg' alt=''></div><h2>Notifications aren’t allowed</h2><details><summary><img src='/static/icons/web.svg' alt=''><strong data-browser-settings-label>Check your browser settings</strong><img src='/static/icons/disclosure.svg' alt=''></summary><p>Allow notifications for this website in your browser settings, then reload Rustfire.</p></details><details><summary><img src='/static/assets/external/install-f762b3be.svg' alt=''><strong>Install Rustfire as a web app.</strong><img src='/static/icons/disclosure.svg' alt=''></summary><p>Install Rustfire from your browser’s menu to receive notifications when the app is closed.</p></details></dialog>",
+        if direct { "direct" } else { "shared" },
+        esc(involvement),
+        if direct { "Ping" } else { "room" },
+    )
+}
 async fn room_show_with_target(
     s: Arc<AppState>,
     headers: HeaderMap,
@@ -2959,6 +2968,13 @@ async fn room_show_with_target(
     };
     let refresh_since = Utc::now().timestamp_millis();
     let db = pool(&s)?;
+    let involvement: String = db
+        .query_row(
+            "SELECT involvement FROM memberships WHERE room_id=?1 AND user_id=?2",
+            params![rid, u.id],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
     db.execute(
         "UPDATE memberships SET unread_at=NULL WHERE room_id=?1 AND user_id=?2",
         params![rid, u.id],
@@ -3019,12 +3035,12 @@ async fn room_show_with_target(
     };
     let at_message = target.map(|id| id.to_string()).unwrap_or_default();
     let messages_target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
+    let notifications = room_notifications_html(rid, &room.kind, &involvement);
     let mut content = format!(
-        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/assets/menu-dots-horizontal-f6a5d793.svg' alt=''></a><a class='icon-btn' href='/rooms/{}/involvement' aria-label='Notifications'><img src='/static/icons/notification-bell-mentions.svg' alt=''></a><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
+        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/assets/menu-dots-horizontal-f6a5d793.svg' alt=''></a>{notifications}<button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
         sidebar(&s, &u, Some(rid))?,
         rid,
         esc(&room.name),
-        rid,
         rid,
         messages_target
     );
