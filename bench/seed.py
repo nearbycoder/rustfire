@@ -4,6 +4,7 @@ Create the first account in each app before running this script. Stop the server
 while seeding. The database must have no messages unless --replace is provided.
 """
 import argparse
+from datetime import datetime, timezone
 import pathlib
 import sqlite3
 
@@ -31,6 +32,7 @@ def main():
         parser.error(f"database already has {existing} messages; use a fresh database or --replace")
 
     timestamp = "2026-09-24 20:05:00.000000"
+    timestamp_ns = int(datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc).timestamp()) * 1_000_000_000
     with db:
         if args.replace:
             if args.app == "campfire":
@@ -48,8 +50,8 @@ def main():
             )
         else:
             db.executemany(
-                "INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                ((i, 1, 1, f"benchmark message {i}", f"fixture-{i}", timestamp, timestamp)
+                "INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,created_at_ns,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                ((i, 1, 1, f"benchmark message {i}", f"fixture-{i}", timestamp, timestamp_ns, timestamp)
                  for i in range(1, args.count + 1)),
             )
     print(f"Seeded {db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]} {args.app} messages in room 1")

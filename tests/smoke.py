@@ -4,6 +4,7 @@ import http.server
 import html
 import base64
 import concurrent.futures
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
@@ -699,6 +700,19 @@ def main():
             assert code == 200 and json.loads(suggestions)[0]["sgid"] == admin_mention_sgid
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT member_ids FROM direct_room_sets WHERE room_id=?", (retained_direct,)).fetchone() == ("1,2",)
+                created_at = "2027-01-01T00:00:00.123456Z"
+                created_at_ns = int(datetime(2027, 1, 1, tzinfo=timezone.utc).timestamp()) * 1_000_000_000 + 123456000
+                first_tied_id = check_db.execute("SELECT COALESCE(MAX(id),0)+1 FROM messages").fetchone()[0]
+                check_db.executemany(
+                    "INSERT INTO messages(room_id,creator_id,body,client_message_id,created_at,created_at_ns,updated_at) VALUES(1,1,?1,?2,?3,?4,?3)",
+                    ((f"tied {index}", f"tied-{index}", created_at, created_at_ns) for index in range(102)),
+                )
+            code, _, payload = request(admin, base, f"/rooms/1/refresh?after={first_tied_id}", headers={"Accept":"application/json"})
+            first_page = json.loads(payload)
+            assert code == 200 and len(first_page["messages"]) == 100 and first_page["has_more"], (code, first_page)
+            code, _, payload = request(admin, base, f"/rooms/1/refresh?after={first_page['next_after']}", headers={"Accept":"application/json"})
+            last_page = json.loads(payload)
+            assert code == 200 and len(last_page["messages"]) == 1 and not last_page["has_more"], (code, last_page)
             print("PASS setup, messages, attachments, boosts, search, private rooms, pings, account administration, bots, transfer, bans, direct-room index migration")
         finally:
             if webhook_server:

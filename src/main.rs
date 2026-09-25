@@ -190,6 +190,16 @@ struct Attachment {
 fn now() -> String {
     Utc::now().to_rfc3339()
 }
+fn message_timestamp_ns(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|date| date.timestamp_nanos_opt())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                .map(|date| date.and_utc().timestamp_nanos_opt())
+        })
+        .ok()
+        .flatten()
+}
 fn touch_room(db: &rusqlite::Connection, rid: i64) -> Result<(), StatusCode> {
     db.execute(
         "UPDATE rooms SET updated_at=?1 WHERE id=?2",
@@ -1860,22 +1870,80 @@ fn message_list(
 ) -> Result<Vec<ChatMessage>, StatusCode> {
     let db = pool(s)?;
     let (predicate, order, cursor) = if let Some(id) = after {
-        ("m.id>?2", "ASC", Some(id))
+        if id > 0 {
+            ("m.created_at_ns>?2", "ASC", Some(id))
+        } else {
+            ("1=1", "ASC", None)
+        }
+    } else if let Some(id) = before {
+        ("m.created_at_ns<?2", "DESC", Some(id))
     } else {
-        ("(?2 IS NULL OR m.id<?2)", "DESC", before)
+        ("1=1", "DESC", None)
     };
+    let cursor_time = cursor
+        .map(|id| {
+            db.query_row(
+                "SELECT created_at_ns FROM messages WHERE room_id=?1 AND id=?2",
+                params![rid, id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .ok_or(StatusCode::NOT_FOUND)
+        })
+        .transpose()?;
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
-        .query_map(params![rid, cursor, limit], chat_message_from_row)
+        .query_map(params![rid, cursor_time, limit], chat_message_from_row)
         .map_err(db_err)?;
     let mut v = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
     if after.is_none() {
         v.reverse()
     }
     Ok(v)
+}
+fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
+    let db = pool(s)?;
+    db.query_row(
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
+        params![rid, mid],
+        chat_message_from_row,
+    )
+    .optional()
+    .map_err(db_err)?
+    .ok_or(StatusCode::NOT_FOUND)
+}
+fn messages_after_position(
+    s: &AppState,
+    rid: i64,
+    after: i64,
+    limit: i64,
+) -> Result<Vec<ChatMessage>, StatusCode> {
+    let db = pool(s)?;
+    let cursor_time = if after > 0 {
+        db.query_row(
+            "SELECT created_at_ns FROM messages WHERE room_id=?1 AND id=?2",
+            params![rid, after],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(db_err)?
+        .ok_or(StatusCode::NOT_FOUND)?
+    } else {
+        i64::MIN
+    };
+    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
+    query
+        .query_map(
+            params![rid, cursor_time, after, limit],
+            chat_message_from_row,
+        )
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)
 }
 fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     Ok(ChatMessage {
@@ -2118,13 +2186,8 @@ async fn room_show_with_target(
     drop(db);
     let messages = if let Some(mid) = target {
         let mut around = message_list(&s, rid, 40, Some(mid), None)?;
-        around.extend(message_list(
-            &s,
-            rid,
-            41,
-            None,
-            Some(mid.saturating_sub(1)),
-        )?);
+        around.push(message_by_id(&s, rid, mid)?);
+        around.extend(message_list(&s, rid, 40, None, Some(mid))?);
         around
     } else {
         message_list(&s, rid, 40, None, None)?
@@ -2133,7 +2196,7 @@ async fn room_show_with_target(
         let last_loaded = messages.last().map(|message| message.id).unwrap_or(0);
         pool(&s)?
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id>?2)",
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND created_at_ns>(SELECT created_at_ns FROM messages WHERE id=?2 AND room_id=?1))",
                 params![rid, last_loaded],
                 |row| row.get(0),
             )
@@ -2216,15 +2279,10 @@ async fn room_refresh(
         return Ok(([(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")], html).into_response());
     }
     let after = q.after.unwrap_or(0).max(0);
-    let messages = message_list(&s, rid, 100, None, Some(after))?;
+    let mut messages = messages_after_position(&s, rid, after, 101)?;
+    let has_more = messages.len() > 100;
+    messages.truncate(100);
     let next_after = messages.last().map(|m| m.id).unwrap_or(after);
-    let has_more: bool = pool(&s)?
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id>?2)",
-            params![rid, next_after],
-            |r| r.get(0),
-        )
-        .map_err(db_err)?;
     if accept.contains("json") {
         let entries: Vec<Value> = messages
             .iter()
@@ -2626,9 +2684,13 @@ fn insert_message(
     {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     };
-    let t = now();
+    let created = Utc::now();
+    let t = created.to_rfc3339();
+    let created_at_ns = created
+        .timestamp_nanos_opt()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?7)",params![rid,u.id,plain,body_html,if rich {Some(body)} else {None},cid,t]).map_err(db_err)?;
+    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7)",params![rid,u.id,plain,body_html,if rich {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     touch_room(&db, rid)?;
     let mut valid_mentions = Vec::new();
@@ -3101,8 +3163,7 @@ async fn message_show(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     room_for(&s, u.id, rid)?;
-    let db = pool(&s)?;
-    let m=db.query_row("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",params![rid,mid],chat_message_from_row).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
+    let m = message_by_id(&s, rid, mid)?;
     Ok(if headers.get("x-rustfire-fragment").is_some() {
         Html(message_html(&m)).into_response()
     } else if headers
@@ -5067,7 +5128,7 @@ async fn bot_messages_get(
         let exists: bool = db
             .query_row(
                 &format!(
-                    "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id{comparison}?2)"
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND created_at_ns{comparison}(SELECT created_at_ns FROM messages WHERE room_id=?1 AND id=?2))"
                 ),
                 params![rid, cursor],
                 |r| r.get(0),
@@ -5186,10 +5247,7 @@ async fn bot_message_update(
         room_id: rid,
         payload: json!({"type":"message_updated","room_id":rid,"id":mid,"body":body}).to_string(),
     });
-    let m = message_list(&s, rid, 1, Some(mid + 1), None)?
-        .into_iter()
-        .find(|m| m.id == mid)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let m = message_by_id(&s, rid, mid)?;
     Ok(Json(message_json(&s, &m, Some(&headers))?).into_response())
 }
 async fn bot_message_delete(
@@ -5834,7 +5892,7 @@ async fn service_worker() -> Response {
     r
 }
 fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = db.get()?;
+    let mut conn = db.get()?;
     let fts_exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_search_index')",[],|r|r.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -5860,7 +5918,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS direct_room_sets_membership_delete AFTER DELETE ON memberships BEGIN
             UPDATE direct_room_sets SET member_ids=COALESCE((SELECT group_concat(user_id,',') FROM (SELECT user_id FROM memberships WHERE room_id=old.room_id ORDER BY user_id)),'') WHERE room_id=old.room_id;
         END;
-        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
@@ -5924,6 +5982,37 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     if !has_body_source {
         conn.execute("ALTER TABLE messages ADD COLUMN body_source TEXT", [])?;
     }
+    let has_created_at_ns: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='created_at_ns')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_created_at_ns {
+        conn.execute("ALTER TABLE messages ADD COLUMN created_at_ns INTEGER", [])?;
+    }
+    let missing_timestamps = {
+        let mut query =
+            conn.prepare("SELECT id,created_at FROM messages WHERE created_at_ns IS NULL")?;
+        query
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if !missing_timestamps.is_empty() {
+        let transaction = conn.transaction()?;
+        {
+            let mut update =
+                transaction.prepare("UPDATE messages SET created_at_ns=?1 WHERE id=?2")?;
+            for (id, created_at) in missing_timestamps {
+                let nanos = message_timestamp_ns(&created_at)
+                    .ok_or("message timestamp outside supported range")?;
+                update.execute(params![nanos, id])?;
+            }
+        }
+        transaction.commit()?;
+    }
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_created_ns ON messages(room_id,created_at_ns,id)", [])?;
     if !fts_exists {
         conn.execute(
             "INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages",
@@ -6214,6 +6303,19 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn message_time_migration_preserves_rails_microseconds() {
+        let expected = 1_767_225_600_123_456_000;
+        assert_eq!(
+            super::message_timestamp_ns("2026-01-01T00:00:00.123456Z"),
+            Some(expected)
+        );
+        assert_eq!(
+            super::message_timestamp_ns("2026-01-01 00:00:00.123456"),
+            Some(expected)
+        );
+    }
     use web_push::{
         ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder,
         request_builder,

@@ -132,24 +132,26 @@ Both rates fell at 32 clients under this configuration. These are three-second e
 
 ## Paired bot message-list JSON trial
 
-`bench/paired_bot_messages.py` seeded disposable, matched fixtures with one room, one bot, and messages alternating between plain text and a simple rich-text `<div>`. Both servers used the same signing secret. The probe fetched the latest 40 messages from the bot JSON API and confirmed that every parsed field matched after removing the different URL origins, including ActionText-wrapped HTML, creator details, signed avatar URL paths, and timestamps. Campfire used Redis caching in production; Rustfire used SQLite WAL. Two warmup requests preceded each set of 30 sequential requests. The servers and Python load generator shared a host and ran serially.
+`bench/paired_bot_messages.py` seeded disposable, matched fixtures with one room, one bot, and messages alternating between plain text and a simple rich-text `<div>`. Both servers used the same signing secret. The probe fetched the latest 40 messages from the bot JSON API and confirmed that every parsed field matched after removing the different URL origins, including ActionText-wrapped HTML, creator details, signed avatar URL paths, and timestamps. Campfire used a running Redis server for production caching; the fixture now uses a unique update timestamp per run so fragments from older trials cannot be reused. Rustfire used SQLite WAL. Two warmup requests preceded each set of 30 sequential requests. The servers and Python load generator shared a host and ran serially.
 
 | Stored messages | Campfire workers | Rustfire median / p95 | Campfire median / p95 | Rustfire / Campfire JSON bytes |
 |---:|---:|---:|---:|---:|
-| 1,000 | 1 | 0.547 / 0.752 ms | 91.513 / 153.954 ms | 19,025 / 20,225 |
-| 10,000 | 1 | 0.566 / 0.773 ms | 94.455 / 151.363 ms | 19,185 / 20,385 |
-| 10,000 | 22 | 0.428 / 0.684 ms | 132.446 / 154.841 ms | 19,185 / 20,385 |
+| 1,000 | 1 | 0.476 / 0.666 ms | 9.754 / 22.518 ms | 19,025 / 20,225 |
+| 10,000 | 1 | 0.448 / 0.496 ms | 9.816 / 24.739 ms | 19,185 / 20,385 |
+| 10,000 | 22 | 0.509 / 1.217 ms | 10.053 / 22.256 ms | 19,185 / 20,385 |
 
-The 22-worker, 10,000-message run was repeated; the first run measured 0.486 / 1.055 ms for Rustfire and 89.133 / 152.013 ms for Campfire. Both runs confirmed equal parsed content. The 1,200-byte response-size difference comes primarily from Campfire's JSON escaping of HTML characters. These trials show a faster **bot message-list read endpoint** on this fixture, not full-app parity or an overall speed ratio.
+The 22-worker, 10,000-message sequential run was repeated on two earlier builds: 0.463 / 0.705 ms and 0.645 / 1.238 ms for Rustfire; 12.091 / 26.891 ms and 10.914 / 22.518 ms for Campfire. All runs confirmed equal parsed content. The 1,200-byte response-size difference comes primarily from Campfire's JSON escaping of HTML characters. These measurements supersede earlier Campfire figures near 90–130 ms: the previous fixture reused fixed cache versions across trials, and the corrected trial verified a live Redis baseline. These trials show a faster **bot message-list read endpoint** on this fixture, not full-app parity or an overall speed ratio.
 
-The repeated 22-worker run also used three-second concurrent sweeps. Each client kept one HTTP connection and checked every response against its warmup body. No measured request failed.
+The final 22-worker run also used three-second concurrent sweeps. Each client kept one HTTP connection and checked every response against its warmup body. No measured request failed.
 
 | Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
 |---:|---:|---:|---:|---:|
-| 1 | 1,987.6 | 7.5 | 0.742 ms | 180.450 ms |
-| 8 | 10,688.6 | 38.9 | 1.072 ms | 386.656 ms |
-| 32 | 8,100.6 | 67.8 | 5.762 ms | 728.279 ms |
+| 1 | 2,096.1 | 157.2 | 0.634 ms | 8.841 ms |
+| 8 | 10,473.7 | 927.7 | 1.109 ms | 13.481 ms |
+| 32 | 9,482.0 | 1,273.5 | 6.196 ms | 66.171 ms |
 
-The short 32-client Campfire trial completed 231 responses, so tail latency and throughput are sensitive to scheduling and requests finishing after the three-second start window. The earlier 22-worker run measured 73.7 requests/s at 32 clients. Attachment rendering, writes, ActionCable broadcasts, push delivery, webhooks, and sustained operation remain outside this probe. Maximum user or socket scale has not been established for the feature-complete app.
+The short 32-client Campfire trial completed 3,846 responses, so tail latency and throughput remain sensitive to scheduling and requests finishing after the three-second start window. Attachment rendering, writes, ActionCable broadcasts, push delivery, webhooks, and sustained operation remain outside this probe. Maximum user or socket scale has not been established for the feature-complete app.
 
-An additional `--messages 40 --iterations 5 --include-attachments` run replaced four messages with file-only text attachments. Parsed JSON matched for all 40 messages, including the attachment filename as plain text and an empty HTML body. It measured 0.559 / 0.598 ms median / p95 for Rustfire and 144.425 / 159.818 ms for Campfire. The fixture supplies attachment metadata but no file bytes, so this is only a message-list read parity check, not an attachment delivery or scale result.
+An additional `--messages 1000 --iterations 5 --include-attachments` run replaced every tenth message with a file-only text attachment. Parsed JSON matched for the latest 40 messages, including attachment filenames as plain text and empty HTML bodies. It measured 0.647 / 0.791 ms median / p95 for Rustfire and 8.368 / 20.694 ms for Campfire. The fixture supplies attachment metadata but no file bytes, so this is only a message-list read parity check, not an attachment delivery or scale result.
+
+With `--messages 41 --iterations 5 --scramble-timestamps`, message 1 was moved to the newest timestamp and message 41 to the oldest. The latest 40 and both `before` and `after` pages matched Campfire's parsed JSON. The final release build measured 0.486 / 0.884 ms for Rustfire and 10.934 / 16.690 ms for Campfire. Rustfire now indexes a nanosecond creation-time key and migrates older message rows once at startup; this case checks ordering independently of message IDs.

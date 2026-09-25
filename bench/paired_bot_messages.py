@@ -27,8 +27,9 @@ PATH = f"/rooms/1/{BOT_KEY}/messages"
 STAMP = "2026-01-01T00:00:00Z"
 
 
-def seed_messages(rust_database, camp_database, count, include_attachments):
-    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+def seed_messages(rust_database, camp_database, count, include_attachments, scramble_timestamps=False):
+    moment = datetime(2026, 1, 1, 0, 0, 0, 123456, tzinfo=timezone.utc)
+    cache_stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     rust_rows = []
     camp_rows = []
     rich_rows = []
@@ -36,38 +37,43 @@ def seed_messages(rust_database, camp_database, count, include_attachments):
     camp_blobs = []
     camp_attachments = []
     for number in range(1, count + 1):
-        created = (moment + timedelta(seconds=number)).isoformat().replace("+00:00", "Z")
+        instant = moment + timedelta(seconds=number)
+        created = instant.isoformat().replace("+00:00", "Z")
+        camp_created = instant.strftime("%Y-%m-%d %H:%M:%S.%f")
         content = f"message {number}"
         attached = include_attachments and number % 10 == 0
         markup = f"<div>{content}</div>" if number % 2 == 0 and not attached else None
-        rust_rows.append((number, "" if attached else content, markup, f"fixture-{number}", created))
-        camp_rows.append((number, f"fixture-{number}", created))
+        rust_rows.append((number, "" if attached else content, markup, f"fixture-{number}", created, int(instant.timestamp()) * 1_000_000_000 + instant.microsecond * 1000))
+        camp_rows.append((number, f"fixture-{number}", camp_created, cache_stamp))
         if attached:
             filename = f"sample-{number}.txt"
             rust_attachments.append((number, filename, f"fixture-file-{number}", created))
-            camp_blobs.append((number, f"fixture-key-{number}", filename, created))
-            camp_attachments.append((number, created))
+            camp_blobs.append((number, f"fixture-key-{number}", filename, camp_created))
+            camp_attachments.append((number, camp_created))
         else:
-            rich_rows.append((number, markup or content, created))
+            rich_rows.append((number, markup or content, camp_created))
 
     with sqlite3.connect(rust_database) as db:
-        db.execute("UPDATE users SET name='Test Admin',updated_at=? WHERE id=1", [STAMP])
-        db.execute("UPDATE users SET role=2,bot_token=?,updated_at=? WHERE id=3", [BOT_KEY, STAMP])
+        db.execute("UPDATE users SET name='Test Admin',updated_at=? WHERE id=1", [cache_stamp])
+        db.execute("UPDATE users SET role=2,bot_token=?,updated_at=? WHERE id=3", [BOT_KEY, cache_stamp])
         db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,3,'mentions',?)", [STAMP])
         db.executemany(
-            "INSERT INTO messages(id,room_id,creator_id,body,body_html,client_message_id,created_at,updated_at) VALUES(?1,1,1,?2,?3,?4,?5,?5)",
+            "INSERT INTO messages(id,room_id,creator_id,body,body_html,client_message_id,created_at,created_at_ns,updated_at) VALUES(?1,1,1,?2,?3,?4,?5,?6,?5)",
             rust_rows,
         )
         db.executemany(
             "INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at) VALUES(?1,?2,'text/plain',?3,?4)",
             rust_attachments,
         )
+        if scramble_timestamps:
+            db.execute("UPDATE messages SET created_at='2026-01-02T00:00:00.123456Z',created_at_ns=? WHERE id=1", [int(datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()) * 1_000_000_000 + 123456000])
+            db.execute("UPDATE messages SET created_at='2025-12-31T00:00:00.123456Z',created_at_ns=? WHERE id=?", [int(datetime(2025, 12, 31, tzinfo=timezone.utc).timestamp()) * 1_000_000_000 + 123456000, count])
     with sqlite3.connect(camp_database) as db:
-        db.execute("UPDATE users SET updated_at=? WHERE id=1", [STAMP])
-        db.execute("UPDATE users SET role=2,bot_token='abcdefgh1234',updated_at=? WHERE id=3", [STAMP])
+        db.execute("UPDATE users SET updated_at=? WHERE id=1", [cache_stamp])
+        db.execute("UPDATE users SET role=2,bot_token='abcdefgh1234',updated_at=? WHERE id=3", [cache_stamp])
         db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(1,3,'mentions',?,?)", [STAMP, STAMP])
         db.executemany(
-            "INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?1,1,1,?2,?3,?3)",
+            "INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?1,1,1,?2,?3,?4)",
             camp_rows,
         )
         db.executemany(
@@ -82,6 +88,9 @@ def seed_messages(rust_database, camp_database, count, include_attachments):
             "INSERT INTO active_storage_attachments(name,record_type,record_id,blob_id,created_at) VALUES('attachment','Message',?1,?1,?2)",
             camp_attachments,
         )
+        if scramble_timestamps:
+            db.execute("UPDATE messages SET created_at='2026-01-02 00:00:00.123456' WHERE id=1")
+            db.execute("UPDATE messages SET created_at='2025-12-31 00:00:00.123456' WHERE id=?", [count])
 
 
 def request(connection):
@@ -170,6 +179,19 @@ def normalized(payload):
     return messages
 
 
+def page(port, query):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.request("GET", PATH + query, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        body = response.read()
+        if response.status != 200:
+            raise AssertionError((response.status, body[:300]))
+        return body
+    finally:
+        connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--messages", type=int, default=10000)
@@ -178,12 +200,15 @@ def main():
     parser.add_argument("--seconds", type=float, default=3.0)
     parser.add_argument("--campfire-workers", type=int, default=1)
     parser.add_argument("--include-attachments", action="store_true")
+    parser.add_argument("--scramble-timestamps", action="store_true")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
     args = parser.parse_args()
     if args.messages < 40 or args.iterations < 1 or any(client < 1 for client in args.clients) or args.seconds <= 0 or args.campfire_workers < 1:
         parser.error("messages must be at least 40; iterations, clients, seconds, and workers must be positive")
+    if args.scramble_timestamps and args.messages < 41:
+        parser.error("scrambled timestamp pagination needs at least 41 messages")
     repo = args.campfire_repo.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     if revision != "91d294f4a09f9bbe37f9548959bfcb43645678fb":
@@ -201,12 +226,15 @@ def main():
         seed_rustfire(rust_database, rust_port, [])
         camp_env = seed_campfire(repo, ruby, bundle_path, source_database, camp_database, [], camp_port, temp)
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers)
-        seed_messages(rust_database, camp_database, args.messages, args.include_attachments)
-        expected_ids = list(range(args.messages - 39, args.messages + 1))
+        seed_messages(rust_database, camp_database, args.messages, args.include_attachments, args.scramble_timestamps)
+        expected_ids = (list(range(args.messages - 39, args.messages)) + [1]
+                        if args.scramble_timestamps else list(range(args.messages - 39, args.messages + 1)))
 
         rust_process = start_server(rust_database, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
         try:
             rust_median, rust_p95, rust_body = measure(rust_port, args.iterations, expected_ids)
+            rust_pages = ([page(rust_port, f"?before={expected_ids[0]}"), page(rust_port, f"?after={expected_ids[0]}")]
+                          if args.scramble_timestamps else [])
             rust_concurrent = {clients: measure_concurrent(rust_port, clients, args.seconds, rust_body) for clients in args.clients}
         finally:
             stop_server(rust_process)
@@ -221,6 +249,8 @@ def main():
             if args.campfire_workers > 1:
                 time.sleep(5)
             camp_median, camp_p95, camp_body = measure(camp_port, args.iterations, expected_ids)
+            camp_pages = ([page(camp_port, f"?before={expected_ids[0]}"), page(camp_port, f"?after={expected_ids[0]}")]
+                          if args.scramble_timestamps else [])
             camp_concurrent = {clients: measure_concurrent(camp_port, clients, args.seconds, camp_body) for clients in args.clients}
         except Exception:
             log.flush()
@@ -237,7 +267,10 @@ def main():
                 if rust_message != camp_message:
                     raise AssertionError(("Message JSON differs", rust_message, camp_message))
             raise AssertionError("Message-list length differs")
-        print(f"messages={args.messages} returned=40 iterations={args.iterations} campfire_workers={args.campfire_workers} attachments={args.include_attachments} normalized_json_equal=true")
+        for direction, rust_page, camp_page in zip(("before", "after"), rust_pages, camp_pages):
+            if normalized(rust_page) != normalized(camp_page):
+                raise AssertionError((f"{direction} page differs", [item["id"] for item in normalized(rust_page)], [item["id"] for item in normalized(camp_page)]))
+        print(f"messages={args.messages} returned=40 iterations={args.iterations} campfire_workers={args.campfire_workers} attachments={args.include_attachments} scrambled={args.scramble_timestamps} normalized_json_equal=true")
         print(f"rustfire_median_ms={rust_median:.3f} rustfire_p95_ms={rust_p95:.3f} body_bytes={len(rust_body)}")
         print(f"campfire_median_ms={camp_median:.3f} campfire_p95_ms={camp_p95:.3f} body_bytes={len(camp_body)}")
         for clients in args.clients:
