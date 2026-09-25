@@ -68,12 +68,16 @@ def editor_summary(page):
     }
 
 
-def saved_styles(database, campfire):
+def saved_styles(database):
     with sqlite3.connect(database) as db:
-        if campfire:
-            return db.execute("SELECT custom_styles,updated_at FROM accounts LIMIT 1").fetchone()
-        return (db.execute("SELECT css FROM account_custom_styles WHERE id=1").fetchone()[0],
-                db.execute("SELECT updated_at FROM accounts WHERE id=1").fetchone()[0])
+        return db.execute("SELECT custom_styles,updated_at FROM accounts LIMIT 1").fetchone()
+
+
+def assert_inline_style(page, css):
+    page = page.decode()
+    styles = re.findall(r'<style\b[^>]*data-turbo-track=[\'"]reload[\'"][^>]*>(.*?)</style>', page, re.S)
+    assert css in styles, "Saved CSS missing from inline style tag"
+    assert "/account/custom_styles.css" not in page, "Unexpected separate custom CSS link"
 
 
 def workflow(port, cookie, csrf, database, campfire):
@@ -90,28 +94,30 @@ def workflow(port, cookie, csrf, database, campfire):
     assert all(initial[key] in ("off", "false") for key in ("autocomplete", "spellcheck", "autocorrect", "autocapitalize"))
     assert initial["heading"] and initial["warning"] and initial["save"] and initial["back"] == "/account/edit"
     assert initial["translations"] == 7
-    before = saved_styles(database, campfire)
+    before = saved_styles(database)
     results = []
     for method, css in (("PATCH", FIRST), ("PUT", SECOND)):
         body = urllib.parse.urlencode({"account[custom_styles]": css}).encode()
         status, location, response = request(port, method, UPDATE, cookie, csrf, body, "application/x-www-form-urlencoded")
         assert status == 302, ("update", method, status, response[:200])
         assert urllib.parse.urlsplit(location).path == EDIT
-        saved = saved_styles(database, campfire)
+        saved = saved_styles(database)
         assert saved[0] == css
+        if not campfire:
+            with sqlite3.connect(database) as db:
+                assert db.execute("SELECT css FROM account_custom_styles WHERE id=1").fetchone() == (css,)
         results.append((method, status, urllib.parse.urlsplit(location).path))
-    assert saved_styles(database, campfire)[1] != before[1], "Account update timestamp was not touched"
+    assert saved_styles(database)[1] != before[1], "Account update timestamp was not touched"
     status, _, page = request(port, "GET", EDIT, cookie, csrf)
     assert status == 200
     final = editor_summary(page)
     final.pop("icon")
     assert final["value"].lstrip("\n") == SECOND
-    if campfire:
-        assert SECOND in page.decode().split("<style", 1)[1]
-    else:
-        assert b"/account/custom_styles.css" in page
-        status, _, css = request(port, "GET", "/account/custom_styles.css", cookie, csrf)
-        assert (status, css.decode()) == (200, SECOND)
+    assert_inline_style(page, SECOND)
+    anonymous_status, _, anonymous_page = request(port, "GET", "/session/new", "", "")
+    assert anonymous_status == 200, ("anonymous sign in", anonymous_status)
+    assert_inline_style(anonymous_page, SECOND)
+    assert request(port, "GET", "/account/custom_styles.css", "", "")[0] == 404
     with sqlite3.connect(database) as db:
         db.execute("UPDATE users SET role=0 WHERE id=1")
     assert request(port, "GET", EDIT, cookie, csrf)[0] == 403
@@ -119,7 +125,7 @@ def workflow(port, cookie, csrf, database, campfire):
                      urllib.parse.urlencode({"account[custom_styles]": "denied"}).encode(),
                      "application/x-www-form-urlencoded")
     assert denied[0] == 403
-    assert saved_styles(database, campfire)[0] == SECOND
+    assert saved_styles(database)[0] == SECOND
     return initial, final, results, icon
 
 
@@ -156,7 +162,7 @@ def main():
             stop_server(camp)
             log.close()
         assert rust_result == camp_result, (rust_result[:3], camp_result[:3])
-        print("PASS custom CSS form, translated warning, icon bytes, PATCH/PUT persistence, account touch, and member authorization")
+        print("PASS custom CSS form, translated warning, icon bytes, PATCH/PUT persistence, inline styles on authenticated and sign-in pages, account touch, and member authorization")
 
 
 if __name__ == "__main__":

@@ -115,6 +115,7 @@ def import_data(source, target, source_files, uploads):
     account = accounts[0]
     settings = json.loads(account[5] or "{}")
     target.execute("INSERT INTO accounts(id,name,join_code,created_at,updated_at) VALUES(?,?,?,?,?)", account[:5])
+    target.execute("UPDATE accounts SET custom_styles=? WHERE id=1", (account[6],))
     target.execute("UPDATE account_settings SET restrict_room_creation=? WHERE id=1", (int(bool(settings.get("restrict_room_creation_to_administrators", False))),))
     target.execute("UPDATE account_custom_styles SET css=? WHERE id=1", (account[6] or "",))
 

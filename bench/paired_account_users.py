@@ -115,7 +115,7 @@ def measure_settings_page(port, cookie, clients, seconds):
 
     def worker():
         connection = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
-        samples, errors, sizes = [], 0, set()
+        samples, errors, sizes, failures = [], 0, set(), []
         try:
             for _ in range(2):
                 connection.request('GET', '/account/edit', headers={'Cookie': cookie})
@@ -136,13 +136,17 @@ def measure_settings_page(port, cookie, clients, seconds):
                         sizes.add(len(body))
                     else:
                         errors += 1
-                except (OSError, ValueError):
+                        if len(failures) < 3:
+                            failures.append((response.status, len(body), body[:120]))
+                except (OSError, ValueError) as error:
                     errors += 1
+                    if len(failures) < 3:
+                        failures.append(repr(error))
                     connection.close()
                     connection = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
         finally:
             connection.close()
-        return samples, errors, sizes, time.perf_counter()
+        return samples, errors, sizes, time.perf_counter(), failures
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as executor:
         futures = [executor.submit(worker) for _ in range(clients)]
@@ -151,11 +155,12 @@ def measure_settings_page(port, cookie, clients, seconds):
         clock['deadline'] = clock['begun'] + seconds
         start.set()
         workers = [future.result() for future in futures]
-    samples = [sample for worker_samples, _, _, _ in workers for sample in worker_samples]
-    errors = sum(worker_errors for _, worker_errors, _, _ in workers)
-    sizes = set().union(*(worker_sizes for _, _, worker_sizes, _ in workers))
-    elapsed = max(ended for _, _, _, ended in workers) - clock['begun']
-    assert samples and errors == 0, (len(samples), errors)
+    samples = [sample for worker_samples, _, _, _, _ in workers for sample in worker_samples]
+    errors = sum(worker_errors for _, worker_errors, _, _, _ in workers)
+    sizes = set().union(*(worker_sizes for _, _, worker_sizes, _, _ in workers))
+    elapsed = max(ended for _, _, _, ended, _ in workers) - clock['begun']
+    failures = [failure for _, _, _, _, worker_failures in workers for failure in worker_failures]
+    assert samples and errors == 0, (len(samples), errors, failures[:5])
     return len(samples) / elapsed, statistics.median(samples), p95(samples), len(samples), errors, sorted(sizes)
 
 

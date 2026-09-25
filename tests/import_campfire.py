@@ -281,6 +281,7 @@ def main():
             assert imported.execute("SELECT query,created_at FROM searches WHERE id=1").fetchone() == ("One", "2026-01-02 00:00:00")
             assert imported.execute("SELECT restrict_room_creation FROM account_settings").fetchone() == (1,)
             assert imported.execute("SELECT css FROM account_custom_styles").fetchone() == ("body { color: navy; }",)
+            assert imported.execute("SELECT custom_styles FROM accounts").fetchone() == ("body { color: navy; }",)
             assert imported.execute("SELECT token FROM sessions WHERE id=1").fetchone() == ("imported-session",)
             csrf_token = imported.execute("SELECT csrf_token FROM sessions WHERE id=1").fetchone()[0]
             for table in ("avatars", "account_logos"):
@@ -303,6 +304,7 @@ def main():
             else:
                 raise AssertionError("imported Rustfire server did not serve the room")
             assert "Imported room" in page and "Hello" in page and "imported.txt" in page
+            assert '<style data-turbo-track="reload">body { color: navy; }</style>' in page
             assert public_key in page, page[:800]
             cookie_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"signed cookie", 1000, 64)
             message = base64.b64encode(json.dumps("imported-session").encode()).decode()

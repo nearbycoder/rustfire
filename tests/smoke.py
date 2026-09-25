@@ -213,7 +213,7 @@ def main():
             assert code == 200 and "Room settings" in page
             code, _, page = request(admin, base, "/account")
             assert code == 200, (code, page[:500])
-            assert page.index("/static/account.css") < page.index("/account/custom_styles.css")
+            assert "/static/account.css" in page and "/account/custom_styles.css" not in page
             assert "<a href='/rooms/1' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg'" in page
             join_match = re.search(r"/join/([\w-]+)", page)
             assert join_match, page[:1200]
@@ -465,8 +465,10 @@ def main():
             assert code == 403
             code, _, page = request(admin, base, "/account/custom_styles", {"account[custom_styles]": "body{color:#123456}"})
             assert code == 200 and "body{color:#123456}" in page
-            code, _, css = request(client(), base, "/account/custom_styles.css")
-            assert code == 200 and css == "body{color:#123456}"
+            assert '<style data-turbo-track="reload">body{color:#123456}</style>' in page
+            with sqlite3.connect(f"{tmp}/test.db") as styles_db:
+                assert styles_db.execute("SELECT custom_styles FROM accounts WHERE id=1").fetchone() == ("body{color:#123456}",)
+            assert request(client(), base, "/account/custom_styles.css")[0] == 404
             code, _, _ = request(admin, base, "/account/update", {"name": "Team Fire", "restrict_room_creation": "on"})
             assert code == 200
             code, _, _ = request(member, base, "/rooms/opens", {"name": "Not allowed"})

@@ -59,6 +59,7 @@ use web_push::{
 type Db = Pool<SqliteConnectionManager>;
 type AppResult = Result<Response, StatusCode>;
 static VAPID_PUBLIC: OnceLock<String> = OnceLock::new();
+static CUSTOM_STYLES: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
 struct AppState {
     db: Db,
@@ -1714,8 +1715,18 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
         String::new()
     };
     let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
+    let custom_styles = CUSTOM_STYLES
+        .get()
+        .and_then(|styles| {
+            styles
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|css| format!("<style data-turbo-track=\"reload\">{css}</style>"))
+        })
+        .unwrap_or_default();
     let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}<link rel='stylesheet' href='/account/custom_styles.css'><script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
         esc(token),
         VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
         esc(title),
@@ -5681,6 +5692,8 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    drop(q);
+    drop(db);
     let invite_url = public_url(&headers, &format!("/join/{code}"));
     let qr = format!("/qr_code/{}", URL_SAFE.encode(invite_url.as_bytes()));
     let invite = html_escape::encode_double_quoted_attribute(&invite_url);
@@ -5955,9 +5968,9 @@ async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let styles: String = pool(&s)?
+    let styles: Option<String> = pool(&s)?
         .query_row(
-            "SELECT css FROM account_custom_styles WHERE id=1",
+            "SELECT custom_styles FROM accounts LIMIT 1",
             [],
             |r| r.get(0),
         )
@@ -5978,7 +5991,7 @@ async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -
         "Custom styles",
         &format!(
             "<nav class='account-settings-nav custom-styles-nav'><a href='/account/edit' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></nav><section class='panel panel--wide custom-styles-panel txt-align-center flex flex-column position-relative' style='view-transition-name: custom-styles'><form class='flex flex-column gap' data-controller='form' data-action='keydown.ctrl+enter->form#submit keydown.meta+enter->form#submit' action='{action}' method='post'><input type='hidden' name='_method' value='patch'><div class='panel__button'>{translation}</div><div class='pad-inline-double margin-inline'><h1 class='margin-none'>Custom CSS</h1><p class='flex flex-wrap align-center justify-center gap margin-none-block-start' style='--column-gap: 0.5ch; --row-gap: 0'><span>Add custom CSS styles.</span><img src='/assets/alert.svg' class='flex-inline colorize--black' width='16' height='16' aria-hidden='true'><span>Use Caution: you could break things.</span></p></div><label class='flex align-start gap flex-item-grow'><textarea name='account[custom_styles]' id='account_custom_styles' class='input input--code txt--small' placeholder='Add CSS styles…' autocomplete='off' spellcheck='false' autocorrect='off' autocapitalize='off' rows='16'>\n{}</textarea></label><button class='btn btn--reversed center txt-large' type='submit'><img src='/assets/check-7897ff7e.svg' aria-hidden='true' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></form></section>",
-            esc(&styles)
+            esc(styles.as_deref().unwrap_or(""))
         ),
         Some(&u),
     ))
@@ -5998,31 +6011,18 @@ async fn custom_styles_update(
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
-    tx.execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css]).map_err(db_err)?;
-    tx.execute("UPDATE accounts SET updated_at=?1 WHERE id=1", [now()]).map_err(db_err)?;
-    tx.commit().map_err(db_err)?;
-    Ok(found_redirect(&public_url(&headers, "/account/custom_styles/edit")))
-}
-async fn custom_styles_css(State(s): State<Arc<AppState>>) -> AppResult {
-    let css: String = pool(&s)?
-        .query_row(
-            "SELECT css FROM account_custom_styles WHERE id=1",
-            [],
-            |r| r.get(0),
-        )
+    tx.execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css])
         .map_err(db_err)?;
-    let mut response = css.into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        "text/css; charset=utf-8".parse().unwrap(),
-    );
-    response
-        .headers_mut()
-        .insert("x-content-type-options", "nosniff".parse().unwrap());
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    Ok(response)
+    tx.execute(
+        "UPDATE accounts SET custom_styles=?1,updated_at=?2 WHERE id=1",
+        params![css, now()],
+    )
+    .map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    if let Some(styles) = CUSTOM_STYLES.get() {
+        *styles.write().unwrap() = Some(css.clone());
+    }
+    Ok(found_redirect(&public_url(&headers, "/account/custom_styles/edit")))
 }
 async fn logo_get(
     State(s): State<Arc<AppState>>,
@@ -8798,7 +8798,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     let fts_exists = fts_definition.is_some();
     let fts_needs_rebuild = fts_definition.is_some_and(|sql| !sql.contains("tokenize=porter"));
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;
-        CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,custom_styles TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_settings(id INTEGER PRIMARY KEY CHECK(id=1),restrict_room_creation INTEGER NOT NULL DEFAULT 0);
         INSERT OR IGNORE INTO account_settings(id,restrict_room_creation) VALUES(1,0);
         CREATE TABLE IF NOT EXISTS app_secrets(name TEXT PRIMARY KEY,value BLOB NOT NULL);
@@ -8839,6 +8839,18 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
+    let has_custom_styles: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('accounts') WHERE name='custom_styles')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_custom_styles {
+        conn.execute("ALTER TABLE accounts ADD COLUMN custom_styles TEXT", [])?;
+        conn.execute(
+            "UPDATE accounts SET custom_styles=(SELECT css FROM account_custom_styles WHERE id=1) WHERE EXISTS(SELECT 1 FROM account_custom_styles WHERE id=1 AND css!='')",
+            [],
+        )?;
+    }
     conn.execute("UPDATE users SET bot_token=substr(bot_token,length(CAST(id AS TEXT))+2) WHERE role=2 AND bot_token LIKE CAST(id AS TEXT)||'-%'", [])?;
     conn.execute("UPDATE rooms SET name=NULL WHERE type='Rooms::Direct' AND name IS NOT NULL", [])?;
     let has_session_ip: bool = conn.query_row(
@@ -9129,6 +9141,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref(), imported_blob_signing_key.as_deref().unwrap_or(&blob_signing_key))?;
         return Ok(());
     }
+    let custom_styles: Option<String> = db
+        .get()?
+        .query_row("SELECT custom_styles FROM accounts LIMIT 1", [], |row| row.get(0))
+        .optional()?
+        .flatten();
+    let _ = CUSTOM_STYLES.set(RwLock::new(custom_styles));
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
     let has_push_subscriptions: bool =
@@ -9282,7 +9300,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/account/custom_styles",
             post(custom_styles_update).put(custom_styles_update).patch(custom_styles_update),
         )
-        .route("/account/custom_styles.css", get(custom_styles_css))
         .route(
             "/account/logo",
             get(logo_get).post(logo_post).delete(logo_delete),
@@ -9525,6 +9542,28 @@ mod tests {
         super::init_db(&db).unwrap();
         let name: Option<String> = db.get().unwrap().query_row("SELECT name FROM rooms WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(name, None);
+    }
+
+    #[test]
+    fn legacy_custom_styles_migrate_to_account_without_inventing_empty_styles() {
+        for (legacy_css, expected) in [("body { color: navy; }", Some("body { color: navy; }")), ("", None)] {
+            let db = r2d2::Pool::builder()
+                .max_size(1)
+                .build(r2d2_sqlite::SqliteConnectionManager::memory())
+                .unwrap();
+            {
+                let conn = db.get().unwrap();
+                conn.execute_batch("CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+                    INSERT INTO accounts VALUES(1,'Test','code','2026-01-01','2026-01-01');
+                    CREATE TABLE account_custom_styles(id INTEGER PRIMARY KEY,css TEXT NOT NULL);")
+                    .unwrap();
+                conn.execute("INSERT INTO account_custom_styles VALUES(1,?1)", [legacy_css]).unwrap();
+            }
+            super::init_db(&db).unwrap();
+            super::init_db(&db).unwrap();
+            let styles: Option<String> = db.get().unwrap().query_row("SELECT custom_styles FROM accounts WHERE id=1", [], |r| r.get(0)).unwrap();
+            assert_eq!(styles.as_deref(), expected);
+        }
     }
 
     #[test]
