@@ -106,3 +106,14 @@ A rerun after the later deactivation changes measured **0.001 ms** indexed media
 | 10,000 | 0.380 / 0.598 ms | 3,362.606 / 3,562.189 ms |
 
 The selected-room lookup is much faster in Rustfire at these fixture sizes. This is a **single-client ping-reuse comparison**, not proof of full-app speed or user capacity. These latest figures include a user lookup that matches Campfire's filtering of selected IDs. Both apps returned HTTP 302 with an empty body. Campfire renders and publishes Turbo sidebar broadcasts for each participant on reuse; Rustfire renders a per-user room link and sends a lighter room-list event, and no clients were subscribed during the trial. The apps therefore still perform different work. The load generator and servers shared the host, and no sustained concurrency sweep was run.
+
+## Paired user autocomplete trial
+
+`bench/paired_autocomplete.py` used pinned Campfire and the Rustfire release build with disposable fixtures containing the same active users. One authenticated keep-alive client queried names containing `User 3`; both apps returned the same 20 user names and IDs, with `name`, `value`, `avatar_url`, and `sgid` fields. Each server ran separately on the same host. Two warmup requests preceded 30 measured requests. Campfire used one Puma worker with five threads and Rustfire one process.
+
+| Active users | Rustfire median / p95 | Campfire median / p95 | Rustfire / Campfire JSON bytes |
+|---:|---:|---:|---:|
+| 1,000 | 0.146 / 0.252 ms | 5.571 / 21.022 ms | 3,742 / 7,526 |
+| 10,000 | 0.718 / 0.878 ms | 6.485 / 18.997 ms | 3,811 / 7,642 |
+
+The result lists are the same, but response bodies differ: Campfire uses Rails signed global IDs and signed, versioned avatar URLs; Rustfire uses its own persistent signed IDs and shorter avatar URLs. This is a **single-client endpoint comparison**, not a feature-equivalent full-app speedup or a user-capacity result. The probe and servers shared the host, and no concurrency sweep or sustained-load run was made.

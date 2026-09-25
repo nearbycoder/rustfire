@@ -21,7 +21,11 @@ use futures_util::{SinkExt, StreamExt};
 use openssl::{
     bn::BigNumContext,
     ec::{EcGroup, EcKey, PointConversionForm},
+    hash::MessageDigest,
+    memcmp,
     nid::Nid,
+    pkey::PKey,
+    sign::Signer,
 };
 use qrcodegen::{QrCode, QrCodeEcc};
 use r2d2::Pool;
@@ -68,6 +72,7 @@ struct AppState {
     webhook_slots: Arc<Semaphore>,
     webhooks_enabled: bool,
     vapid_private: Vec<u8>,
+    mention_signing_key: Vec<u8>,
     push_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
@@ -351,6 +356,91 @@ fn replace_preview_attachments(input: &str, host: Option<&str>, display: bool) -
         })
         .into_owned()
 }
+fn replace_mention_attachments(
+    input: &str,
+    db: &rusqlite::Connection,
+    signing_key: &[u8],
+) -> Result<String, StatusCode> {
+    if !input.contains("application/vnd.campfire.mention")
+        && !input.contains("application/vnd.rustfire.mention")
+    {
+        return Ok(input.to_string());
+    }
+    static ATTACHMENTS: OnceLock<Regex> = OnceLock::new();
+    let pattern = ATTACHMENTS.get_or_init(|| {
+        Regex::new(r"(?is)<figure\b[^>]*>.*?</figure>|<action-text-attachment\b[^>]*>.*?</action-text-attachment>").unwrap()
+    });
+    let selector = Selector::parse("figure[data-trix-attachment],action-text-attachment").unwrap();
+    let mut rendered = String::with_capacity(input.len());
+    let mut consumed = 0;
+    for found in pattern.find_iter(input) {
+        rendered.push_str(&input[consumed..found.start()]);
+        let fragment = ParsedHtml::parse_fragment(found.as_str());
+        let replacement = if let Some(element) = fragment.select(&selector).next() {
+            let (kind, sgid, legacy_id) =
+                if let Some(data) = element.value().attr("data-trix-attachment") {
+                    if let Ok(value) = serde_json::from_str::<Value>(data) {
+                        (
+                            value
+                                .get("contentType")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            value.get("sgid").and_then(Value::as_str).map(str::to_owned),
+                            value.get("userId").and_then(|value| {
+                                value.as_i64().or_else(|| value.as_str()?.parse().ok())
+                            }),
+                        )
+                    } else {
+                        (None, None, None)
+                    }
+                } else {
+                    (
+                        element.value().attr("content-type").map(str::to_owned),
+                        element.value().attr("sgid").map(str::to_owned),
+                        None,
+                    )
+                };
+            match kind.as_deref() {
+                Some("application/vnd.campfire.mention")
+                | Some("application/vnd.rustfire.mention") => {
+                    let id = if kind.as_deref() == Some("application/vnd.campfire.mention") {
+                        sgid.as_deref()
+                            .and_then(|sgid| mention_id_from_sgid(signing_key, sgid))
+                    } else {
+                        legacy_id.filter(|id| *id > 0)
+                    };
+                    if let Some(id) = id {
+                        let name: Option<String> = db
+                            .query_row("SELECT name FROM users WHERE id=?1", [id], |row| row.get(0))
+                            .optional()
+                            .map_err(db_err)?;
+                        if let Some(name) = name {
+                            let sgid_attribute = sgid
+                                .as_deref()
+                                .map(|sgid| format!(" sgid='{}'", esc(sgid)))
+                                .unwrap_or_default();
+                            format!(
+                                "<span class='mention'{sgid_attribute}><img class='avatar' src='/users/{id}/avatar' alt=''>@{}</span>",
+                                esc(&name)
+                            )
+                        } else {
+                            "☒".to_string()
+                        }
+                    } else {
+                        "☒".to_string()
+                    }
+                }
+                _ => found.as_str().to_string(),
+            }
+        } else {
+            found.as_str().to_string()
+        };
+        rendered.push_str(&replacement);
+        consumed = found.end();
+    }
+    rendered.push_str(&input[consumed..]);
+    Ok(rendered)
+}
 fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
@@ -383,28 +473,79 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
         html,
     )
 }
-fn mention_ids(input: &str) -> Vec<i64> {
-    if !input.contains("data-trix-attachment") {
+fn mention_signature(key: &[u8], payload: &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    let pkey = PKey::hmac(key)?;
+    let mut signer = Signer::new(MessageDigest::sha256(), &pkey)?;
+    signer.sign_oneshot_to_vec(payload)
+}
+fn mention_sgid(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
+    let payload = format!("gid://rustfire/User/{id}/attachable");
+    let signature = mention_signature(key, payload.as_bytes())?;
+    Ok(format!(
+        "{}--{}",
+        URL_SAFE_NO_PAD.encode(payload),
+        URL_SAFE_NO_PAD.encode(signature)
+    ))
+}
+fn mention_id_from_sgid(key: &[u8], sgid: &str) -> Option<i64> {
+    if sgid.len() > 512 {
+        return None;
+    }
+    let (encoded, signature) = sgid.split_once("--")?;
+    let payload = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+    let expected = mention_signature(key, &payload).ok()?;
+    if signature.len() != expected.len() || !memcmp::eq(&signature, &expected) {
+        return None;
+    }
+    let path = std::str::from_utf8(&payload)
+        .ok()?
+        .strip_prefix("gid://rustfire/User/")?
+        .strip_suffix("/attachable")?;
+    path.parse::<i64>().ok().filter(|id| *id > 0)
+}
+fn mention_ids(input: &str, signing_key: &[u8]) -> Vec<i64> {
+    if !input.contains("application/vnd.campfire.mention")
+        && !input.contains("application/vnd.rustfire.mention")
+    {
         return Vec::new();
     }
-    static ATTACHMENT: OnceLock<Regex> = OnceLock::new();
-    let pattern = ATTACHMENT
-        .get_or_init(|| Regex::new(r#"data-trix-attachment\s*=\s*["']([^"']+)["']"#).unwrap());
+    let fragment = ParsedHtml::parse_fragment(input);
+    let figures = Selector::parse("figure[data-trix-attachment]").unwrap();
     let mut ids = Vec::new();
-    for capture in pattern.captures_iter(input) {
-        let decoded = html_escape::decode_html_entities(&capture[1]);
-        let Ok(value) = serde_json::from_str::<Value>(&decoded) else {
+    for figure in fragment.select(&figures) {
+        let Some(data) = figure.value().attr("data-trix-attachment") else {
             continue;
         };
-        if value.get("contentType").and_then(Value::as_str)
-            != Some("application/vnd.rustfire.mention")
-        {
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let id = match value.get("contentType").and_then(Value::as_str) {
+            Some("application/vnd.campfire.mention") => value
+                .get("sgid")
+                .and_then(Value::as_str)
+                .and_then(|sgid| mention_id_from_sgid(signing_key, sgid)),
+            Some("application/vnd.rustfire.mention") => value
+                .get("userId")
+                .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok())),
+            _ => None,
+        };
+        if let Some(id) = id.filter(|id| *id > 0) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    let attachments = Selector::parse("action-text-attachment[sgid]").unwrap();
+    for attachment in fragment.select(&attachments) {
+        if attachment.value().attr("content-type") != Some("application/vnd.campfire.mention") {
             continue;
         }
-        let id = value
-            .get("userId")
-            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
-        if let Some(id) = id.filter(|id| *id > 0) {
+        let id = attachment
+            .value()
+            .attr("sgid")
+            .and_then(|sgid| mention_id_from_sgid(signing_key, sgid));
+        if let Some(id) = id {
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -2294,10 +2435,18 @@ fn insert_message(
     request_host: Option<&str>,
 ) -> Result<ChatMessage, StatusCode> {
     let room = room_for(s, u.id, rid)?;
-    let structured_mentions = rich && body.contains("application/vnd.rustfire.mention");
-    let candidate_mentions = if rich { mention_ids(body) } else { Vec::new() };
+    let structured_mentions = rich
+        && (body.contains("application/vnd.rustfire.mention")
+            || body.contains("application/vnd.campfire.mention"));
+    let candidate_mentions = if rich {
+        mention_ids(body, &s.mention_signing_key)
+    } else {
+        Vec::new()
+    };
+    let db = pool(s)?;
     let (plain, body_html) = if rich && !body.trim().is_empty() {
-        let (plain, html) = rich_body(body, request_host);
+        let trusted = replace_mention_attachments(body, &db, &s.mention_signing_key)?;
+        let (plain, html) = rich_body(&trusted, request_host);
         (plain, Some(html))
     } else {
         (body.trim().to_string(), None)
@@ -2310,7 +2459,6 @@ fn insert_message(
     {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     };
-    let db = pool(s)?;
     let t = now();
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?7)",params![rid,u.id,plain,body_html,if rich {Some(body)} else {None},cid,t]).map_err(db_err)?;
@@ -2871,8 +3019,9 @@ async fn message_update(
     let body = form_value(&f, "body", "message[body]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let rich = form_value(&f, "format", "message[format]") == Some("html");
     let (plain, body_html) = if rich {
+        let trusted = replace_mention_attachments(body, &db, &s.mention_signing_key)?;
         let (plain, html) = rich_body(
-            body,
+            &trusted,
             headers
                 .get(header::HOST)
                 .and_then(|value| value.to_str().ok()),
@@ -2899,7 +3048,7 @@ async fn message_update(
     db.execute("DELETE FROM message_mentions WHERE message_id=?1", [mid])
         .map_err(db_err)?;
     if rich {
-        for mentioned_id in mention_ids(body) {
+        for mentioned_id in mention_ids(body, &s.mention_signing_key) {
             let allowed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND m.user_id=?2 AND u.status=0)",params![rid,mentioned_id],|r|r.get(0)).map_err(db_err)?;
             if allowed {
                 db.execute(
@@ -4356,13 +4505,24 @@ async fn autocomplete(
         .cloned()
         .unwrap_or_default();
     let mut st=db.prepare("SELECT u.id,u.name FROM users u WHERE u.status=0 AND u.name LIKE ?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.room_id=?2)) ORDER BY lower(u.name) LIMIT 20").map_err(db_err)?;
-    let rows = st
+    let users = st
         .query_map(params![format!("%{query}%"), room_id], |r| {
-            Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?}))
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
+    let rows = users
+        .into_iter()
+        .map(|(id, name)| {
+            Ok(json!({
+                "value": id,
+                "name": esc(&name),
+                "avatar_url": public_url(&headers, &format!("/users/{id}/avatar")),
+                "sgid": mention_sgid(&s.mention_signing_key, id).map_err(db_err)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
     Ok(Json(rows).into_response())
 }
 async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
@@ -5402,6 +5562,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_settings(id INTEGER PRIMARY KEY CHECK(id=1),restrict_room_creation INTEGER NOT NULL DEFAULT 0);
         INSERT OR IGNORE INTO account_settings(id,restrict_room_creation) VALUES(1,0);
+        CREATE TABLE IF NOT EXISTS app_secrets(name TEXT PRIMARY KEY,value BLOB NOT NULL);
+        INSERT OR IGNORE INTO app_secrets(name,value) VALUES('mention_sgid',randomblob(32));
         CREATE TABLE IF NOT EXISTS account_custom_styles(id INTEGER PRIMARY KEY CHECK(id=1),css TEXT NOT NULL DEFAULT '');
         INSERT OR IGNORE INTO account_custom_styles(id,css) VALUES(1,'');
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT NOT NULL,email_address TEXT UNIQUE,password_digest TEXT,role INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 0,bot_token TEXT UNIQUE,bio TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -5508,6 +5670,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let db = Pool::builder().max_size(32).build(manager)?;
     init_db(&db)?;
+    let mention_signing_key: Vec<u8> = db.get()?.query_row(
+        "SELECT value FROM app_secrets WHERE name='mention_sgid'",
+        [],
+        |row| row.get(0),
+    )?;
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
     let has_push_subscriptions: bool =
@@ -5537,6 +5704,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         webhooks_enabled: !env::var("RUSTFIRE_DISABLE_WEBHOOKS")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
         vapid_private,
+        mention_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
@@ -5770,6 +5938,20 @@ mod tests {
         ] {
             assert!(safe_return_path(&encoded(path)).is_none());
         }
+    }
+
+    #[test]
+    fn signed_mentions_require_the_same_key_and_unchanged_payload() {
+        let key = [7u8; 32];
+        let sgid = super::mention_sgid(&key, 42).unwrap();
+        assert_eq!(super::mention_id_from_sgid(&key, &sgid), Some(42));
+        assert_eq!(super::mention_id_from_sgid(&[8u8; 32], &sgid), None);
+        assert_eq!(super::mention_id_from_sgid(&key, &format!("{sgid}A")), None);
+        let attachment = format!(
+            "<figure data-trix-attachment='{{\"contentType\":\"application/vnd.campfire.mention\",\"sgid\":\"{sgid}\"}}'></figure>"
+        );
+        assert_eq!(super::mention_ids(&attachment, &key), vec![42]);
+        assert!(super::mention_ids(&attachment, &[8u8; 32]).is_empty());
     }
 
     #[test]

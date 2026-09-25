@@ -275,7 +275,11 @@ def main():
             code, _, payload = request(admin, base, "/autocompletable/users?room_id=2")
             assert code == 200 and [person["name"] for person in json.loads(payload)] == ["Admin"]
             code, _, payload = request(member, base, "/autocompletable/users?room_id=1&query=Admin")
-            assert code == 200 and len(json.loads(payload)) == 1
+            admin_suggestion = json.loads(payload)[0]
+            assert code == 200 and admin_suggestion["value"] == 1 and set(admin_suggestion) == {"value", "name", "avatar_url", "sgid"}
+            assert admin_suggestion["avatar_url"] == base + "/users/1/avatar"
+            assert admin_suggestion["sgid"]
+            admin_mention_sgid = admin_suggestion["sgid"]
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "2"}, method="PATCH")
             assert code == 303
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
@@ -410,12 +414,17 @@ def main():
                 raise AssertionError("bot webhook reply did not arrive")
             assert webhook_requests[0]["room"]["path"] == f"/rooms/1/{key}/messages"
             assert webhook_requests[0]["message"]["body"]["plain"] == "please answer"
+            code, _, payload = request(admin, base, "/autocompletable/users?room_id=1&query=Rust%20Robot")
+            bot_suggestion = json.loads(payload)[0]
+            assert code == 200 and bot_suggestion["value"] == 3 and bot_suggestion["sgid"]
             def mention_html(user_id):
-                details = html.escape(json.dumps({"contentType":"application/vnd.rustfire.mention","userId":str(user_id)}), quote=True)
+                details = {"contentType":"application/vnd.campfire.mention","sgid":bot_suggestion["sgid"]} if user_id == 3 else {"contentType":"application/vnd.rustfire.mention","userId":str(user_id)}
+                details = html.escape(json.dumps(details), quote=True)
                 return f'<div><figure data-trix-attachment="{details}"><span class="mention">@Rust Robot</span></figure> selected mention</div>'
             prior_webhooks = len(webhook_requests)
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3),"message[format]":"html"}, headers={"Accept":"application/json"})
             assert code == 201
+            assert "/users/3/avatar" in payload
             structured_id = json.loads(payload)["id"]
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(structured_id,)).fetchone() == (3,)
             for _ in range(100):
@@ -432,6 +441,12 @@ def main():
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM message_mentions WHERE message_id=?",(structured_id,)).fetchone() == (0,)
             prior_webhooks = len(webhook_requests)
             assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(999),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
+            forged_sgid = ("A" if bot_suggestion["sgid"][0] != "A" else "B") + bot_suggestion["sgid"][1:]
+            forged_body = mention_html(3).replace(bot_suggestion["sgid"], forged_sgid)
+            code, _, forged_payload = request(admin, base, "/rooms/1/messages", {"message[body]":forged_body,"message[format]":"html"}, headers={"Accept":"application/json"})
+            assert code == 201 and "☒" in forged_payload and "/users/3/avatar" not in forged_payload
+            forged_message_id = json.loads(forged_payload)["id"]
+            assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM message_mentions WHERE message_id=?",(forged_message_id,)).fetchone() == (0,)
             time.sleep(.2)
             assert len(webhook_requests) == prior_webhooks
             assert request(admin, base, "/rooms/1/messages", {"message[body]":"@Rust Robot send image"}, headers={"Accept":"application/json"})[0] == 201
@@ -647,6 +662,10 @@ def main():
                     time.sleep(.05)
             else:
                 raise AssertionError("server did not restart for direct-room index migration")
+            assert request(admin, base, "/session/new")[0] == 200
+            assert request(admin, base, "/session", {"email_address":"admin@example.com","password":"password123"})[0] == 200
+            code, _, suggestions = request(admin, base, "/autocompletable/users?room_id=1&query=Admin")
+            assert code == 200 and json.loads(suggestions)[0]["sgid"] == admin_mention_sgid
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT member_ids FROM direct_room_sets WHERE room_id=?", (retained_direct,)).fetchone() == ("1,2",)
             print("PASS setup, messages, attachments, boosts, search, private rooms, pings, account administration, bots, transfer, bans, direct-room index migration")

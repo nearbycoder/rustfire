@@ -1,5 +1,6 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
+const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-datetime]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;node.textContent=new Intl.DateTimeFormat(undefined,{dateStyle:'short',timeStyle:'short'}).format(date);node.title=new Intl.DateTimeFormat(undefined,{dateStyle:'short',timeStyle:'short'}).format(date)});
 formatLocalTimes();
 const pingForm=document.getElementById('ping-form');
@@ -22,18 +23,18 @@ if(pingForm){
     }
     input.required=!selected.size;
   };
-  const choose=person=>{selected.set(person.id,person.name);renderSelected();input.value='';input.setCustomValidity('');generation++;clearTimeout(timer);hide();input.focus();};
+  const choose=person=>{selected.set(person.value,person.name);renderSelected();input.value='';input.setCustomValidity('');generation++;clearTimeout(timer);hide();input.focus();};
   const search=()=>{
     const current=++generation;clearTimeout(timer);input.setCustomValidity('');
     timer=setTimeout(async()=>{
       try{
         const response=await fetch(`/autocompletable/users?query=${encodeURIComponent(input.value.trim())}`);
         if(!response.ok||current!==generation)return;
-        const people=await response.json();if(current!==generation)return;
-        options=people.filter(person=>!selected.has(person.id));active=0;suggestionBox.replaceChildren();
+        const people=(await response.json()).map(person=>({...person,name:decodeAutocompleteName(person.name)}));if(current!==generation)return;
+        options=people.filter(person=>!selected.has(person.value));active=0;suggestionBox.replaceChildren();
         for(const [index,person] of options.entries()){
           const button=document.createElement('button');button.type='button';button.id=`ping-option-${index}`;button.setAttribute('role','option');button.className='ping-suggestion';
-          const avatar=document.createElement('img');avatar.src=`/users/${person.id}/avatar`;avatar.alt='';
+          const avatar=document.createElement('img');avatar.src=person.avatar_url;avatar.alt='';
           const label=document.createElement('span');label.textContent=person.name;button.append(avatar,label);
           button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>choose(person));suggestionBox.append(button);
         }
@@ -251,8 +252,8 @@ if (chat) {
   let mentionOptions=[],mentionRange=null,mentionSelected=0,mentionGeneration=0,mentionTimer,ignoreNextMentionChange=false;
   const hideMentions=()=>{mentionGeneration++;clearTimeout(mentionTimer);mentionOptions=[];mentionRange=null;mentionBox.hidden=true;mentionBox.replaceChildren();typingInput.removeAttribute('aria-activedescendant');};
   const markMention=()=>{[...mentionBox.children].forEach((button,index)=>{button.classList.toggle('selected',index===mentionSelected);button.setAttribute('aria-selected',String(index===mentionSelected));});typingInput.setAttribute('aria-activedescendant',`mention-option-${mentionSelected}`);};
-  const chooseMention=(person)=>{if(!mentionRange||!typingInput.editor)return;const span=document.createElement('span');span.className='mention';span.textContent=`@${person.name}`;typingInput.editor.setSelectedRange(mentionRange);typingInput.editor.insertAttachment(new Trix.Attachment({content:span.outerHTML,contentType:'application/vnd.rustfire.mention',userId:String(person.id)}));typingInput.editor.insertString(' ');ignoreNextMentionChange=true;hideMentions();typingInput.focus();};
-  const refreshMentions=()=>{if(ignoreNextMentionChange){ignoreNextMentionChange=false;return;}const editor=typingInput.editor;if(!editor)return;const position=editor.getPosition();const before=editor.getDocument().toString().slice(0,position);const match=before.match(/(?:^|\s)@([^@\n]{0,32})$/);if(!match){hideMentions();return;}const query=match[1].trim();mentionRange=[position-match[1].length-1,position];const generation=++mentionGeneration;clearTimeout(mentionTimer);mentionTimer=setTimeout(async()=>{try{const response=await fetch(`/autocompletable/users?room_id=${roomId}&query=${encodeURIComponent(query)}`);if(!response.ok||generation!==mentionGeneration)return;const people=await response.json();if(generation!==mentionGeneration)return;mentionOptions=people.filter(person=>person.id!==Number(document.body.dataset.userId));mentionSelected=0;mentionBox.replaceChildren();for(const [index,person] of mentionOptions.entries()){const button=document.createElement('button');button.type='button';button.id=`mention-option-${index}`;button.setAttribute('role','option');button.textContent=person.name;button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>chooseMention(person));mentionBox.append(button);}mentionBox.hidden=!mentionOptions.length;if(mentionOptions.length)markMention();}catch{hideMentions();}},120);};
+  const chooseMention=(person)=>{if(!mentionRange||!typingInput.editor||typeof person.sgid!=='string')return;const span=document.createElement('span');span.className='mention';span.setAttribute('sgid',person.sgid);const avatar=document.createElement('img');avatar.src=person.avatar_url;avatar.className='avatar';avatar.alt=person.name;span.append(avatar,document.createTextNode(person.name));typingInput.editor.setSelectedRange(mentionRange);typingInput.editor.insertAttachment(new Trix.Attachment({content:span.outerHTML,contentType:'application/vnd.campfire.mention',sgid:person.sgid}));typingInput.editor.insertString(' ');ignoreNextMentionChange=true;hideMentions();typingInput.focus();};
+  const refreshMentions=()=>{if(ignoreNextMentionChange){ignoreNextMentionChange=false;return;}const editor=typingInput.editor;if(!editor)return;const position=editor.getPosition();const before=editor.getDocument().toString().slice(0,position);const match=before.match(/(?:^|\s)@([^@\n]{0,32})$/);if(!match){hideMentions();return;}const query=match[1].trim();mentionRange=[position-match[1].length-1,position];const generation=++mentionGeneration;clearTimeout(mentionTimer);mentionTimer=setTimeout(async()=>{try{const response=await fetch(`/autocompletable/users?room_id=${roomId}&query=${encodeURIComponent(query)}`);if(!response.ok||generation!==mentionGeneration)return;const people=(await response.json()).map(person=>({...person,name:decodeAutocompleteName(person.name)}));if(generation!==mentionGeneration)return;mentionOptions=people.filter(person=>person.value!==Number(document.body.dataset.userId));mentionSelected=0;mentionBox.replaceChildren();for(const [index,person] of mentionOptions.entries()){const button=document.createElement('button');button.type='button';button.id=`mention-option-${index}`;button.setAttribute('role','option');button.textContent=person.name;button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>chooseMention(person));mentionBox.append(button);}mentionBox.hidden=!mentionOptions.length;if(mentionOptions.length)markMention();}catch{hideMentions();}},120);};
   typingInput.addEventListener('trix-change',refreshMentions);
   typingInput.addEventListener('trix-paste',async(event)=>{
     const range=event.paste?.range;

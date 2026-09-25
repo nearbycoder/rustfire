@@ -42,7 +42,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Bot creation, renaming, avatar editing, key rotation, deletion, message read/post/update/delete API, boost create/delete API, and outbound webhooks with text or common image/PDF replies
 - Built-in `/play` sound messages with the upstream audio and image assets
 - Trix rich-text composition and editing with server-side HTML sanitization; formatted messages retain searchable plain text. Pasted links can request Open Graph previews through a public-IP-only fetcher. Saved preview attachments are rendered from validated attributes, dropping invalid, address-based, and same-host link or image URLs.
-- Mention autocomplete in the composer, validated mention IDs on messages, and bot webhook dispatch for selected bot mentions
+- Mention autocomplete with Campfire's response fields, persistent signed mention IDs, verified Trix mention attachments, and bot webhook dispatch for selected bot mentions; older Rustfire mention attachments remain readable
 - Basic boosts, profile name/email/password/bio and avatar editing, account logos and custom CSS, administrator role changes, deactivation and bans, four-hour session transfer links, live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
 - Session and room access control
 - CSRF checks for authenticated writes and public setup, sign-in, join, and device sign-in forms; same-origin WebSocket handshakes; sign-in limited to 10 attempts per IP over three minutes
@@ -54,7 +54,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior
 - Remaining ActionText rich-text behavior, inline attachments, exact image/video variant behavior, and exact link preview rendering
-- Exact ActionText mention rendering and webhook triggering, full presence integration and notification behavior; exact upstream typing and unread behavior
+- Exact ActionText mention rendering and webhook triggering, including support for imported Rails signed IDs; full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior and cross-browser push delivery validation
 - Full webhook response/MIME behavior and JSON API compatibility
 - Remaining account/user administration and exact behavior for bans and session transfer
