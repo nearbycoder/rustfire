@@ -159,16 +159,33 @@ def measure_cached_read(binary, port, cookie, etag, modified, clients, seconds):
     return report
 
 
+def measure_full_read(binary, port, cookie, etag, modified, clients, seconds, messages):
+    command = [
+        str(binary), "--base", f"http://127.0.0.1:{port}", "--path", "/rooms/1/messages",
+        "--cookie", cookie, "--expected-status", "200", "--expected-etag", etag,
+        "--expected-last-modified", modified, "--expected-message-count", str(messages),
+        "--expected-csrf-count", str(messages * 8), "--accept", "text/html",
+        "--clients", str(clients), "--seconds", str(seconds),
+    ]
+    process = subprocess.run(command, text=True, capture_output=True, timeout=max(90, seconds + 60))
+    if process.returncode:
+        raise AssertionError(f"Full message read failed: {process.stdout}\n{process.stderr}")
+    report = json.loads(process.stdout.strip().splitlines()[-1])
+    assert report["errors"] == 0 and report["successes"] > 0, report
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--messages", type=int, default=40, help="messages on the cached latest page, 3–40")
     parser.add_argument("--clients", type=int, nargs="*", default=[], help="optional conditional-304 concurrency sweep")
+    parser.add_argument("--full-clients", type=int, nargs="*", default=[], help="optional full-200 HTML concurrency sweep")
     parser.add_argument("--seconds", type=float, default=15)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--rustfire-first", action="store_true", help="reverse the serial trial order")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="save the initial full HTML response from each app")
     args = parser.parse_args()
-    if any(client < 1 for client in args.clients) or args.seconds <= 0 or args.campfire_workers < 1 or not (3 <= args.messages <= 40):
+    if any(client < 1 for client in args.clients + args.full_clients) or args.seconds <= 0 or args.campfire_workers < 1 or not (3 <= args.messages <= 40):
         parser.error("client counts, seconds, and Campfire workers must be positive; messages must be 3–40")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     if args.sample_dir:
@@ -178,7 +195,7 @@ def main():
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         binary = temp / "checked_get"
-        if args.clients:
+        if args.clients or args.full_clients:
             subprocess.run(["go", "build", "-o", str(binary), "bench/checked_get.go"], cwd=ROOT, check=True)
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
@@ -199,7 +216,8 @@ def main():
                         cookie, _ = login_campfire(camp_port)
                         result, etag, modified, body = check(camp_port, cookie, camp_db, True, args.sample_dir / "campfire-messages.html" if args.sample_dir else None)
                         performance = {clients: measure_cached_read(binary, camp_port, cookie, etag, modified, clients, args.seconds) for clients in args.clients}
-                        return result, performance, body
+                        full_performance = {clients: measure_full_read(binary, camp_port, cookie, etag, modified, clients, args.seconds, args.messages) for clients in args.full_clients}
+                        return result, performance, full_performance, body
                     finally:
                         stop_server(camp)
 
@@ -208,14 +226,15 @@ def main():
                 try:
                     result, etag, modified, body = check(rust_port, "session_token=benchmark-session", rust_db, False, args.sample_dir / "rustfire-messages.html" if args.sample_dir else None)
                     performance = {clients: measure_cached_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds) for clients in args.clients}
-                    return result, performance, body
+                    full_performance = {clients: measure_full_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds, args.messages) for clients in args.full_clients}
+                    return result, performance, full_performance, body
                 finally:
                     stop_server(rust)
 
             if args.rustfire_first:
-                (rust_result, rust_performance, rust_body), (camp_result, camp_performance, camp_body) = run_rustfire(), run_campfire()
+                (rust_result, rust_performance, rust_full, rust_body), (camp_result, camp_performance, camp_full, camp_body) = run_rustfire(), run_campfire()
             else:
-                (camp_result, camp_performance, camp_body), (rust_result, rust_performance, rust_body) = run_campfire(), run_rustfire()
+                (camp_result, camp_performance, camp_full, camp_body), (rust_result, rust_performance, rust_full, rust_body) = run_campfire(), run_rustfire()
         finally:
             redis.terminate()
             redis.wait(timeout=10)
@@ -226,6 +245,8 @@ def main():
         print({"rustfire": rust_result, "campfire": camp_result})
         for clients in args.clients:
             print(json.dumps({"clients": clients, "seconds": args.seconds, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_performance[clients], "campfire": camp_performance[clients]}, sort_keys=True))
+        for clients in args.full_clients:
+            print(json.dumps({"mode": "full_html_200", "clients": clients, "seconds": args.seconds, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_full[clients], "campfire": camp_full[clients]}, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -580,3 +580,18 @@ Every measured response in those eight paired trials had the expected 304 status
 A separate `bench/paired_bot_messages.py --messages 1000 --iterations 30 --clients 1 8 32 --seconds 3 --campfire-workers 22` regression check still matched the latest 40 parsed JSON messages after origin normalization, with zero measured response errors in both apps. At 32 clients Rustfire served **3,118** JSON reads/s (13.60 ms p95) versus Campfire's **1,550** (40.49 ms p95). The JSON bodies still differ in escaping and size, and this short trial is not a full-response parity or capacity claim.
 
 The 200 response probe now compares parsed tag order, attributes, and non-whitespace text for all 40 messages after normalizing CSRF values, fixture-specific user and room names, signed avatar URLs, and server origins. Rustfire now includes the eight hidden CSRF fields per message that Campfire emits in the quick-boost forms. The 40-message probe passed with **407,158** source bytes and **339,637** Rustfire bytes. Raw HTML formatting and token values still differ; this check covers this text-message fixture, not every message presentation or the surrounding page. The earlier 304 throughput figures above were measured before this 200-rendering change; the 304 fast path does not render the HTML.
+
+The same disposable 40-message fixture was then used for full HTTP 200 response load. Every measured response was checked for status, ETag, Last-Modified, 40 message roots, and 320 CSRF fields; both apps had zero errors. The Go client and server shared a host, 22 Puma workers served Campfire, each client warmed two requests outside the measured interval, and each run lasted five seconds. Both trial orders measured:
+
+| Clients | Rustfire first | Rustfire pages/s / p95 | Campfire pages/s / p95 |
+| ---: | :---: | ---: | ---: |
+| 8 | No | 3,252 / 3.99 ms | 1,052 / 10.38 ms |
+| 8 | Yes | 3,526 / 3.76 ms | 1,022 / 10.37 ms |
+| 32 | No | 3,313 / 14.87 ms | 1,618 / 36.96 ms |
+| 32 | Yes | 3,265 / 14.89 ms | 1,606 / 34.11 ms |
+| 64 | No | 3,052 / 30.83 ms | 1,559 / 84.81 ms |
+| 64 | Yes | 3,481 / 26.92 ms | 1,500 / 85.58 ms |
+| 128 | No | 2,547 / 89.54 ms | 1,577 / 127.41 ms |
+| 128 | Yes | 3,334 / 59.70 ms | 1,564 / 127.03 ms |
+
+At a provisional 20 ms p95 target, Rustfire passed at 32 tested clients in both orders, and Campfire passed at 8; 16 clients were not tested. This adds feature-matched rendered-page evidence beyond the 304 path. It remains a short single-room, single-account read workload with different raw response sizes and no CPU, RSS, write, or socket measurement. It does not establish sustained multi-user capacity or whole-app superiority at complete parity.

@@ -1,8 +1,9 @@
-// checked_get measures one stable GET response with concurrent keep-alive clients.
-// Each request must return the expected status, headers, and SHA-256 body hash.
+// checked_get measures one GET route with concurrent keep-alive clients.
+// Each response must match the expected status, headers, and body checks.
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +42,8 @@ func main() {
 	expectedStatus := flag.Int("expected-status", http.StatusOK, "expected HTTP status")
 	expectedETag := flag.String("expected-etag", "", "expected ETag response header")
 	expectedModified := flag.String("expected-last-modified", "", "expected Last-Modified response header")
+	expectedMessages := flag.Int("expected-message-count", 0, "expected number of rendered message IDs")
+	expectedCSRF := flag.Int("expected-csrf-count", 0, "expected number of hidden authenticity_token fields")
 	ifNoneMatch := flag.String("if-none-match", "", "conditional request ETag")
 	accept := flag.String("accept", "application/json", "Accept request header")
 	clients := flag.Int("clients", 32, "number of concurrent keep-alive clients")
@@ -50,10 +53,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "base, path, cookie, positive clients and seconds are required")
 		os.Exit(2)
 	}
-	expected, err := hex.DecodeString(*expectedHex)
-	if err != nil || len(expected) != sha256.Size {
-		fmt.Fprintln(os.Stderr, "expected-sha256 must be a SHA-256 hex digest")
+	if *expectedMessages < 0 || *expectedCSRF < 0 || (*expectedHex == "" && *expectedMessages == 0 && *expectedCSRF == 0) {
+		fmt.Fprintln(os.Stderr, "provide a body hash or a positive expected content count")
 		os.Exit(2)
+	}
+	var expected []byte
+	if *expectedHex != "" {
+		var err error
+		expected, err = hex.DecodeString(*expectedHex)
+		if err != nil || len(expected) != sha256.Size {
+			fmt.Fprintln(os.Stderr, "expected-sha256 must be a SHA-256 hex digest")
+			os.Exit(2)
+		}
 	}
 	transport := &http.Transport{
 		MaxIdleConns:        *clients * 2,
@@ -82,8 +93,17 @@ func main() {
 		if err != nil {
 			return false, err
 		}
-		digest := sha256.Sum256(body)
-		valid := response.StatusCode == *expectedStatus && string(digest[:]) == string(expected)
+		valid := response.StatusCode == *expectedStatus
+		if expected != nil {
+			digest := sha256.Sum256(body)
+			valid = valid && bytes.Equal(digest[:], expected)
+		}
+		if *expectedMessages > 0 {
+			valid = valid && bytes.Count(body, []byte("data-message-id=")) == *expectedMessages
+		}
+		if *expectedCSRF > 0 {
+			valid = valid && bytes.Count(body, []byte("name=\"authenticity_token\""))+bytes.Count(body, []byte("name='authenticity_token'")) == *expectedCSRF
+		}
 		if *expectedETag != "" {
 			valid = valid && response.Header.Get("ETag") == *expectedETag
 		}
