@@ -149,6 +149,15 @@ try{
   }
   const directSidebar=await fetch(base+'/users/me/sidebar?active=1',{headers:{Cookie:cookie}});
   assert.match(await directSidebar.text(),new RegExp(`href='/rooms/${directId}'`));
+  const ignoredId=await fetch(base+'/rooms/directs',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams([['user_ids[]','2'],['user_ids[]','999999']]),redirect:'manual'});
+  assert.equal(ignoredId.status,302);
+  assert.equal(ignoredId.headers.get('location'),`/rooms/${directId}`);
+  assert.equal((await nextFrame()).message.room_id,directId);
+  const selfPing=await fetch(base+'/rooms/directs',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams(),redirect:'manual'});
+  assert.equal(selfPing.status,302);
+  const selfId=Number(selfPing.headers.get('location').match(/\/rooms\/(\d+)/)[1]);
+  assert.notEqual(selfId,directId);
+  assert.equal((await nextFrame()).message.room_id,selfId);
   const deactivationSocket=net.createConnection({host:'127.0.0.1',port});
   const deactivationReady=new Promise((resolve,reject)=>{deactivationSocket.once('error',reject);deactivationSocket.once('data',data=>data.toString().startsWith('HTTP/1.1 101')?resolve():reject(new Error('deactivation socket handshake failed')))});
   deactivationSocket.on('connect',()=>deactivationSocket.write(`GET /cable HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${otherCookie}\r\n\r\n`));

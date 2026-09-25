@@ -163,7 +163,7 @@ def time_reuse(port, target, cookie, csrf, iterations):
             payload = response.read()
             elapsed = (time.perf_counter() - started) * 1000
             expected_locations = {f"http://127.0.0.1:{port}/rooms/{target[0]}", f"/rooms/{target[0]}"}
-            if response.status not in (302, 303) or response.getheader("Location") not in expected_locations:
+            if response.status != 302 or response.getheader("Location") not in expected_locations:
                 raise AssertionError((response.status, response.getheader("Location"), payload[:300]))
             if iteration >= 2:
                 samples.append(elapsed)

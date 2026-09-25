@@ -3390,14 +3390,26 @@ async fn direct_create(
     ids.push(u.id);
     ids.sort_unstable();
     ids.dedup();
-    if ids.len() < 2 {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let member_ids = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
     let mut db = pool(&s)?;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(db_err)?;
+    let mut names = Vec::new();
+    let mut selected = Vec::with_capacity(ids.len());
+    for id in ids {
+        let name: Option<String> = tx
+            .query_row("SELECT name FROM users WHERE id=?1", [id], |r| r.get(0))
+            .optional()
+            .map_err(db_err)?;
+        if let Some(name) = name {
+            if id != u.id {
+                names.push(name);
+            }
+            selected.push(id);
+        }
+    }
+    let ids = selected;
+    let member_ids = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
     let existing: Option<i64> = tx
         .query_row(
             "SELECT room_id FROM direct_room_sets WHERE member_ids=?1 ORDER BY room_id LIMIT 1",
@@ -3410,25 +3422,6 @@ async fn direct_create(
         tx.commit().map_err(db_err)?;
         notify_direct_room(&s, id, ids);
         return Ok(found_redirect(&format!("/rooms/{id}")));
-    }
-    let mut names = Vec::new();
-    for id in &ids {
-        if *id != u.id {
-            if let Some(n) = tx
-                .query_row(
-                    "SELECT name FROM users WHERE id=?1 AND status=0",
-                    [id],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(db_err)?
-            {
-                names.push(n)
-            }
-        }
-    }
-    if names.len() != ids.len() - 1 {
-        return Err(StatusCode::NOT_FOUND);
     }
     let t = now();
     tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES(?1,'Rooms::Direct',?2,?3,?3)",params![names.join(", "),u.id,t]).map_err(db_err)?;
