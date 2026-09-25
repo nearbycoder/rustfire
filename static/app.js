@@ -57,7 +57,7 @@ if(pingForm){
 const chat = document.querySelector('.chat');
 if (chat) {
   const roomId = Number(chat.dataset.roomId);
-  const messages = document.getElementById('messages');
+  const messages = chat.querySelector('.messages');
   const decorateOwn=()=>messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.creatorId===document.body.dataset.userId));
   const formatMessageGroups=()=>{
     messages.querySelectorAll('.day-separator').forEach(node=>node.remove());
@@ -158,7 +158,7 @@ if (chat) {
         const page=await refreshed.json();
         for(const entry of page.updated||[]){
           const existing=document.getElementById(`message-${entry.id}`);
-          if(existing&&!existing.querySelector('.inline-edit'))existing.outerHTML=entry.html;
+          if(existing&&!existing.querySelector('.inline-edit'))(existing.closest('[data-stream-message]')||existing).outerHTML=entry.html;
         }
         lastRefreshAt=page.checked_at;
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
@@ -229,10 +229,10 @@ if (chat) {
       try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;} if (!data || data.room_id !== roomId) return;
         if (data.type === 'message'&&historyMode){updateReturnButton();return;}
         if (data.type === 'message') { if (!document.getElementById(`message-${data.message.id}`)) { const scrollToLatest=nearBottom()||data.message.creator?.id===Number(document.body.dataset.userId); messages.insertAdjacentHTML('beforeend', data.html); formatLocalTimes(messages); decorateOwn(); formatMessageGroups(); if(scrollToLatest)messages.scrollTop=messages.scrollHeight; updateReturnButton(); const sound=document.querySelector(`#message-${data.message.id} [data-sound]`); if(sound) new Audio(sound.dataset.sound).play().catch(()=>{}); } if (!catchingUp) cursor = Math.max(cursor, data.message.id); }
-        if (data.type === 'message_deleted') {document.getElementById(`message-${data.id}`)?.remove();formatMessageGroups();}
-        if (data.type === 'message_updated') { const node=document.querySelector(`#message-${data.id} .message-body`); if(node&&!node.querySelector('.inline-edit')) {if(data.html!==undefined&&data.html!==null)node.innerHTML=`<div class='trix-content'>${data.html}</div>`;else node.textContent=data.body;} }
-        if (data.type === 'boost') { const node=document.getElementById(`boosts-message-${data.message_id}`); if(node&&data.boost_html&&!document.getElementById(`boost-${data.id}`))node.insertAdjacentHTML('beforeend',data.boost_html); }
-        if (data.type === 'boost_deleted') document.getElementById(`boost-${data.id}`)?.remove();
+        if (data.type === 'message_deleted') {const article=document.getElementById(`message-${data.id}`);(article?.closest('[data-stream-message]')||article)?.remove();formatMessageGroups();}
+        if (data.type === 'message_updated') { const article=document.getElementById(`message-${data.id}`);const node=article?.querySelector('[data-message-presentation]'); if(node&&!article.querySelector('.inline-edit')) {if(data.html!==undefined&&data.html!==null)node.innerHTML=`<div class='trix-content'>${data.html}</div>`;else node.textContent=data.body;} }
+        if (data.type === 'boost') { const node=document.querySelector(`#message-${data.message_id} .boosts`); if(node&&data.boost_html&&!document.getElementById(`boost_${data.id}`))node.insertAdjacentHTML('beforeend',data.boost_html); }
+        if (data.type === 'boost_deleted') document.getElementById(`boost_${data.id}`)?.remove();
       } catch {}
     });
     socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});
@@ -243,7 +243,7 @@ if (chat) {
   async function restoreMessage(article){
     const response=await fetch(`/rooms/${roomId}/messages/${article.dataset.messageId}`,{headers:{'X-Rustfire-Fragment':'1'}});
     if(!response.ok)throw Error('Could not load message');
-    article.outerHTML=await response.text();
+    (article.closest('[data-stream-message]')||article).outerHTML=await response.text();
     formatLocalTimes(messages);decorateOwn();formatMessageGroups();
   }
   const typingInput=composer.querySelector('trix-editor');
@@ -306,7 +306,7 @@ if (chat) {
     if(remove){
       if(!confirm('Delete this message?'))return;
       const response=await fetch(remove.dataset.deleteMessage,{method:'POST',headers:{'X-CSRF-Token':csrfToken}});
-      if(response.ok){remove.closest('.message').remove();formatMessageGroups()}else alert('Could not delete message');return;
+      if(response.ok){const article=remove.closest('.message');(article.closest('[data-stream-message]')||article).remove();formatMessageGroups()}else alert('Could not delete message');return;
     }
     const customBoost=e.target.closest('[data-custom-boost]');
     if(customBoost){const form=customBoost.nextElementSibling;form.hidden=false;form.querySelector('input').focus();return;}
@@ -319,7 +319,7 @@ if (chat) {
       const preview=body.querySelector('.og-embed a')?.href;
       body.querySelectorAll('.og-embed').forEach(node=>node.remove());
       body.querySelectorAll('.mention').forEach(node=>node.replaceWith(document.createTextNode(node.textContent.trim())));
-      const quoted=body.querySelector('.trix-content')?.innerHTML||body.innerHTML||preview||'';
+      const quoted=body.querySelector('.trix-content')?.innerHTML||body.querySelector('[data-message-presentation]')?.innerHTML||body.innerHTML||preview||'';
       const block=document.createElement('blockquote');block.innerHTML=quoted;
       const cite=document.createElement('cite');cite.textContent=article.querySelector('.message-meta strong')?.textContent+' ';
       const link=document.createElement('a');link.href=article.querySelector('.message-meta a')?.href||'#';link.textContent='#';cite.append(link);

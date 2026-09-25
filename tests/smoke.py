@@ -80,7 +80,7 @@ def main():
             code, url, _ = request(admin, base, "/first_run", {"name": "Admin", "email_address": "admin@example.com", "password": "password123"})
             assert code == 200 and "/rooms/1" in url, (code, url)
             code, _, page = request(admin, base, "/rooms/1")
-            assert code == 200 and "Campfire" in page and "name='authenticity_token'" in page
+            assert code == 200 and "Campfire" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
             assert request(admin, base, "/rooms/1/messages")[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"http://127.0.0.1/secret"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"file:///etc/passwd"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
@@ -124,7 +124,7 @@ def main():
             assert duplicate_id>custom_id
             assert request(admin,base,f"/messages/{message['id']}/boosts/{custom_id}/delete",{},method="POST")[0]==200
             code,_,room_page=request(admin,base,"/rooms/1")
-            assert code==200 and f"id='boost-{custom_id}'" not in room_page and f"id='boost-{duplicate_id}'" in room_page
+            assert code==200 and f"id='boost_{custom_id}'" not in room_page and f"id='boost_{duplicate_id}'" in room_page
             boundary = "test-boundary"
             multipart = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"message[body]\"\r\n\r\nattached\r\n"
                          f"--{boundary}\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents\r\n"
@@ -161,7 +161,7 @@ def main():
             assert code == 200 and refreshed["messages"] == [] and [entry["id"] for entry in refreshed["updated"]] == [message["id"]], refreshed
             assert "hello edited" in refreshed["updated"][0]["html"] and refreshed["checked_at"] >= refresh_since
             code, _, payload = request(admin, base, f"/rooms/1/refresh?since={refresh_since}", headers={"Accept": "text/vnd.turbo-stream.html"})
-            assert code == 200 and "action='replace' target='message-1'" in payload and "hello edited" in payload
+            assert code == 200 and "action='replace' target='message_test-1'" in payload and "hello edited" in payload
             code, _, page = request(admin, base, "/rooms/1")
             assert code == 200 and "hello edited" in page
             code, _, page = request(admin, base, "/rooms/1/settings")
@@ -262,7 +262,7 @@ def main():
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "1"}, method="PATCH")
             assert code == 303
             code, _, page = request(admin, base, "/rooms/2")
-            assert code == 200 and "Private Two" in page
+            assert code == 200 and "Private Two" in page and "id='messages_rooms_closed_2'" in page
             assert request(admin, base, "/")[1].endswith("/rooms/2")
             assert request(admin, base, "/rooms/1")[0] == 200
             assert request(admin, base, "/")[1].endswith("/rooms/1")
@@ -328,7 +328,7 @@ def main():
                 plan = " ".join(row[3] for row in check_db.execute("EXPLAIN QUERY PLAN SELECT room_id FROM direct_room_sets WHERE member_ids='1,2' ORDER BY room_id LIMIT 1"))
                 assert "idx_direct_room_sets_members" in plan, plan
             code, _, page = request(member, base, "/rooms/3")
-            assert code == 200 and "class='room-pill'>Admin</h1>" in page
+            assert code == 200 and "class='room-pill'>Admin</h1>" in page and "id='messages_rooms_direct_3'" in page
             code, repeated_url, _ = request(admin, base, "/rooms/directs", {"user_ids": "2"})
             assert repeated_url == direct_url
             assert request(member, base, "/rooms/3/involvement", {"involvement": "invisible"})[0] == 200

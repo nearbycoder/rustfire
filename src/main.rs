@@ -2058,14 +2058,20 @@ fn messages_since(
 }
 fn boost_html(id: i64, booster_id: i64, content: &str) -> String {
     format!(
-        "<span class='boost-item' id='boost-{id}' data-booster-id='{booster_id}'>{}</span> ",
+        "<span class='boost-item' id='boost_{id}' data-booster-id='{booster_id}'>{}</span> ",
         esc(content)
     )
 }
-fn message_html(m: &ChatMessage) -> String {
-    let timestamp = chrono::DateTime::parse_from_rfc3339(&m.created_at)
-        .map(|date| date.format("%b %-d, %Y · %-I:%M %p").to_string())
-        .unwrap_or_else(|_| m.created_at.clone());
+fn room_messages_target(kind: &str, room_id: i64) -> Option<String> {
+    let class = match kind {
+        "Rooms::Open" => "rooms_open",
+        "Rooms::Closed" => "rooms_closed",
+        "Rooms::Direct" => "rooms_direct",
+        _ => return None,
+    };
+    Some(format!("messages_{class}_{room_id}"))
+}
+fn message_presentation_html(m: &ChatMessage) -> String {
     let attachment = m
         .attachment
         .as_ref()
@@ -2085,6 +2091,16 @@ fn message_html(m: &ChatMessage) -> String {
             })
             .unwrap_or_else(|| esc(&m.body).replace('\n', "<br>"))
     };
+    format!(
+        "<div id='presentation_message_{}' data-message-presentation dir='auto'>{presentation}{attachment}</div>",
+        esc(&m.client_message_id)
+    )
+}
+fn message_html(m: &ChatMessage) -> String {
+    let timestamp = chrono::DateTime::parse_from_rfc3339(&m.created_at)
+        .map(|date| date.format("%b %-d, %Y · %-I:%M %p").to_string())
+        .unwrap_or_else(|_| m.created_at.clone());
+    let presentation = message_presentation_html(m);
     let quick_boosts=[("👍","Thumbs up"),("👏","Clapping"),("👋","Waving hand"),("💪","Muscle"),("❤️","Red heart"),("😂","Face with tears of joy"),("🎉","Party popper"),("🔥","Fire")].iter().map(|(emoji,label)|format!("<button type='button' data-boost='{}' data-emoji='{emoji}' title='{label}' aria-label='{label}'>{emoji}</button>",m.id)).collect::<String>();
     let content_action = if m.attachment.is_some() {
         format!(
@@ -2104,7 +2120,8 @@ fn message_html(m: &ChatMessage) -> String {
         .map(|boost| boost_html(boost.id, boost.booster_id, &boost.content))
         .collect::<String>();
     format!(
-        "<article class='message' id='message-{}' data-message-id='{}' data-creator-id='{}'><div class='avatar'><img src='/users/{}/avatar' alt='{}'></div><div class='message-main'><div class='message-meta'><strong>{}</strong><a href='/rooms/{}/@{}'><time datetime='{}' data-local-datetime>{}</time></a></div><div class='message-body'>{}{}</div><div class='boosts' id='boosts-message-{}'>{}</div></div><div class='message-actions'>{actions}</div></article>",
+        "<div id='message_{}' data-stream-message><article class='message' id='message-{}' data-message-id='{}' data-creator-id='{}'><div class='avatar'><img src='/users/{}/avatar' alt='{}'></div><div class='message-main'><div class='message-meta'><strong>{}</strong><a href='/rooms/{}/@{}'><time datetime='{}' data-local-datetime>{}</time></a></div><div class='message-body'>{}</div><div class='boosts' id='boosts_message_{}'>{}</div></div><div class='message-actions'>{actions}</div></article></div>",
+        esc(&m.client_message_id),
         m.id,
         m.id,
         m.creator_id,
@@ -2116,8 +2133,7 @@ fn message_html(m: &ChatMessage) -> String {
         esc(&m.created_at),
         esc(&timestamp),
         presentation,
-        attachment,
-        m.id,
+        esc(&m.client_message_id),
         boosts
     )
 }
@@ -2277,13 +2293,15 @@ async fn room_show_with_target(
         false
     };
     let at_message = target.map(|id| id.to_string()).unwrap_or_default();
+    let messages_target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
     let mut content = format!(
-        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/static/icons/menu-dots-horizontal.svg' alt=''></a><a class='icon-btn' href='/rooms/{}/involvement' aria-label='Notifications'><img src='/static/icons/notification-bell-mentions.svg' alt=''></a><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='messages'>",
+        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/static/icons/menu-dots-horizontal.svg' alt=''></a><a class='icon-btn' href='/rooms/{}/involvement' aria-label='Notifications'><img src='/static/icons/notification-bell-mentions.svg' alt=''></a><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
         sidebar(&s, &u, Some(rid))?,
         rid,
         esc(&room.name),
         rid,
-        rid
+        rid,
+        messages_target
     );
     let stream_key = s
         .imported_turbo_stream_signing_key
@@ -2322,7 +2340,7 @@ async fn room_refresh(
     Query(q): Query<RefreshQuery>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    room_for(&s, u.id, rid)?;
+    let room = room_for(&s, u.id, rid)?;
     let checked_at = Utc::now().timestamp_millis();
     let accept = headers
         .get(header::ACCEPT)
@@ -2353,10 +2371,11 @@ async fn room_refresh(
         let mut html = String::new();
         if !new_messages.is_empty() {
             let entries: String = new_messages.iter().map(message_html).collect();
-            html.push_str(&format!("<turbo-stream action='append' target='messages'><template>{entries}</template></turbo-stream>"));
+            let target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
+            html.push_str(&format!("<turbo-stream action='append' target='{target}'><template>{entries}</template></turbo-stream>"));
         }
         for message in &updated_messages {
-            html.push_str(&format!("<turbo-stream action='replace' target='message-{}'><template>{}</template></turbo-stream>", message.id, message_html(message)));
+            html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(message)));
         }
         return Ok(([(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")], html).into_response());
     }
@@ -2380,7 +2399,8 @@ async fn room_refresh(
         } else {
             let entries: String = messages.iter().map(message_html).collect();
             format!(
-                "<turbo-stream action='append' target='messages'><template>{entries}</template></turbo-stream>"
+                "<turbo-stream action='append' target='{}'><template>{entries}</template></turbo-stream>",
+                room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?
             )
         };
         Ok(([(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")], html).into_response())
@@ -2825,7 +2845,7 @@ fn insert_message(
         attachment,
         boosts: Vec::new(),
     };
-    let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"message":message_json(s,&m,None)?,"html":message_html(&m)}).to_string()});
+    let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"room_kind":m.room_kind,"message":message_json(s,&m,None)?,"html":message_html(&m)}).to_string()});
     for uid in newly_unread {
         s.unread_events.send(Event {
             room_id: uid,
@@ -3233,7 +3253,16 @@ async fn message_create(
         )
             .into_response())
     } else if accept.contains("turbo-stream") {
-        Ok((StatusCode::CREATED,Html(format!("<turbo-stream action='append' target='messages'><template>{}</template></turbo-stream>",message_html(&m)))).into_response())
+        Ok((
+            StatusCode::CREATED,
+            Html(format!(
+                "<turbo-stream action='append' target='{}'><template>{}</template></turbo-stream>",
+                room_messages_target(m.room_kind.as_deref().ok_or(StatusCode::NOT_FOUND)?, rid)
+                    .ok_or(StatusCode::NOT_FOUND)?,
+                message_html(&m)
+            )),
+        )
+            .into_response())
     } else {
         Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
     }
@@ -3372,11 +3401,12 @@ async fn message_update(
         }
     }
     drop(db);
-    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
+    let updated_message = message_by_id(&s, rid, mid)?;
+    let presentation_html = message_presentation_html(&updated_message);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
-            json!({"type":"message_updated","room_id":rid,"id":mid,"body":plain,"html":body_html,"presentation_html":presentation_html})
+            json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":updated_message.client_message_id,"body":plain,"html":body_html,"presentation_html":presentation_html})
                 .to_string(),
     });
     if headers
@@ -3398,15 +3428,15 @@ async fn message_delete(
     let u = user(&s, &headers)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
-    let creator: Option<i64> = db
+    let target: Option<(i64, String)> = db
         .query_row(
-            "SELECT creator_id FROM messages WHERE id=?1 AND room_id=?2",
+            "SELECT creator_id,client_message_id FROM messages WHERE id=?1 AND room_id=?2",
             params![mid, rid],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(db_err)?;
-    let creator = creator.ok_or(StatusCode::NOT_FOUND)?;
+    let (creator, client_message_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     if !is_admin(&u) && creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -3426,7 +3456,7 @@ async fn message_delete(
     }
     let _ = s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"message_deleted","room_id":rid,"id":mid}).to_string(),
+        payload: json!({"type":"message_deleted","room_id":rid,"id":mid,"client_message_id":client_message_id}).to_string(),
     });
     if headers
         .get(header::ACCEPT)
@@ -3435,7 +3465,8 @@ async fn message_delete(
         .contains("turbo-stream")
     {
         Ok(Html(format!(
-            "<turbo-stream action='remove' target='message-{mid}'></turbo-stream>"
+            "<turbo-stream action='remove' target='message_{}'></turbo-stream>",
+            esc(&client_message_id)
         ))
         .into_response())
     } else {
@@ -4818,10 +4849,16 @@ async fn user_ban(
         return Err(StatusCode::NOT_FOUND);
     }
     let mut st = tx
-        .prepare("SELECT id,room_id FROM messages WHERE creator_id=?1")
+        .prepare("SELECT id,room_id,client_message_id FROM messages WHERE creator_id=?1")
         .map_err(db_err)?;
     let removed = st
-        .query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .query_map([id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
@@ -4859,10 +4896,10 @@ async fn user_ban(
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
     let _ = s.revoked_users.send(id);
-    for (mid, rid) in removed {
+    for (mid, rid, client_message_id) in removed {
         s.events.send(Event {
             room_id: rid,
-            payload: json!({"type":"message_deleted","room_id":rid,"id":mid}).to_string(),
+            payload: json!({"type":"message_deleted","room_id":rid,"id":mid,"client_message_id":client_message_id}).to_string(),
         });
     }
     Ok(Redirect::to(&format!("/users/{id}")).into_response())
@@ -5336,10 +5373,10 @@ async fn bot_message_update(
         .map_err(db_err)?;
     drop(db);
     let m = message_by_id(&s, rid, mid)?;
-    let presentation_html = message_html(&m);
+    let presentation_html = message_presentation_html(&m);
     let _ = s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"message_updated","room_id":rid,"id":mid,"body":body,"presentation_html":presentation_html}).to_string(),
+        payload: json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":m.client_message_id,"body":body,"presentation_html":presentation_html}).to_string(),
     });
     Ok(Json(message_json(&s, &m, Some(&headers))?).into_response())
 }
@@ -5350,8 +5387,8 @@ async fn bot_message_delete(
     let u = bot_user(&s, &key)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
-    let target: Option<(i64, Option<String>)> = db.query_row("SELECT m.creator_id,a.stored_name FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.id=?1 AND m.room_id=?2", params![mid,rid], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(db_err)?;
-    let (creator, attachment) = target.ok_or(StatusCode::NOT_FOUND)?;
+    let target: Option<(i64, Option<String>, String)> = db.query_row("SELECT m.creator_id,a.stored_name,m.client_message_id FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.id=?1 AND m.room_id=?2", params![mid,rid], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(db_err)?;
+    let (creator, attachment, client_message_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     if creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -5370,7 +5407,7 @@ async fn bot_message_delete(
     }
     let _ = s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"message_deleted","room_id":rid,"id":mid}).to_string(),
+        payload: json!({"type":"message_deleted","room_id":rid,"id":mid,"client_message_id":client_message_id}).to_string(),
     });
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -5641,13 +5678,15 @@ async fn boost_create(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let db = pool(&s)?;
-    let rid: Option<i64> = db
-        .query_row("SELECT room_id FROM messages WHERE id=?1", [mid], |r| {
-            r.get(0)
-        })
+    let target: Option<(i64, String)> = db
+        .query_row(
+            "SELECT room_id,client_message_id FROM messages WHERE id=?1",
+            [mid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()
         .map_err(db_err)?;
-    let rid = rid.ok_or(StatusCode::NOT_FOUND)?;
+    let (rid, client_message_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     room_for(&s, u.id, rid)?;
     let content = f
         .get("boost[content]")
@@ -5669,7 +5708,7 @@ async fn boost_create(
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
-            json!({"type":"boost","room_id":rid,"message_id":mid,"id":bid,"content":content,"user_id":u.id,"boost_html":boost_html})
+            json!({"type":"boost","room_id":rid,"message_id":mid,"client_message_id":client_message_id,"id":bid,"content":content,"user_id":u.id,"boost_html":boost_html})
                 .to_string(),
     });
     Ok(Redirect::to(&format!("/messages/{mid}/boosts")).into_response())
@@ -5782,7 +5821,7 @@ async fn boost_delete(
         .contains("turbo-stream")
     {
         Ok(Html(format!(
-            "<turbo-stream action='remove' target='boost-{bid}'></turbo-stream>"
+            "<turbo-stream action='remove' target='boost_{bid}'></turbo-stream>"
         ))
         .into_response())
     } else {
@@ -5804,16 +5843,15 @@ async fn bot_boost_create(
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let db = pool(&s)?;
-    let exists: bool = db
+    let client_message_id: Option<String> = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND room_id=?2)",
+            "SELECT client_message_id FROM messages WHERE id=?1 AND room_id=?2",
             params![mid, rid],
             |r| r.get(0),
         )
+        .optional()
         .map_err(db_err)?;
-    if !exists {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let client_message_id = client_message_id.ok_or(StatusCode::NOT_FOUND)?;
     let created = now();
     db.execute(
         "INSERT INTO boosts(message_id,booster_id,content,created_at) VALUES(?1,?2,?3,?4)",
@@ -5826,7 +5864,7 @@ async fn bot_boost_create(
     let boost_html = boost_html(id, bot.id, content);
     s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"boost","room_id":rid,"message_id":mid,"id":id,"content":content,"user_id":bot.id,"boost_html":boost_html})
+        payload: json!({"type":"boost","room_id":rid,"message_id":mid,"client_message_id":client_message_id,"id":id,"content":content,"user_id":bot.id,"boost_html":boost_html})
             .to_string(),
     });
     let created_at = chrono::DateTime::parse_from_rfc3339(&created)
@@ -5872,28 +5910,32 @@ async fn bot_boost_delete(
 fn turbo_room_event(payload: &Value) -> Option<String> {
     match payload.get("type")?.as_str()? {
         "message" => Some(format!(
-            "<turbo-stream action=\"append\" target=\"messages\"><template>{}</template></turbo-stream>",
+            "<turbo-stream action=\"append\" target=\"{}\"><template>{}</template></turbo-stream>",
+            room_messages_target(
+                payload.get("room_kind")?.as_str()?,
+                payload.get("room_id")?.as_i64()?
+            )?,
             payload.get("html")?.as_str()?
         )),
         "message_updated" => {
-            let mid = payload.get("id")?.as_i64()?;
+            let client_message_id = esc(payload.get("client_message_id")?.as_str()?);
             Some(format!(
-                "<turbo-stream action=\"replace\" target=\"message-{mid}\"><template>{}</template></turbo-stream>",
+                "<turbo-stream action=\"replace\" target=\"presentation_message_{client_message_id}\"><template>{}</template></turbo-stream>",
                 payload.get("presentation_html")?.as_str()?
             ))
         }
         "boost" => Some(format!(
-            "<turbo-stream action=\"append\" target=\"boosts-message-{}\"><template>{}</template></turbo-stream>",
-            payload.get("message_id")?.as_i64()?,
+            "<turbo-stream action=\"append\" target=\"boosts_message_{}\"><template>{}</template></turbo-stream>",
+            esc(payload.get("client_message_id")?.as_str()?),
             payload.get("boost_html")?.as_str()?
         )),
         "boost_deleted" => Some(format!(
-            "<turbo-stream action=\"remove\" target=\"boost-{}\"></turbo-stream>",
+            "<turbo-stream action=\"remove\" target=\"boost_{}\"></turbo-stream>",
             payload.get("id")?.as_i64()?
         )),
         "message_deleted" => Some(format!(
-            "<turbo-stream action=\"remove\" target=\"message-{}\"></turbo-stream>",
-            payload.get("id")?.as_i64()?
+            "<turbo-stream action=\"remove\" target=\"message_{}\"></turbo-stream>",
+            esc(payload.get("client_message_id")?.as_str()?)
         )),
         _ => None,
     }
@@ -6511,6 +6553,24 @@ mod tests {
         );
         assert!(super::room_from_stream_token(&key, &format!("{expected}x")).is_none());
         assert!(super::room_from_stream_token(&[7; 64], expected).is_none());
+    }
+
+    #[test]
+    fn room_message_targets_match_pinned_sti_classes() {
+        assert!(!super::esc("'\"<>&").contains('\''));
+        assert_eq!(
+            super::room_messages_target("Rooms::Open", 1).as_deref(),
+            Some("messages_rooms_open_1")
+        );
+        assert_eq!(
+            super::room_messages_target("Rooms::Closed", 2).as_deref(),
+            Some("messages_rooms_closed_2")
+        );
+        assert_eq!(
+            super::room_messages_target("Rooms::Direct", 3).as_deref(),
+            Some("messages_rooms_direct_3")
+        );
+        assert!(super::room_messages_target("Room", 1).is_none());
     }
     use web_push::{
         ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder,
