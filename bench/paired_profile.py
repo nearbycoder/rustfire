@@ -9,6 +9,7 @@ import concurrent.futures
 import html
 import http.client
 import http.cookiejar
+import json
 import math
 import pathlib
 import re
@@ -28,6 +29,38 @@ from paired_bot_admin import request
 
 TRANSFER = re.compile(r"/session/transfers/[A-Za-z0-9_-]+--[0-9a-f]{64}")
 PROFILE_FIELDS = ("user[avatar]", "user[name]", "user[email_address]", "user[password]", "user[bio]")
+
+
+def read_manifest(port):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.request("GET", "/webmanifest", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        payload = response.read()
+        assert response.status == 200, (response.status, payload[:200])
+        return json.loads(payload)
+    finally:
+        connection.close()
+
+
+def verify_manifest(source, target):
+    assert set(source) == set(target)
+    for key in ("name", "start_url", "display", "scope", "categories", "theme_color", "background_color"):
+        assert source[key] == target[key], (key, source[key], target[key])
+    assert source["description"] and target["description"]
+    for expected, actual in zip(source["icons"], target["icons"], strict=True):
+        assert (expected["sizes"], expected["type"], expected.get("purpose")) == (actual["sizes"], actual["type"], actual.get("purpose"))
+        expected_url = urllib.parse.urlsplit(html.unescape(expected["src"]))
+        actual_url = urllib.parse.urlsplit(actual["src"])
+        assert expected_url.path == actual_url.path == "/account/logo"
+        assert urllib.parse.parse_qs(expected_url.query).get("size") == urllib.parse.parse_qs(actual_url.query).get("size")
+    for expected, actual in zip(source["shortcuts"], target["shortcuts"], strict=True):
+        assert expected["name"] == actual["name"] and expected["url"] == actual["url"]
+        assert urllib.parse.urlsplit(expected["icons"][0]["src"]).path == urllib.parse.urlsplit(actual["icons"][0]["src"]).path
+    for expected, actual in zip(source["screenshots"], target["screenshots"], strict=True):
+        for key in ("sizes", "form_factor"):
+            assert expected[key] == actual[key]
+        assert urllib.parse.urlsplit(expected["src"]).path == urllib.parse.urlsplit(actual["src"]).path
 
 
 def transfer_path(page):
@@ -139,11 +172,14 @@ def main():
         env["WEB_CONCURRENCY"] = "4"
         with sqlite3.connect(rust_db) as db:
             db.execute("UPDATE users SET name='Test Admin',email_address='benchmark@example.invalid' WHERE id=1")
+        with sqlite3.connect(camp_db) as db:
+            db.execute("UPDATE accounts SET name='Benchmark' WHERE id=1")
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"]})
         log = open(temp / "puma.log", "w+")
         camp = subprocess.Popen([str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=repository, env=env, stdout=log, stderr=log)
         try:
             wait_for_server(camp_port, camp)
+            verify_manifest(read_manifest(camp_port), read_manifest(rust_port))
             camp_cookie, camp_csrf = login_campfire(camp_port)
             rust_cookie, rust_csrf = "session_token=benchmark-session", "benchmark-csrf"
             camp_status, _, camp_page = request(camp_port, "GET", "/users/me/profile", camp_cookie, camp_csrf)
@@ -159,7 +195,7 @@ def main():
                 assert db.execute("SELECT COUNT(*) FROM session_transfers").fetchone()[0] == transfers_before
             use_transfer(rust_port, transfer_path(camp_page))
             use_transfer(camp_port, transfer_path(rust_page))
-            print("profile fields, stateless reads, and two-way transfer: passed")
+            print("manifest shape, profile fields, stateless reads, and two-way transfer: passed")
             print("GET /users/me/profile; 4 Puma workers; release Rustfire; requests per run:", args.requests)
             for concurrency in (1, 8, 32):
                 source = measure(camp_port, camp_cookie, concurrency, args.requests)

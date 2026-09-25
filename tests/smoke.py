@@ -75,7 +75,15 @@ def main():
             else:
                 raise AssertionError("server did not start")
             code, _, manifest = request(client(), base, "/webmanifest")
-            assert code == 200 and json.loads(manifest)["display"] == "standalone"
+            manifest = json.loads(manifest)
+            assert code == 200 and manifest["display"] == "standalone" and manifest["name"] == "Rustfire"
+            assert [icon["sizes"] for icon in manifest["icons"]] == ["192x192", "512x512", "512x512"]
+            assert manifest["icons"][2]["purpose"] == "maskable"
+            assert [shortcut["url"] for shortcut in manifest["shortcuts"]] == ["rooms/opens/new", "/users/me/profile"]
+            assert len(manifest["screenshots"]) == 3
+            for screenshot in manifest["screenshots"]:
+                with client().open(screenshot["src"]) as asset:
+                    assert asset.status == 200 and asset.read(8) == b"\x89PNG\r\n\x1a\n"
             code, _, worker = request(client(), base, "/service-worker")
             assert code == 200 and "notificationclick" in worker
             admin = client()

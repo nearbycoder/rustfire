@@ -7673,14 +7673,47 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
 async fn health() -> impl IntoResponse {
     "ok"
 }
-async fn webmanifest(State(s): State<Arc<AppState>>) -> AppResult {
+async fn webmanifest(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let db = pool(&s)?;
-    let name: Option<String> = db
-        .query_row("SELECT name FROM accounts LIMIT 1", [], |r| r.get(0))
+    let account: Option<(String, String)> = db
+        .query_row("SELECT name,updated_at FROM accounts LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .optional()
         .map_err(db_err)?;
-    let name = name.unwrap_or_else(|| "Rustfire".into());
-    let mut r=Json(json!({"name":name,"short_name":name,"icons":[{"src":"/account/logo","sizes":"any","type":"image/png","purpose":"any maskable"}],"start_url":"/","scope":"/","display":"standalone","theme_color":"#ffffff","background_color":"#ffffff","categories":["social","business","productivity"],"shortcuts":[{"name":"New chat room","url":"/rooms/opens/new"},{"name":"My profile","url":"/users/me/profile"}]})).into_response();
+    let (name, updated_at) = account.unwrap_or_else(|| ("Rustfire".into(), String::new()));
+    let version: String = updated_at
+        .chars()
+        .filter(char::is_ascii_digit)
+        .take(14)
+        .collect();
+    let logo = format!("/account/logo?v={version}");
+    let small_logo = format!("/account/logo?size=small&v={version}");
+    let asset = |path: &str| public_url(&headers, path);
+    let mut r = Json(json!({
+        "name": name,
+        "icons": [
+            {"src":small_logo,"type":"image/png","sizes":"192x192"},
+            {"src":logo,"type":"image/png","sizes":"512x512"},
+            {"src":logo,"type":"image/png","sizes":"512x512","purpose":"maskable"}
+        ],
+        "start_url":"/",
+        "display":"standalone",
+        "scope":"/",
+        "description":"An installable, self-hosted chat app built in Rust.",
+        "categories":["social","business","productivity"],
+        "theme_color":"#ffffff",
+        "background_color":"#ffffff",
+        "shortcuts":[
+            {"name":"New chat room","description":"Open Rustfire and start a new chat room","url":"rooms/opens/new","icons":[{"src":asset("/assets/add-f232d8a6.svg"),"sizes":"any"}]},
+            {"name":"My profile","description":"Open Rustfire and view your profile","url":"/users/me/profile","icons":[{"src":asset("/assets/person-da193438.svg"),"sizes":"any"}]}
+        ],
+        "screenshots":[
+            {"src":asset("/assets/screenshots/android-chat-f8b923c9.png"),"sizes":"1080x2400","form_factor":"narrow","label":"Rustfire is an installable, self-hosted group chat system."},
+            {"src":asset("/assets/screenshots/android-sidebar-e9d2b49f.png"),"sizes":"1080x2400","form_factor":"narrow","label":"Easily invite people. Make rooms. @mentions, DMs, and mobile support."},
+            {"src":asset("/assets/screenshots/android-dark-mode-e43dcf59.png"),"sizes":"1080x2400","form_factor":"narrow","label":"Full support for dark mode, customizable to your brand."}
+        ]
+    })).into_response();
     r.headers_mut().insert(
         header::CONTENT_TYPE,
         "application/manifest+json".parse().unwrap(),

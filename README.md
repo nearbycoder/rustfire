@@ -54,7 +54,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Room-scoped WebSocket fanout and message catch-up after reconnect, so sockets do not process events for unrelated rooms and missed messages can be recovered; timestamp-based room refresh also replaces edited messages missed while disconnected
 - Campfire-format signed room stream names for `RoomMessagesChannel`, verified against room type and current membership; the browser subscribes with the signed name and applies Turbo append, replace, and remove actions for messages and individual boosts. Room, message, presentation, and boost target IDs follow Campfire's naming. Message roots carry Campfire-style timestamps, signed creator avatars, and an in-message day heading; metadata contains the room permalink and action menu with quick boost forms. Plain message presentation uses an ActionText-style `trix-content` block, and custom boost forms load into the new-boost frame on demand. Message edit frames match the sampled Campfire frame structure for plain messages and file, image, and video attachments; the room can save, close, and delete through those frames. The existing Rustfire room-ID subscriptions remain available for API clients. ActionCable welcome and three-second ping frames and `HeartbeatChannel` subscriptions are supported. Paired plain-message streams now have the same ordered element and attribute-name structure; values, other message types, styling, and behavior still require parity work.
 - Room-scoped typing notifications, presence connection tracking, and live read/unread sidebar updates across sessions
-- Web app manifest and service-worker endpoints, VAPID key management, browser push opt-in, subscription management, and delivery for disconnected users based on notification preference
+- Web app manifest with source-shaped icon sizes, shortcuts, and screenshots, the upstream service-worker behavior, VAPID key management, browser push opt-in, subscription management, and delivery for disconnected users based on notification preference
 
 ## Remaining parity work
 
@@ -83,4 +83,4 @@ The smoke tests start isolated servers and databases, then check setup, chat, at
 
 ## License
 
-Upstream SVG icons, `campfire-icon.png`, `app-icon.png`, `app-icon-192.png`, and sound audio and images are copied from ONCE Campfire under its MIT license; see `LICENSE.upstream`. The Trix editor assets come from the upstream-locked MIT-licensed `action_text-trix` 2.1.19 gem; see `LICENSE.trix`. Rustfire's own code is distributed under the MIT license in `LICENSE`.
+Upstream SVG icons, `campfire-icon.png`, `app-icon.png`, `app-icon-192.png`, PWA screenshots, and sound audio and images are copied from ONCE Campfire under its MIT license; see `LICENSE.upstream`. The Trix editor assets come from the upstream-locked MIT-licensed `action_text-trix` 2.1.19 gem; see `LICENSE.trix`. Rustfire's own code is distributed under the MIT license in `LICENSE`.
