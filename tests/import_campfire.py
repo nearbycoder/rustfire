@@ -345,6 +345,28 @@ def main():
                     assert response.read().startswith(signature)
             image_gallery_variant = target_uploads / "variants" / f"{image_stored[0]}-inline-gallery.png"
             assert image_gallery_variant.is_file()
+            trix_data = json.dumps({"sgid": image_sgid, "contentType": "image/png", "filename": "pixel.png"}, separators=(",", ":"))
+            edited_body = f'<div>Edited picture <figure data-trix-attachment=\'{trix_data}\'><img src="ignored"></figure> end</div>'
+            edit_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5",
+                data=urllib.parse.urlencode({"message[body]": edited_body}).encode(), method="PATCH",
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
+            with urllib.request.urlopen(edit_image, timeout=2) as response:
+                assert response.status == 200
+            with sqlite3.connect(target_db) as edited:
+                plain, source, rendered = edited.execute("SELECT body,body_source,body_html FROM messages WHERE id=5").fetchone()
+                assert plain == "Edited picture [pixel.png] end", (plain, rendered)
+                assert "<action-text-attachment" in source and "data-trix-attachment" not in source, source
+                assert "attachment--preview attachment--png" in rendered and "<img" in rendered, rendered
+                assert edited.execute("SELECT count(*) FROM inline_embeds WHERE message_id=5").fetchone() == (1,)
+            remove_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5",
+                data=urllib.parse.urlencode({"message[body]": "<div>No picture</div>"}).encode(), method="PATCH",
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
+            with urllib.request.urlopen(remove_image, timeout=2) as response:
+                assert response.status == 200
+            with sqlite3.connect(target_db) as edited:
+                assert edited.execute("SELECT body FROM messages WHERE id=5").fetchone() == ("No picture",)
+                assert edited.execute("SELECT count(*) FROM inline_embeds WHERE message_id=5").fetchone() == (0,)
+                assert edited.execute("SELECT count(*) FROM inline_blobs WHERE id=11").fetchone() == (1,)
             delete_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5/delete", data=b"",
                 headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/vnd.turbo-stream.html"})
             with urllib.request.urlopen(delete_image, timeout=2) as response:

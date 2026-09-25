@@ -546,6 +546,8 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
         if input.contains("action-text-attachment") || input.contains("data-trix-attachment") {
             let without_previews = replace_preview_attachments(input, request_host, false);
             ammonia::Builder::default()
+                .add_tags(&["action-text-attachment"])
+                .add_tag_attributes("action-text-attachment", &["filename"])
                 .clean(&without_previews)
                 .to_string()
         } else {
@@ -566,6 +568,11 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
     let name = element.name();
     if name == "script" || name == "style" {
         return String::new();
+    }
+    if name == "action-text-attachment" {
+        if let Some(filename) = element.attr("filename") {
+            return format!("[{filename}]");
+        }
     }
     if name == "br" {
         return "\n".to_string();
@@ -1292,15 +1299,16 @@ fn render_imported_inline_files(
     signing_key: &[u8],
     imported_key: Option<&[u8]>,
     blob_key: &[u8],
-) -> Result<String, StatusCode> {
-    let mut expected = db.prepare("SELECT blob_id FROM inline_embeds WHERE message_id=?1")
+    require_all: bool,
+) -> Result<(String, Vec<i64>), StatusCode> {
+    let expected = db.prepare("SELECT blob_id FROM inline_embeds WHERE message_id=?1")
         .map_err(db_err)?
         .query_map([message_id], |row| row.get::<_, i64>(0))
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     if expected.is_empty() {
-        return Ok(input.to_string());
+        return Ok((input.to_string(), Vec::new()));
     }
     static INLINE_ATTACHMENT: OnceLock<Regex> = OnceLock::new();
     let pattern = INLINE_ATTACHMENT.get_or_init(|| Regex::new(r"(?is)<action-text-attachment\b[^>]*>.*?</action-text-attachment>").unwrap());
@@ -1308,6 +1316,7 @@ fn render_imported_inline_files(
     let document = ParsedHtml::parse_fragment(input);
     let all_attachments = document.select(&Selector::parse("action-text-attachment").unwrap()).collect::<Vec<_>>();
     let mut rendered = String::with_capacity(input.len() + 256);
+    let mut used = Vec::new();
     let mut consumed = 0;
     for (index, found) in pattern.find_iter(input).enumerate() {
         rendered.push_str(&input[consumed..found.start()]);
@@ -1358,17 +1367,19 @@ fn render_imported_inline_files(
                 (String::new(), "file", String::new())
             };
             rendered.push_str(&format!("<action-text-attachment sgid=\"{}\" content-type=\"{}\" filename=\"{}\" filesize=\"{size}\"{caption_attribute}{preview_attribute}><figure class=\"attachment attachment--{figure_class} attachment--{}\">{preview_html}<figcaption class=\"attachment__caption\">{caption_html}</figcaption></figure></action-text-attachment>", esc(sgid), esc(&content_type), esc(&filename), esc(extension)));
-            expected.retain(|id| *id != blob_id);
+            if !used.contains(&blob_id) {
+                used.push(blob_id);
+            }
         } else {
             rendered.push_str(found.as_str());
         }
         consumed = found.end();
     }
     rendered.push_str(&input[consumed..]);
-    if !expected.is_empty() {
+    if require_all && expected.iter().any(|id| !used.contains(id)) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    Ok(rendered)
+    Ok((rendered, used))
 }
 fn mention_ids(input: &str, signing_key: &[u8], imported_key: Option<&[u8]>) -> Vec<i64> {
     if !input.contains("application/vnd.campfire.mention")
@@ -4038,7 +4049,7 @@ fn insert_message(
         .timestamp_nanos_opt()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
+    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich && !body.trim().is_empty() {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     touch_room(&db, rid)?;
     let mut valid_mentions = Vec::new();
@@ -4554,7 +4565,7 @@ async fn message_create(
         let mut body = String::new();
         let mut client_id = None;
         let mut upload = None;
-        let mut rich = false;
+        let mut rich = true;
         while let Some(field) = multipart
             .next_field()
             .await
@@ -4596,7 +4607,7 @@ async fn message_create(
             f.body.unwrap_or_default(),
             f.client_id,
             None,
-            f.format.as_deref() == Some("html"),
+            matches!(f.format.as_deref(), None | Some("html")),
         )
     };
     let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), false)?;
@@ -4725,10 +4736,22 @@ async fn message_update(
         return Err(StatusCode::FORBIDDEN);
     }
     let body = form_value(&f, "body", "message[body]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let rich = form_value(&f, "format", "message[format]") == Some("html");
-    let (plain, body_html) = if rich {
+    let rich = matches!(form_value(&f, "format", "message[format]"), None | Some("html"));
+    let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
+    let (plain, body_html, body_source, used_inline) = if rich {
+        let normalized = action_text_webhook_html(body);
+        let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
+        let (inline, used) = render_imported_inline_files(
+            &normalized,
+            &db,
+            mid,
+            &s.mention_signing_key,
+            s.imported_mention_signing_key.as_deref(),
+            blob_key,
+            false,
+        )?;
         let trusted = replace_mention_attachments(
-            body,
+            &inline,
             &db,
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
@@ -4739,9 +4762,9 @@ async fn message_update(
                 .get(header::HOST)
                 .and_then(|value| value.to_str().ok()),
         );
-        (plain, Some(html))
+        (plain, Some(html), Some(normalized), used)
     } else {
-        (body.to_string(), None)
+        (body.to_string(), None, None, Vec::new())
     };
     if plain.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -4754,19 +4777,24 @@ async fn message_update(
         params![
             plain,
             body_html,
-            if rich { Some(body) } else { None },
+            body_source,
             updated_at,
             updated_at_ns,
             mid
         ],
     )
     .map_err(db_err)?;
+    for blob_id in old_inline.iter().filter(|id| !used_inline.contains(id)) {
+        db.execute("DELETE FROM inline_embeds WHERE message_id=?1 AND blob_id=?2", params![mid, blob_id])
+            .map_err(db_err)?;
+    }
+    purge_orphan_inline_blobs(&db, &old_inline)?;
     touch_room(&db, rid)?;
     db.execute("DELETE FROM message_mentions WHERE message_id=?1", [mid])
         .map_err(db_err)?;
     if rich {
         for mentioned_id in mention_ids(
-            body,
+            body_source.as_deref().unwrap_or(body),
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
         ) {
@@ -7607,10 +7635,13 @@ async fn bot_message_update(
     let updated_at = now();
     let updated_at_ns =
         message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let found=db.execute("UPDATE messages SET body=?1,body_html=NULL,body_source=NULL,updated_at=?2,updated_at_ns=?3 WHERE id=?4 AND room_id=?5 AND creator_id=?6",params![body,updated_at,updated_at_ns,mid,rid,u.id]).map_err(db_err)?;
     if found == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
+    db.execute("DELETE FROM inline_embeds WHERE message_id=?1", [mid]).map_err(db_err)?;
+    purge_orphan_inline_blobs(&db, &old_inline)?;
     touch_room(&db, rid)?;
     db.execute("DELETE FROM message_mentions WHERE message_id=?1", [mid])
         .map_err(db_err)?;
@@ -8818,7 +8849,7 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source) in &batch {
-            let inline = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key, blob_key)
+            let (inline, _) = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
@@ -9226,6 +9257,8 @@ mod tests {
             ("<blockquote><div>Quoted text</div></blockquote>", "“Quoted text”"),
             ("<div>Before</div><ul><li>One</li><li>Two</li></ul><div>After</div>", "Before\n• One\n• Two\n\nAfter"),
             ("<p>A</p><p>B</p>", "A\n\nB"),
+            ("<div>Before <action-text-attachment filename='photo.png' content-type='image/png'></action-text-attachment> after</div>", "Before [photo.png] after"),
+            ("<div>Before <action-text-attachment filename='photo.png'><figure><figcaption>photo.png 1 KB</figcaption></figure></action-text-attachment> after</div>", "Before [photo.png] after"),
         ];
         for (input, expected) in cases {
             assert_eq!(super::rich_body(input, None).0, expected, "{input}");

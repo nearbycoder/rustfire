@@ -765,14 +765,14 @@ def main():
             code, _, _ = request(client(), base, f"/rooms/1/{rotated}/messages")
             assert code == 401
             rich = "<div><strong>formatted</strong> text <a href='javascript:alert(1)'>unsafe link</a><script>alert(1)</script></div>"
-            code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": rich, "message[format]": "html"}, headers={"Accept": "application/json"})
+            code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": rich}, headers={"Accept": "application/json"})
             assert code == 201
             formatted = json.loads(payload)
             assert "<strong>formatted</strong>" in formatted["body"]["html"]
             assert "javascript:" not in formatted["body"]["html"] and "<script" not in formatted["body"]["html"]
             assert "formatted text" in formatted["body"]["plain_text"]
             assert "<strong>formatted</strong>" in request(admin, base, "/rooms/1")[2]
-            code, _, _ = request(admin, base, f"/rooms/1/messages/{formatted['id']}", {"message[body]": "<div><em>changed</em></div>", "message[format]": "html"}, method="PATCH")
+            code, _, _ = request(admin, base, f"/rooms/1/messages/{formatted['id']}", {"message[body]": "<div><em>changed</em></div>"}, method="PATCH")
             assert code == 303
             assert "<em>changed</em>" in request(admin, base, "/rooms/1")[2]
             preview = "<div><action-text-attachment content-type='application/vnd.actiontext.opengraph-embed' href='javascript:alert(1)' url='data:image/svg+xml;base64,PHN2Zy8+' filename='Free cookies' caption='Cookies here'></action-text-attachment></div>"
@@ -974,9 +974,10 @@ def main():
             assert code == 200 and "<turbo-frame id='edit_message_edit-form-check'>" in edit_frame
             assert "name='_method' value='patch'" in edit_frame and "name='message[body]'" in edit_frame
             assert "id='delete_form_message_edit-form-check'" in edit_frame
-            code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"patch","message[body]":"Edited by form"}, method="POST")
+            code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"patch","message[body]":"<div><strong>Edited by form</strong></div>"}, method="POST")
             assert code == 200
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT body FROM messages WHERE id=?",(edit_id,)).fetchone() == ("Edited by form",)
+            assert "<strong>Edited by form</strong>" in sqlite3.connect(f"{tmp}/test.db").execute("SELECT body_html FROM messages WHERE id=?",(edit_id,)).fetchone()[0]
             code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"delete"}, method="POST")
             assert code in (200, 204)
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM messages WHERE id=?",(edit_id,)).fetchone() == (0,)
