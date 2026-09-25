@@ -441,7 +441,11 @@ def main():
             assert request(member, base, "/rooms/3/involvement", {"involvement": "everything"})[0] == 200
             assert 'id="list_rooms_direct_3"' in request(member, base, "/users/me/sidebar")[2]
             code, _, page = request(member, base, "/rooms/directs/3/edit")
-            assert code == 200 and "Ping settings" in page
+            assert code == 200 and "Edit settings for Admin" in page
+            assert 'class="directs--edit margin-block-end"' in page
+            assert 'aria-label="Delete Ping"' in page and 'name="_method" value="delete"' in page
+            assert 'href="/users/1"' in page and 'src="/users/' in page
+            assert request(member, base, "/rooms/directs/3", {}, method="POST")[0] == 405
             code, alias_url, _ = request(member, base, "/rooms/directs/3")
             assert code == 200 and alias_url.endswith("/rooms/3")
             assert request(member, base, "/rooms/directs/2/edit")[0] == 404
@@ -873,7 +877,7 @@ def main():
                 room_stored_name = check_db.execute("SELECT stored_name FROM attachments WHERE id=?", (room_attachment_id,)).fetchone()[0]
             room_stored_file = pathlib.Path(tmp, "uploads", room_stored_name)
             assert room_stored_file.is_file()
-            assert request(member, base, "/rooms/directs/3", method="DELETE")[0] == 303
+            assert request(member, base, "/rooms/directs/3", {"_method": "delete"}, method="POST")[0] == 200
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM direct_room_sets WHERE room_id=3").fetchone() == (0,)
             assert request(admin, base, "/rooms/3")[1].endswith("/rooms/1")

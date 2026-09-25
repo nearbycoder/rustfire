@@ -5497,20 +5497,31 @@ async fn direct_edit(
         return Err(StatusCode::NOT_FOUND);
     }
     let db = pool(&s)?;
-    let mut stmt = db.prepare("SELECT u.name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.room_id=?1 AND (u.id!=?2 OR (SELECT count(*) FROM memberships WHERE room_id=?1)=1) ORDER BY lower(u.name)").map_err(db_err)?;
+    let mut stmt = db.prepare("SELECT u.id,u.name,COALESCE(u.bio,''),u.updated_at FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.room_id=?1 AND (u.id!=?2 OR (SELECT count(*) FROM memberships WHERE room_id=?1)=1) ORDER BY m.id").map_err(db_err)?;
     let people = stmt
-        .query_map(params![rid, u.id], |r| r.get::<_, String>(0))
+        .query_map(params![rid, u.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
-    let people = people
-        .iter()
-        .map(|name| format!("<div class='member'>{}</div>", esc(name)))
-        .collect::<String>();
+    let names = people.iter().map(|(_, name, _, _)| name.as_str()).collect::<Vec<_>>();
+    let display_name = match names.as_slice() {
+        [] => u.name.clone(),
+        [name] => (*name).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        _ => format!("{}, and {}", names[..names.len()-1].join(", "), names.last().unwrap()),
+    };
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    let mut members = String::new();
+    for (id, name, bio, updated_at) in people {
+        let title = if bio.trim().is_empty() { name.clone() } else { format!("{name} – {bio}") };
+        let avatar = avatar_path(avatar_key, id, &updated_at)?;
+        members.push_str(&format!("<div class=\"member flex flex-column gap fill-shade pad border-radius\"><figure class=\"avatar center\" style=\"--avatar-border-radius: 10ch; --avatar-size: 10ch;\"><a title=\"{}\" class=\"btn avatar\" data-turbo-frame=\"_top\" href=\"/users/{id}\"><img aria-hidden=\"true\" loading=\"lazy\" src=\"{avatar}\" width=\"48\" height=\"48\" /></a></figure><strong>{}</strong></div>", esc(&title), esc(&name)));
+    }
+    let delete_url = public_url(&headers, &format!("/rooms/directs/{rid}"));
     Ok(render(
-        "Ping settings",
+        &format!("Edit settings for {display_name}"),
         &format!(
-            "<section class='form-card'><h1>Ping settings</h1>{people}<form method='post' action='/rooms/directs/{rid}/delete'><button class='danger'>Delete Ping</button></form></section>"
+            "<nav class=\"ping-settings-back\"><a class=\"btn\" href=\"/rooms/{rid}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Go Back</span></a></nav><div class=\"panel txt-align-center\"><section class=\"directs--edit margin-block-end\">{members}</section><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative center\" aria-label=\"Delete Ping\" data-turbo-confirm=\"Are you sure you want to delete this ping and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" />Ping</button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></div>", esc(u.csrf_token.as_deref().unwrap_or(""))
         ),
         Some(&u),
     ))
@@ -5526,6 +5537,17 @@ async fn direct_delete(
         return Err(StatusCode::NOT_FOUND);
     }
     room_delete(State(s), headers, Path(rid)).await
+}
+async fn direct_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(rid): Path<i64>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult {
+    if form.get("_method").map(String::as_str) != Some("delete") {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    direct_delete(State(s), headers, Path(rid)).await
 }
 async fn direct_show(
     State(s): State<Arc<AppState>>,
@@ -5577,7 +5599,7 @@ async fn room_delete(
     s.events.remove(rid);
     notify_room_lists(&s, members);
     s.turbo_shared_rooms.send_turbo(0, format!("<turbo-stream action=\"remove\" target=\"{}\"></turbo-stream>", room_list_target(&r)));
-    Ok(Redirect::to("/").into_response())
+    Ok(found_redirect("/"))
 }
 async fn direct_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
@@ -9594,7 +9616,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/closeds", get(root).post(create_closed_room))
         .route(
             "/rooms/directs/{id}",
-            get(direct_show).delete(direct_delete),
+            get(direct_show).post(direct_post_override).delete(direct_delete),
         )
         .route("/rooms/directs/{id}/edit", get(direct_edit))
         .route("/rooms/directs/{id}/delete", post(direct_delete))

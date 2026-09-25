@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import urllib.error
 import urllib.parse
 from html.parser import HTMLParser
 
@@ -38,6 +39,21 @@ def request(port, path, cookie, csrf=None, user_ids=()):
         headers.update({"Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": csrf})
     with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers, data=body), timeout=15) as response:
         return response.status, response.url, response.read().decode()
+
+
+def delete_direct(port, room_id, cookie, csrf):
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, file, code, message, headers, new_url):
+            return None
+
+    body = urllib.parse.urlencode({"_method": "delete", "authenticity_token": csrf}).encode()
+    headers = {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": csrf}
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/directs/{room_id}", headers=headers, data=body)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
+            return response.status, urllib.parse.urlparse(response.headers.get("Location", "")).path
+    except urllib.error.HTTPError as error:
+        return error.code, urllib.parse.urlparse(error.headers.get("Location", "")).path
 
 
 def run(port, cookie, csrf, capture_dir):
@@ -74,7 +90,9 @@ def run(port, cookie, csrf, capture_dir):
         received = json.loads(output.strip().splitlines()[-1])
         assert received == {"received": 4, "unexpected": 0, "ids": [2, 3, 4, 5]}, received
         streams = [(capture_dir / f"{room_id}.html").read_text() for room_id in (2, 3, 4, 5)]
-        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page
+        edit_pages = [request(port, f"/rooms/directs/{room_id}/edit", cookie)[2] for room_id in (2, 3, 4, 5)]
+        delete_result = delete_direct(port, 2, cookie, csrf)
+        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, delete_result
     finally:
         if process.poll() is None:
             process.kill()
@@ -104,9 +122,10 @@ def normalized_placeholders(groups):
 
 
 class SidebarTree(HTMLParser):
-    def __init__(self, frame_id):
+    def __init__(self, frame_id=None, target_class=None):
         super().__init__()
         self.frame_id = frame_id
+        self.target_class = target_class
         self.active = False
         self.depth = 0
         self.events = []
@@ -114,7 +133,9 @@ class SidebarTree(HTMLParser):
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
         if not self.active:
-            if tag != "turbo-frame" or values.get("id") != self.frame_id:
+            matches_frame = self.frame_id is not None and tag == "turbo-frame" and values.get("id") == self.frame_id
+            matches_class = self.target_class is not None and tag == "div" and self.target_class in values.get("class", "").split()
+            if not (matches_frame or matches_class):
                 return
             self.active = True
             self.depth = 1
@@ -124,6 +145,8 @@ class SidebarTree(HTMLParser):
             values["value"] = "<csrf>"
         if "data-sorted-list-number" in values:
             values["data-sorted-list-number"] = "<epoch-ms>"
+        if values.get("action", "").startswith("http://127.0.0.1:"):
+            values["action"] = re.sub(r"^http://127\.0\.0\.1:\d+", "", values["action"])
         self.events.append(("start", tag, tuple(sorted(values.items()))))
 
     def handle_endtag(self, tag):
@@ -142,6 +165,13 @@ def frame_tree(page, frame_id):
     parser = SidebarTree(frame_id)
     parser.feed(page)
     assert parser.events and parser.depth == 0, f"{frame_id} frame missing or unclosed"
+    return parser.events
+
+
+def panel_tree(page):
+    parser = SidebarTree(target_class="panel")
+    parser.feed(page)
+    assert parser.events and parser.depth == 0, "Direct settings panel missing or unclosed"
     return parser.events
 
 
@@ -166,7 +196,7 @@ def main():
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
-            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
+            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_delete = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
         finally:
             stop_server(rust)
 
@@ -177,7 +207,7 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping = run(camp_port, cookie, csrf, temp / "camp-streams")
+            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_delete = run(camp_port, cookie, csrf, temp / "camp-streams")
         finally:
             if camp is not None:
                 stop_server(camp)
@@ -198,6 +228,9 @@ def main():
                 (args.sample_dir / f"campfire-sidebar-{index}.html").write_text(camp_sidebar)
             (args.sample_dir / "rustfire-new-ping.html").write_text(rust_new_ping)
             (args.sample_dir / "campfire-new-ping.html").write_text(camp_new_ping)
+            for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
+                (args.sample_dir / f"rustfire-edit-ping-{room_id}.html").write_text(rust_edit)
+                (args.sample_dir / f"campfire-edit-ping-{room_id}.html").write_text(camp_edit)
         for index, (rust_link, camp_link) in enumerate(zip(rust_links, camp_links), 2):
             assert normalized(rust_link) == normalized(camp_link), f"Direct room {index} markup differs; use --sample-dir to inspect"
             assert normalized(rust_streams[index - 2]) == normalized(camp_streams[index - 2]), f"Direct room {index} Turbo event differs; use --sample-dir to inspect"
@@ -209,7 +242,10 @@ def main():
         for index, (rust_sidebar, camp_sidebar) in enumerate(zip(rust_sidebars, camp_sidebars)):
             assert frame_tree(rust_sidebar, "user_sidebar") == frame_tree(camp_sidebar, "user_sidebar"), f"Sidebar frame differs after {index} direct rooms; use --sample-dir to inspect"
         assert frame_tree(rust_new_ping, "direct_rooms_control") == frame_tree(camp_new_ping, "direct_rooms_control"), "New-ping frame differs; use --sample-dir to inspect"
-        print("PASS paired direct links, Turbo events, 80 shortcut forms, five sidebar frames, and new-ping frame; only room epoch milliseconds and form CSRF tokens normalized")
+        for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
+            assert panel_tree(rust_edit) == panel_tree(camp_edit), f"Direct settings panel differs for room {room_id}; use --sample-dir to inspect"
+        assert rust_delete == camp_delete == (302, "/"), (rust_delete, camp_delete)
+        print("PASS paired direct links, Turbo events, 80 shortcut forms, five sidebar frames, new-ping frame, four direct settings panels, and delete form; only room epoch milliseconds, form CSRF tokens, and origins normalized")
 
 
 if __name__ == "__main__":

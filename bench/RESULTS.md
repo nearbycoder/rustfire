@@ -516,6 +516,8 @@ The new-ping `direct_rooms_control` frame also matched the source's parsed tags,
 
 A fresh 1,000-socket direct-room creation burst after this form change delivered **10,000/10,000** expected frames in each app, with identical sampled payloads and no missed, unexpected, or early-closed deliveries. Rustfire measured **133 ms elapsed / 21 ms p95** and Campfire **881 ms / 146 ms p95**. This is a short local regression trial, not a sustained capacity measurement.
 
+The direct-room settings panel now matches Campfire's parsed tags, attributes, and non-whitespace text for pings with one, two, three, and five peers, after normalizing only the form's CSRF token and absolute origin. The source-shaped delete form returns the same HTTP 302 to `/` on both apps. A Rustfire browser check at 1280 px and 390 px showed linked member avatars, a working back link, the delete confirmation control, and no horizontal overflow or page errors. Three referenced source icons (`trash`, `remove`, and `remove-circle`) were added after the browser check exposed a missing trash icon. The generic outer page layout and CSS still differ from Campfire; these checks do not establish full-page parity or measure settings-page performance.
+
 With the source-shaped sidebar frame in the release build, a fresh reverse-order 1,000-socket direct-room creation burst delivered all **10,000/10,000** frames on each app. Rustfire measured **136 ms elapsed / 21 ms p95** and Campfire **733 ms / 115 ms p95**. Both received the same 815-byte average event payload and had zero missed, unexpected, or early-closed deliveries. The burst has the same short local scope described above.
 
 ## Paired direct-room creation and sidebar fanout
