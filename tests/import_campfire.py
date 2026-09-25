@@ -40,7 +40,7 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
-            for mid in (1, 2, 3):
+            for mid in (1, 2, 3, 4):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(1,'Message',1,'body',?,?,?)", (source_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
@@ -54,6 +54,12 @@ def main():
             mention_body = f'<div><action-text-attachment sgid="{sgid}" content-type="application/vnd.campfire.mention"></action-text-attachment> hello</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(2,'Message',3,'body',?,?,?)", (mention_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(3,?)", ("@Rustfire Compare hello",))
+            blob_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/10?expires_in","pur":"attachable"}}'
+            blob_encoded = base64.urlsafe_b64encode(blob_payload).decode()
+            blob_sgid = f"{blob_encoded}--{hmac.new(signing_key, blob_encoded.encode(), hashlib.sha1).hexdigest()}"
+            inline_body = f'<div>Before <action-text-attachment sgid="{blob_sgid}" content-type="text/plain" filename="inline.txt" filesize="20"></action-text-attachment> after</div>'
+            fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(3,'Message',4,'body',?,?,?)", (inline_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(4,?)", ("Before [inline.txt] after",))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
@@ -66,6 +72,14 @@ def main():
                 VALUES(7,?,'imported.txt','text/plain','{}','local',?,'2026-01-01 00:00:00')""", (key, len(file_bytes)))
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                 VALUES(7,'attachment','Message',2,7,'2026-01-01 00:00:00')""")
+            inline_key = "ab10cdef1234567890"
+            inline_file = source_files / inline_key[:2] / inline_key[2:4] / inline_key
+            inline_file.parent.mkdir(parents=True, exist_ok=True)
+            inline_file.write_bytes(file_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(10,?,'inline.txt','text/plain','{}','local',?,'2026-01-01 00:00:00')""", (inline_key, len(file_bytes)))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(10,'embeds','ActionText::RichText',3,10,'2026-01-01 00:00:00')""")
             for blob_id, record_type, record_id, name in ((8, "User", 1, "avatar"), (9, "Account", 1, "logo")):
                 media_key = f"ab{blob_id}cdef1234567890"
                 media_file = source_files / media_key[:2] / media_key[2:4] / media_key
@@ -88,7 +102,7 @@ def main():
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
-        assert result["messages"] == 3 and result["attachments"] == 1, result
+        assert result["messages"] == 4 and result["attachments"] == 1 and result["inline_embeds"] == 1, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -100,6 +114,10 @@ def main():
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=2").fetchone() == ("imported.txt",)
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
             assert "@Rustfire Compare" in imported.execute("SELECT body_html FROM messages WHERE id=3").fetchone()[0]
+            inline_html = imported.execute("SELECT body_html FROM messages WHERE id=4").fetchone()[0]
+            assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html, inline_html
+            inline_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=10").fetchone()[0]
+            assert (target_uploads / inline_stored).read_bytes() == file_bytes
             assert imported.execute("SELECT id FROM attachments WHERE message_id=2").fetchone() == (7,)
             stored = imported.execute("SELECT stored_name FROM attachments WHERE id=7").fetchone()[0]
             assert (target_uploads / stored).read_bytes() == file_bytes
@@ -143,12 +161,18 @@ def main():
                 headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
             with urllib.request.urlopen(post, timeout=2) as response:
                 assert response.status == 201
+            blob_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"ActiveStorage", 1000, 64)
+            blob_payload = json.dumps({"_rails": {"data": 10, "pur": "blob_id"}}, separators=(",", ":")).encode()
+            blob_encoded = base64.b64encode(blob_payload).decode()
+            blob_token = f"{blob_encoded}--{hmac.new(blob_key, blob_encoded.encode(), hashlib.sha1).hexdigest()}"
+            blob_request = urllib.request.Request(f"http://127.0.0.1:{port}/rails/active_storage/blobs/redirect/{blob_token}/inline.txt")
+            with urllib.request.urlopen(blob_request, timeout=2) as response:
+                assert response.read() == file_bytes
         finally:
             server.terminate()
             server.wait(timeout=5)
         with sqlite3.connect(source_db) as fixture:
-            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
-                VALUES(10,'embeds','ActionText::RichText',1,7,'2026-01-01 00:00:00')""")
+            fixture.execute("UPDATE active_storage_blobs SET content_type='image/png' WHERE id=10")
         bad_target = root / "must-not-exist.sqlite3"
         bad_uploads = root / "must-not-exist-uploads"
         bad_command = command.copy()
@@ -156,7 +180,7 @@ def main():
         bad_command[bad_command.index("--target-uploads") + 1] = str(bad_uploads)
         failure = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
         assert failure.returncode != 0 and not bad_target.exists() and not bad_uploads.exists()
-        print("PASS Campfire account, users, room, rich messages, search text, boost, session, push key, file, avatar, and logo import; inline embeds fail safely")
+        print("PASS Campfire account, users, room, rich messages and inline files, search text, boost, session, push key, avatar, and logo import; inline previews fail safely")
 
 
 if __name__ == "__main__":

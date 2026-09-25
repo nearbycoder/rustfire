@@ -50,12 +50,9 @@ def import_data(source, target, source_files, uploads):
     accounts = list(rows(source, "SELECT id,name,join_code,created_at,updated_at,settings,custom_styles FROM accounts"))
     if len(accounts) != 1:
         raise ValueError("expected one Campfire account")
-    unsupported_embeds = source.execute("SELECT count(*) FROM active_storage_attachments WHERE record_type='ActionText::RichText' AND name='embeds'").fetchone()[0]
-    if unsupported_embeds:
-        raise ValueError(f"{unsupported_embeds} inline file embeds need migration support before this installation can be imported")
     unknown_media = list(source.execute("""SELECT DISTINCT record_type,name FROM active_storage_attachments
         WHERE NOT ((record_type='Message' AND name='attachment') OR (record_type='User' AND name='avatar')
-        OR (record_type='Account' AND name='logo'))"""))
+        OR (record_type='Account' AND name='logo') OR (record_type='ActionText::RichText' AND name='embeds'))"""))
     if unknown_media:
         raise ValueError(f"unknown Active Storage attachment types: {unknown_media}")
 
@@ -135,6 +132,27 @@ def import_data(source, target, source_files, uploads):
         target.execute("""INSERT INTO attachments(id,message_id,filename,content_type,stored_name,created_at,width,height)
             VALUES(?,?,?,?,?,?,?,?)""", (attachment_id, record_id, filename, content_type, stored, created, details.get("width"), details.get("height")))
         counts["attachments"] += 1
+
+    inline = rows(source, """SELECT rich.record_id,blob.id,blob.key,blob.filename,
+        COALESCE(blob.content_type,'application/octet-stream'),blob.byte_size,blob.created_at
+        FROM active_storage_attachments attachment JOIN active_storage_blobs blob ON blob.id=attachment.blob_id
+        JOIN action_text_rich_texts rich ON rich.id=attachment.record_id AND rich.record_type='Message' AND rich.name='body'
+        WHERE attachment.record_type='ActionText::RichText' AND attachment.name='embeds'""")
+    counts["inline_embeds"] = 0
+    for message_id, blob_id, key, filename, content_type, size, created in inline:
+        if content_type.startswith(("image/", "video/")) or content_type == "application/pdf":
+            raise ValueError(f"inline media preview for blob {blob_id} ({content_type}) needs migration support")
+        if not target.execute("SELECT EXISTS(SELECT 1 FROM inline_blobs WHERE id=?)", (blob_id,)).fetchone()[0]:
+            stored = store_blob(source_files, uploads, key, size)
+            target.execute("""INSERT INTO inline_blobs(id,filename,content_type,stored_name,byte_size,created_at)
+                VALUES(?,?,?,?,?,?)""", (blob_id, filename, content_type, stored, size, created))
+        target.execute("INSERT INTO inline_embeds(message_id,blob_id) VALUES(?,?)", (message_id, blob_id))
+        counts["inline_embeds"] += 1
+    unmatched = source.execute("""SELECT count(*) FROM active_storage_attachments attachment
+        LEFT JOIN action_text_rich_texts rich ON rich.id=attachment.record_id AND rich.record_type='Message' AND rich.name='body'
+        WHERE attachment.record_type='ActionText::RichText' AND attachment.name='embeds' AND rich.id IS NULL""").fetchone()[0]
+    if unmatched:
+        raise ValueError(f"{unmatched} inline file embeds do not belong to a message body")
 
     media = (("User", "avatar", "avatars", "user_id"), ("Account", "logo", "account_logos", "id"))
     for record_type, name, table, key_column in media:

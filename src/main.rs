@@ -534,6 +534,8 @@ fn replace_mention_attachments(
 fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
+        .add_tags(&["action-text-attachment", "figure", "figcaption"])
+        .add_tag_attributes("action-text-attachment", &["sgid", "content-type", "filename", "filesize", "caption"])
         .add_tag_attributes("span", &["class"])
         .add_tag_attributes("div", &["class"])
         .add_tag_attributes("figure", &["class"])
@@ -1130,6 +1132,112 @@ fn mention_id_from_sgid(key: &[u8], sgid: &str) -> Option<i64> {
 fn verified_mention_id(key: &[u8], imported_key: Option<&[u8]>, sgid: &str) -> Option<i64> {
     mention_id_from_sgid(key, sgid)
         .or_else(|| imported_key.and_then(|imported| mention_id_from_sgid(imported, sgid)))
+}
+fn campfire_blob_id_from_sgid(key: &[u8], sgid: &str) -> Option<i64> {
+    let (encoded, signature) = sgid.split_once("--")?;
+    if signature.len() != 40 || sgid.len() > 2048 {
+        return None;
+    }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1()).ok()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let envelope: Value = serde_json::from_slice(&URL_SAFE.decode(encoded).ok()?).ok()?;
+    let metadata = envelope.get("_rails")?;
+    if metadata.get("pur").and_then(Value::as_str) != Some("attachable") {
+        return None;
+    }
+    if let Some(expiry) = metadata.get("exp").filter(|expiry| !expiry.is_null()) {
+        if chrono::DateTime::parse_from_rfc3339(expiry.as_str()?).ok()? <= Utc::now() {
+            return None;
+        }
+    }
+    metadata
+        .get("data")?
+        .as_str()?
+        .strip_prefix("gid://campfire/ActiveStorage::Blob/")?
+        .strip_suffix("?expires_in")?
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+}
+fn inline_file_size(size: i64) -> String {
+    if size < 1024 {
+        return format!("{size} Bytes");
+    }
+    let units = ["KB", "MB", "GB", "TB"];
+    let mut value = size as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < units.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 10.0 || value.fract() == 0.0 {
+        format!("{} {}", value.round() as i64, units[unit])
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+fn render_imported_inline_files(
+    input: &str,
+    db: &rusqlite::Connection,
+    message_id: i64,
+    signing_key: &[u8],
+    imported_key: Option<&[u8]>,
+) -> Result<String, StatusCode> {
+    let mut expected = db.prepare("SELECT blob_id FROM inline_embeds WHERE message_id=?1")
+        .map_err(db_err)?
+        .query_map([message_id], |row| row.get::<_, i64>(0))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    if expected.is_empty() {
+        return Ok(input.to_string());
+    }
+    static INLINE_ATTACHMENT: OnceLock<Regex> = OnceLock::new();
+    let pattern = INLINE_ATTACHMENT.get_or_init(|| Regex::new(r"(?is)<action-text-attachment\b[^>]*>.*?</action-text-attachment>").unwrap());
+    let selector = Selector::parse("action-text-attachment[sgid]").unwrap();
+    let mut rendered = String::with_capacity(input.len() + 256);
+    let mut consumed = 0;
+    for found in pattern.find_iter(input) {
+        rendered.push_str(&input[consumed..found.start()]);
+        let fragment = ParsedHtml::parse_fragment(found.as_str());
+        let attachment = fragment.select(&selector).next();
+        let blob_id = attachment
+            .as_ref()
+            .and_then(|attachment| attachment.value().attr("sgid"))
+            .and_then(|sgid| campfire_blob_id_from_sgid(signing_key, sgid)
+                .or_else(|| imported_key.and_then(|key| campfire_blob_id_from_sgid(key, sgid))));
+        if let Some(blob_id) = blob_id.filter(|id| expected.contains(id)) {
+            let (filename, content_type, size): (String, String, i64) = db.query_row(
+                "SELECT filename,content_type,byte_size FROM inline_blobs WHERE id=?1",
+                [blob_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(db_err)?;
+            let extension = filename.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+            let sgid = attachment.unwrap().value().attr("sgid").unwrap();
+            let caption = attachment.as_ref().and_then(|attachment| attachment.value().attr("caption"));
+            let caption_attribute = caption.map(|caption| format!(" caption=\"{}\"", esc(caption))).unwrap_or_default();
+            let caption_html = if let Some(caption) = caption {
+                esc(caption)
+            } else {
+                format!("<span class=\"attachment__name\">{}</span><span class=\"attachment__size\">{}</span>", esc(&filename), inline_file_size(size))
+            };
+            rendered.push_str(&format!("<action-text-attachment sgid=\"{}\" content-type=\"{}\" filename=\"{}\" filesize=\"{size}\"{caption_attribute}><figure class=\"attachment attachment--file attachment--{}\"><figcaption class=\"attachment__caption\">{caption_html}</figcaption></figure></action-text-attachment>", esc(sgid), esc(&content_type), esc(&filename), esc(extension)));
+            expected.retain(|id| *id != blob_id);
+        } else {
+            rendered.push_str(found.as_str());
+        }
+        consumed = found.end();
+    }
+    rendered.push_str(&input[consumed..]);
+    if !expected.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(rendered)
 }
 fn mention_ids(input: &str, signing_key: &[u8], imported_key: Option<&[u8]>) -> Vec<i64> {
     if !input.contains("application/vnd.campfire.mention")
@@ -7424,7 +7532,10 @@ fn attachment_record_unchecked(
 ) -> Result<(i64, String, String, String), StatusCode> {
     let db = pool(&s)?;
     let row:Option<(i64,String,String,String)>=db.query_row("SELECT m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?;
-    row.ok_or(StatusCode::NOT_FOUND)
+    if let Some(row) = row {
+        return Ok(row);
+    }
+    db.query_row("SELECT m.room_id,b.filename,b.content_type,b.stored_name FROM inline_blobs b JOIN inline_embeds e ON e.blob_id=b.id JOIN messages m ON m.id=e.message_id WHERE b.id=?1 ORDER BY m.id LIMIT 1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)
 }
 fn byte_range(input: &str, size: u64) -> Result<(u64, u64), StatusCode> {
     let value = input
@@ -8260,6 +8371,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
+        CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS inline_embeds(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,blob_id INTEGER NOT NULL REFERENCES inline_blobs(id) ON DELETE CASCADE,PRIMARY KEY(message_id,blob_id));
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -8469,7 +8582,9 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source) in &batch {
-            let trusted = replace_mention_attachments(&source, &tx, signing_key, imported_key)
+            let inline = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key)
+                .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
+            let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
             let (_, html) = rich_body(&trusted, None);
             tx.execute("UPDATE messages SET body_html=?1 WHERE id=?2", params![html, id])?;
