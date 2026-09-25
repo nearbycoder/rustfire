@@ -238,14 +238,14 @@ try{
     const event=events.find(frame=>frame.identifier===roomListIdentifier);
     const turbo=events.find(frame=>frame.identifier===userListIdentifier);
     assert(turbo?.message.includes(`action="prepend" target="direct_rooms"`));
-    assert(turbo.message.includes(`id='list_rooms_direct_${directId}'`));
+    assert(turbo.message.includes(`id="list_rooms_direct_${directId}"`));
     assert.equal(event.identifier,roomListIdentifier);
     assert.equal(event.message.type,'direct_room_added');
     assert.equal(event.message.room_id,directId);
-    assert.match(event.message.html,new RegExp(`href='/rooms/${directId}'`));
+    assert.match(event.message.html,new RegExp(`href="/rooms/${directId}"`));
   }
   const directSidebar=await fetch(base+'/users/me/sidebar?active=1',{headers:{Cookie:cookie}});
-  assert.match(await directSidebar.text(),new RegExp(`href='/rooms/${directId}'`));
+  assert.match(await directSidebar.text(),new RegExp(`href="/rooms/${directId}"`));
   const ignoredId=await fetch(base+'/rooms/directs',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams([['user_ids[]','2'],['user_ids[]','999999']]),redirect:'manual'});
   assert.equal(ignoredId.status,302);
   assert.equal(ignoredId.headers.get('location'),`/rooms/${directId}`);
@@ -258,7 +258,7 @@ try{
   assert.notEqual(selfId,directId);
   const selfEvents=[await nextFrame(),await nextFrame()];
   assert(selfEvents.some(event=>event.identifier===roomListIdentifier&&event.message.room_id===selfId));
-  assert(selfEvents.some(event=>event.identifier===userListIdentifier&&event.message.includes(`id='list_rooms_direct_${selfId}'`)));
+  assert(selfEvents.some(event=>event.identifier===userListIdentifier&&event.message.includes(`id="list_rooms_direct_${selfId}"`)));
   sendCommand({command:'unsubscribe',identifier:userListIdentifier});
   const deactivationSocket=net.createConnection({host:'127.0.0.1',port});
   const deactivationReady=new Promise((resolve,reject)=>{deactivationSocket.once('error',reject);deactivationSocket.once('data',data=>data.toString().startsWith('HTTP/1.1 101')?resolve():reject(new Error('deactivation socket handshake failed')))});

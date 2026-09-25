@@ -269,10 +269,10 @@ if (chat) {
   function updateDirectRoom(data){
     const nav=document.getElementById('direct_rooms');
     if(!nav||!Number.isInteger(data?.room_id)||typeof data.html!=='string')return false;
-    const link=new DOMParser().parseFromString(data.html,'text/html').querySelector('.room-link');
+    const link=new DOMParser().parseFromString(data.html,'text/html').querySelector('.direct[id^="list_rooms_direct_"]');
     if(!link||link.getAttribute('href')!==`/rooms/${data.room_id}`)return false;
     link.classList.toggle('active',data.room_id===roomId);
-    nav.querySelector(`.room-link[href='/rooms/${data.room_id}']`)?.remove();
+    nav.querySelector(`.direct[href='/rooms/${data.room_id}']`)?.remove();
     nav.prepend(link);
     if(sidebarRefreshPending)sidebarRefreshAgain=true;
     return true;

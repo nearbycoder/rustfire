@@ -200,16 +200,14 @@ fn notify_direct_room(s: &AppState, rid: i64, ids: impl IntoIterator<Item = i64>
         let rendered = (|| -> Result<String, StatusCode> {
             let room = room_for(s, uid, rid)?;
             let db = pool(s)?;
-            let unread: bool = db
-                .query_row(
-                    "SELECT unread_at IS NOT NULL FROM memberships WHERE room_id=?1 AND user_id=?2",
-                    params![rid, uid],
-                    |row| row.get(0),
-                )
-                .map_err(db_err)?;
-            let mut members_query = db.prepare("SELECT u.id,u.name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND u.id!=?2 ORDER BY u.id").map_err(db_err)?;
-            let members = members_query.query_map(params![rid,uid],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?))).map_err(db_err)?.collect::<Result<Vec<_>,_>>().map_err(db_err)?;
-            Ok(sidebar_direct_link(&room, uid, &room.name, &members, None, unread))
+            let (unread, room_updated_at): (bool, String) = db.query_row(
+                "SELECT m.unread_at IS NOT NULL,r.updated_at FROM memberships m JOIN rooms r ON r.id=m.room_id WHERE m.room_id=?1 AND m.user_id=?2",
+                params![rid, uid], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(db_err)?;
+            let current = db.query_row("SELECT id,name,updated_at FROM users WHERE id=?1", [uid], |row| Ok(SidebarMember { id: row.get(0)?, name: row.get(1)?, updated_at: row.get(2)? })).map_err(db_err)?;
+            let mut members_query = db.prepare("SELECT u.id,u.name,u.updated_at FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND u.id!=?2 ORDER BY u.id").map_err(db_err)?;
+            let members = members_query.query_map(params![rid,uid],|row|Ok(SidebarMember { id: row.get(0)?, name: row.get(1)?, updated_at: row.get(2)? })).map_err(db_err)?.collect::<Result<Vec<_>,_>>().map_err(db_err)?;
+            sidebar_direct_link(s, &room, &room_updated_at, &current, &members, unread)
         })();
         match rendered {
             Ok(html) => {
@@ -217,7 +215,7 @@ fn notify_direct_room(s: &AppState, rid: i64, ids: impl IntoIterator<Item = i64>
                     room_id: uid,
                     payload: json!({"type":"direct_room_added","room_id":rid,"html":html}).to_string(),
                 });
-                s.turbo_user_rooms.send_turbo(uid, format!("<turbo-stream action=\"prepend\" target=\"direct_rooms\"><template>{html}</template></turbo-stream>"));
+                s.turbo_user_rooms.send_turbo(uid, format!("<turbo-stream action=\"prepend\" target=\"direct_rooms\"><template>\n  {html}</template></turbo-stream>"));
             },
             Err(status) => {
                 eprintln!("Rustfire direct-room update could not render for user {uid}: {status}")
@@ -243,6 +241,11 @@ struct Room {
     name: String,
     kind: String,
     creator_id: i64,
+}
+struct SidebarMember {
+    id: i64,
+    name: String,
+    updated_at: String,
 }
 #[derive(Clone, Serialize)]
 struct ChatMessage {
@@ -2966,66 +2969,78 @@ fn broadcast_room_updated(s: &AppState, room: &Room, members: &HashSet<i64>) {
     }
 }
 fn sidebar_direct_link(
+    s: &AppState,
     room: &Room,
-    current_user_id: i64,
-    current_user_name: &str,
-    members: &[(i64, String)],
-    active: Option<i64>,
+    room_updated_at: &str,
+    current_user: &SidebarMember,
+    members: &[SidebarMember],
     unread: bool,
-) -> String {
-    let fallback = vec![(current_user_id, current_user_name.to_owned())];
-    let members = if members.is_empty() { &fallback } else { members };
-    let label = if members.len() == 1 {
-        members[0].1.split_whitespace().next().unwrap_or(&members[0].1).to_owned()
+) -> Result<String, StatusCode> {
+    let members = if members.is_empty() { std::slice::from_ref(current_user) } else { members };
+    let names = if members.len() == 1 {
+        esc(members[0].name.split_whitespace().next().unwrap_or(&members[0].name))
     } else {
-        members
+        let short = members
             .iter()
-            .map(|(_, name)| {
-                name.split_whitespace()
+            .map(|member| {
+                member.name.split_whitespace()
                     .take(3)
                     .filter_map(|part| part.chars().next())
+                    .flat_map(char::to_uppercase)
                     .collect::<String>()
             })
-            .collect::<Vec<_>>()
-            .join("+")
+            .collect::<Vec<_>>();
+        match short.as_slice() {
+            [first, second] => format!("{first}+{second}"),
+            _ => format!("{}, and {}", short[..short.len()-1].join(", "), short.last().unwrap()),
+        }
     };
-    let avatars = members
-        .iter()
-        .take(4)
-        .map(|(id, _)| format!("<img src='/users/{id}/avatar' alt=''>"))
-        .collect::<String>();
-    format!(
-        "<a id='{}' class='room-link direct-room {} {}' href='/rooms/{}' aria-label='Ping with {}'><span class='direct-room-avatars {}'>{}</span><span class='direct-room-name'>{}</span></a>",
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    let avatars = if members.len() == 1 {
+        let member = &members[0];
+        let url = avatar_path(avatar_key, member.id, &member.updated_at)?;
+        format!("      <span class=\"avatar\">\n        <img aria-hidden=\"true\" src=\"{url}\" width=\"48\" height=\"48\" />\n      </span>\n")
+    } else {
+        let mut group = String::from("      <div class=\"avatar__group\">\n");
+        for member in members.iter().take(4) {
+            let url = avatar_path(avatar_key, member.id, &member.updated_at)?;
+            group.push_str(&format!("          <span class=\"avatar\">\n            <img aria-hidden=\"true\" src=\"{url}\" width=\"20\" height=\"20\" />\n          </span>\n"));
+        }
+        group.push_str("      </div>\n");
+        group
+    };
+    let epoch_ms = message_timestamp_ns(room_updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)? / 1_000_000;
+    Ok(format!(
+        "<a class=\"direct{}\" id=\"{}\" data-rooms-list-target=\"room\" data-room-id=\"{}\" data-badge-dot-target=\"unread\" data-sorted-list-target=\"item\" data-sorted-list-number=\"{epoch_ms}\" href=\"/rooms/{}\">\n{}\n    <span class=\"direct__author flex align-center gap max-width min-width border-radius txt-small\">\n      <span class=\"txt-nowrap overflow-ellipsis\">\n        <span class=\"for-screen-reader\">Ping with</span>\n          {}\n      </span>\n    </span>\n</a>",
+        if unread { " unread" } else { "" },
         room_list_target(room),
-        if active == Some(room.id) { "active" } else { "" },
-        if unread { "unread" } else { "" },
         room.id,
-        esc(&room.name),
-        if members.len() > 1 { "direct-room-avatars--group" } else { "" },
+        room.id,
         avatars,
-        esc(&label)
-    )
+        names
+    ))
 }
 fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, StatusCode> {
     let rooms = rooms_for(s, u.id)?;
     let db = pool(s)?;
-    let mut direct_members: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    let mut direct_members: HashMap<i64, Vec<SidebarMember>> = HashMap::new();
     let mut direct_member_query = db
-        .prepare("SELECT m.room_id,u.id,u.name FROM memberships m JOIN users u ON u.id=m.user_id JOIN rooms r ON r.id=m.room_id WHERE r.type='Rooms::Direct' AND m.user_id!=?1 AND EXISTS (SELECT 1 FROM memberships mine WHERE mine.room_id=m.room_id AND mine.user_id=?1) ORDER BY m.room_id,u.id")
+        .prepare("SELECT m.room_id,u.id,u.name,u.updated_at FROM memberships m JOIN users u ON u.id=m.user_id JOIN rooms r ON r.id=m.room_id WHERE r.type='Rooms::Direct' AND m.user_id!=?1 AND EXISTS (SELECT 1 FROM memberships mine WHERE mine.room_id=m.room_id AND mine.user_id=?1) ORDER BY m.room_id,u.id")
         .map_err(db_err)?;
     for row in direct_member_query
         .query_map([u.id], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
+                SidebarMember { id: row.get(1)?, name: row.get(2)?, updated_at: row.get(3)? },
             ))
         })
         .map_err(db_err)?
     {
-        let (room_id, id, name) = row.map_err(db_err)?;
-        direct_members.entry(room_id).or_default().push((id, name));
+        let (room_id, member) = row.map_err(db_err)?;
+        direct_members.entry(room_id).or_default().push(member);
     }
+    let mut direct_room_query = db.prepare("SELECT r.id,r.updated_at FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=?1 AND r.type='Rooms::Direct'").map_err(db_err)?;
+    let direct_updated: HashMap<i64, String> = direct_room_query.query_map([u.id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(db_err)?.collect::<Result<_,_>>().map_err(db_err)?;
     let direct_participants: i64 = db
         .query_row(
             "SELECT COUNT(DISTINCT m2.user_id) FROM memberships m1 JOIN rooms r ON r.id=m1.room_id JOIN memberships m2 ON m2.room_id=r.id WHERE m1.user_id=?1 AND r.type='Rooms::Direct'",
@@ -3069,13 +3084,13 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
     );
     for r in rooms.iter().filter(|r| r.kind == "Rooms::Direct") {
         html.push_str(&sidebar_direct_link(
+            s,
             r,
-            u.id,
-            &u.name,
+            direct_updated.get(&r.id).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+            &SidebarMember { id: u.id, name: u.name.clone(), updated_at: u.updated_at.clone() },
             direct_members.get(&r.id).map(Vec::as_slice).unwrap_or(&[]),
-            active,
             unread.contains(&r.id),
-        ));
+        )?);
     }
     html.push_str("</nav><div id='direct-placeholders' class='direct-placeholders' aria-label='People you can ping'>");
     for (id, name) in placeholders {

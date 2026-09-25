@@ -414,8 +414,8 @@ def main():
             assert code == 200 and "/rooms/3" in direct_url
             admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
             assert "data-ping-user-id='2'" not in admin_sidebar
-            assert re.search(r"class='room-link direct-room [^']*' href='/rooms/3'[^>]*><span class='direct-room-avatars '><img src='/users/2/avatar'", admin_sidebar)
-            assert "class='direct-room-name'>Member</span>" in admin_sidebar
+            assert re.search(r'<a class="direct" id="list_rooms_direct_3"[^>]*href="/rooms/3">\s*<span class="avatar">\s*<img aria-hidden="true" src="/users/[^\"]+/avatar\?v=\d+" width="48" height="48"', admin_sidebar)
+            assert '<span class="for-screen-reader">Ping with</span>\n          Member' in admin_sidebar
             assert "data-ping-user-id='1'" not in request(member, base, "/users/me/sidebar")[2]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM rooms WHERE type='Rooms::Direct'").fetchone() == (1,)
@@ -428,10 +428,10 @@ def main():
             code, repeated_url, _ = request(admin, base, "/rooms/directs", {"user_ids": "2"})
             assert repeated_url == direct_url
             assert request(member, base, "/rooms/3/involvement", {"involvement": "invisible"})[0] == 200
-            assert "id='list_rooms_direct_3'" not in request(member, base, "/users/me/sidebar")[2]
+            assert 'id="list_rooms_direct_3"' not in request(member, base, "/users/me/sidebar")[2]
             assert request(member, base, "/rooms/3")[0] == 200
             assert request(member, base, "/rooms/3/involvement", {"involvement": "everything"})[0] == 200
-            assert "id='list_rooms_direct_3'" in request(member, base, "/users/me/sidebar")[2]
+            assert 'id="list_rooms_direct_3"' in request(member, base, "/users/me/sidebar")[2]
             code, _, page = request(member, base, "/rooms/directs/3/edit")
             assert code == 200 and "Ping settings" in page
             code, alias_url, _ = request(member, base, "/rooms/directs/3")
@@ -901,7 +901,7 @@ def main():
                 assert re.fullmatch(r"member2-deactivated-[0-9a-f-]{36}@example\.com", check_db.execute("SELECT email_address FROM users WHERE id=2").fetchone()[0])
             code, _, retained_page = request(admin, base, f"/rooms/{retained_direct}")
             assert code == 200 and "Member Two" in retained_page
-            assert "Member Two" in request(admin, base, "/users/me/sidebar")[2]
+            assert f'id="list_rooms_direct_{retained_direct}"' in request(admin, base, "/users/me/sidebar")[2]
             assert request(admin, base, f"/rooms/{converted_room}")[0] == 200
             code, _, _ = request(member, base, "/rooms/1")
             assert code == 401

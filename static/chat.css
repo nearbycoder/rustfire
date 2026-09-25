@@ -30,14 +30,16 @@ body:has(.app-shell)>header { display: none; }
 .direct-new-icon img { width: 20px; height: 20px; }
 .sidebar-directs #direct_rooms,.direct-placeholders { display: flex; flex: none; align-items: flex-start; gap: 10px; }
 .sidebar-directs #direct_rooms:empty { display: none; }
-.sidebar-directs #direct_rooms .direct-room { position: relative; display: grid; flex: none; justify-items: center; align-content: start; gap: 3px; width: 56px; height: 64px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--chat-text); font-size: 12px; line-height: 16px; }
-.direct-room-avatars { display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; }
-.direct-room-avatars img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; }
-.direct-room-avatars--group img { width: 25px; height: 25px; margin-left: -11px; border: 2px solid var(--chat-bg); }
-.direct-room-avatars--group img:first-child { margin-left: 0; }
-.direct-room-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-directs #direct_rooms .direct-room:hover { background: var(--chat-bubble); }
-.sidebar-directs #direct_rooms .direct-room.unread::after { position: absolute; top: 55px; left: 50%; float: none; line-height: 1; transform: translateX(-50%); }
+.sidebar-directs #direct_rooms .direct { position: relative; display: grid; flex: none; justify-items: center; align-content: start; gap: 3px; width: 56px; height: 64px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--chat-text); font-size: 12px; line-height: 16px; text-decoration: none; }
+.sidebar-directs #direct_rooms .direct>.avatar { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; overflow: hidden; }
+.sidebar-directs #direct_rooms .direct>.avatar img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; }
+.sidebar-directs #direct_rooms .avatar__group { display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; }
+.sidebar-directs #direct_rooms .avatar__group .avatar { width: 25px; height: 25px; margin-left: -11px; border: 2px solid var(--chat-bg); }
+.sidebar-directs #direct_rooms .avatar__group .avatar:first-child { margin-left: 0; }
+.sidebar-directs #direct_rooms .avatar__group img { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+.sidebar-directs #direct_rooms .direct__author { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-directs #direct_rooms .direct:hover { background: var(--chat-bubble); }
+.sidebar-directs #direct_rooms .direct.unread::after { content: '●'; position: absolute; top: 55px; left: 50%; font-size: 9px; color: #d86b2e; line-height: 1; transform: translateX(-50%); }
 .direct-placeholders form { flex: none; margin: 0; }
 .direct-placeholder { display: grid; justify-items: center; align-content: start; gap: 3px; min-width: 56px; max-width: 90px; height: 64px; padding: 0; border: 0; background: transparent; color: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
 .direct-placeholder img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; }
