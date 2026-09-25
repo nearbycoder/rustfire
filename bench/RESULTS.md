@@ -151,3 +151,5 @@ The repeated 22-worker run also used three-second concurrent sweeps. Each client
 | 32 | 8,100.6 | 67.8 | 5.762 ms | 728.279 ms |
 
 The short 32-client Campfire trial completed 231 responses, so tail latency and throughput are sensitive to scheduling and requests finishing after the three-second start window. The earlier 22-worker run measured 73.7 requests/s at 32 clients. Attachment rendering, writes, ActionCable broadcasts, push delivery, webhooks, and sustained operation remain outside this probe. Maximum user or socket scale has not been established for the feature-complete app.
+
+An additional `--messages 40 --iterations 5 --include-attachments` run replaced four messages with file-only text attachments. Parsed JSON matched for all 40 messages, including the attachment filename as plain text and an empty HTML body. It measured 0.559 / 0.598 ms median / p95 for Rustfire and 144.425 / 159.818 ms for Campfire. The fixture supplies attachment metadata but no file bytes, so this is only a message-list read parity check, not an attachment delivery or scale result.

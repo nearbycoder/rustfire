@@ -27,18 +27,28 @@ PATH = f"/rooms/1/{BOT_KEY}/messages"
 STAMP = "2026-01-01T00:00:00Z"
 
 
-def seed_messages(rust_database, camp_database, count):
+def seed_messages(rust_database, camp_database, count, include_attachments):
     moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
     rust_rows = []
     camp_rows = []
     rich_rows = []
+    rust_attachments = []
+    camp_blobs = []
+    camp_attachments = []
     for number in range(1, count + 1):
         created = (moment + timedelta(seconds=number)).isoformat().replace("+00:00", "Z")
         content = f"message {number}"
-        markup = f"<div>{content}</div>" if number % 2 == 0 else None
-        rust_rows.append((number, content, markup, f"fixture-{number}", created))
+        attached = include_attachments and number % 10 == 0
+        markup = f"<div>{content}</div>" if number % 2 == 0 and not attached else None
+        rust_rows.append((number, "" if attached else content, markup, f"fixture-{number}", created))
         camp_rows.append((number, f"fixture-{number}", created))
-        rich_rows.append((number, markup or content, created))
+        if attached:
+            filename = f"sample-{number}.txt"
+            rust_attachments.append((number, filename, f"fixture-file-{number}", created))
+            camp_blobs.append((number, f"fixture-key-{number}", filename, created))
+            camp_attachments.append((number, created))
+        else:
+            rich_rows.append((number, markup or content, created))
 
     with sqlite3.connect(rust_database) as db:
         db.execute("UPDATE users SET name='Test Admin',updated_at=? WHERE id=1", [STAMP])
@@ -47,6 +57,10 @@ def seed_messages(rust_database, camp_database, count):
         db.executemany(
             "INSERT INTO messages(id,room_id,creator_id,body,body_html,client_message_id,created_at,updated_at) VALUES(?1,1,1,?2,?3,?4,?5,?5)",
             rust_rows,
+        )
+        db.executemany(
+            "INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at) VALUES(?1,?2,'text/plain',?3,?4)",
+            rust_attachments,
         )
     with sqlite3.connect(camp_database) as db:
         db.execute("UPDATE users SET updated_at=? WHERE id=1", [STAMP])
@@ -59,6 +73,14 @@ def seed_messages(rust_database, camp_database, count):
         db.executemany(
             "INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body',?2,'Message',?1,?3,?3)",
             rich_rows,
+        )
+        db.executemany(
+            "INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at) VALUES(?1,?2,?3,'text/plain','{}','local',10,?4)",
+            camp_blobs,
+        )
+        db.executemany(
+            "INSERT INTO active_storage_attachments(name,record_type,record_id,blob_id,created_at) VALUES('attachment','Message',?1,?1,?2)",
+            camp_attachments,
         )
 
 
@@ -155,6 +177,7 @@ def main():
     parser.add_argument("--clients", type=int, nargs="*", default=[])
     parser.add_argument("--seconds", type=float, default=3.0)
     parser.add_argument("--campfire-workers", type=int, default=1)
+    parser.add_argument("--include-attachments", action="store_true")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
@@ -178,7 +201,7 @@ def main():
         seed_rustfire(rust_database, rust_port, [])
         camp_env = seed_campfire(repo, ruby, bundle_path, source_database, camp_database, [], camp_port, temp)
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers)
-        seed_messages(rust_database, camp_database, args.messages)
+        seed_messages(rust_database, camp_database, args.messages, args.include_attachments)
         expected_ids = list(range(args.messages - 39, args.messages + 1))
 
         rust_process = start_server(rust_database, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
@@ -214,7 +237,7 @@ def main():
                 if rust_message != camp_message:
                     raise AssertionError(("Message JSON differs", rust_message, camp_message))
             raise AssertionError("Message-list length differs")
-        print(f"messages={args.messages} returned=40 iterations={args.iterations} campfire_workers={args.campfire_workers} normalized_json_equal=true")
+        print(f"messages={args.messages} returned=40 iterations={args.iterations} campfire_workers={args.campfire_workers} attachments={args.include_attachments} normalized_json_equal=true")
         print(f"rustfire_median_ms={rust_median:.3f} rustfire_p95_ms={rust_p95:.3f} body_bytes={len(rust_body)}")
         print(f"campfire_median_ms={camp_median:.3f} campfire_p95_ms={camp_p95:.3f} body_bytes={len(camp_body)}")
         for clients in args.clients:
