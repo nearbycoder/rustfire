@@ -4,6 +4,22 @@ document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
+const searchShell=document.querySelector('.search-shell');
+if(searchShell){
+  const results=searchShell.querySelector('#search-results');
+  let previous=null,previousDay=null;
+  for(const message of results.querySelectorAll('.message')){
+    const timestamp=Number(message.dataset.messageTimestamp);
+    const previousTime=previous?Number(previous.dataset.messageTimestamp):NaN;
+    message.classList.toggle('own',message.dataset.userId===document.body.dataset.userId);
+    message.classList.toggle('threaded',!!previous&&message.dataset.userId===previous.dataset.userId&&Number.isFinite(timestamp)&&Number.isFinite(previousTime)&&Math.abs(timestamp-previousTime)<=300000);
+    const day=Number.isFinite(timestamp)?new Date(timestamp).toDateString():null;
+    message.classList.toggle('message--first-of-day',day!==previousDay);
+    previousDay=day;previous=message;
+  }
+  results.querySelectorAll('[data-controller~="web-share"]').forEach(node=>{node.hidden=typeof navigator.canShare!=='function';});
+  searchShell.addEventListener('click',event=>{if(event.target.closest('[data-toggle-sidebar]'))searchShell.querySelector('.sidebar')?.classList.toggle('open');});
+}
 document.addEventListener('click',async event=>{
   const copy=event.target.closest('[data-action~="copy-to-clipboard#copy"]');
   if(!copy)return;

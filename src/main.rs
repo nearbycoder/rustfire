@@ -4853,34 +4853,39 @@ async fn search_get(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let query = q.get("q").cloned().unwrap_or_default();
-    let mut results = String::new();
+    let db = pool(&s)?;
+    let mut messages = Vec::new();
     let terms = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
     if !terms.is_empty() {
-        let db = pool(&s)?;
-        let mut stmt=db.prepare("SELECT m.id,m.room_id,u.name,m.body,m.created_at FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN users u ON u.id=m.creator_id JOIN memberships mem ON mem.room_id=m.room_id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100").map_err(db_err)?;
-        let mut rows = stmt
-            .query_map(params![u.id, terms], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
+        let mut stmt=db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN users u ON u.id=m.creator_id JOIN memberships mem ON mem.room_id=m.room_id LEFT JOIN attachments a ON a.message_id=m.id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100").map_err(db_err)?;
+        messages = stmt
+            .query_map(params![u.id, terms], chat_message_from_row)
             .map_err(db_err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_err)?;
-        rows.reverse();
-        for (id, rid, name, body, date) in rows {
-            results.push_str(&format!("<a class='search-result' href='/rooms/{rid}/@{id}'><strong>{}</strong><time>{}</time><p>{}</p></a>",esc(&name),esc(&date),esc(&body)));
+        messages.reverse();
+        let mut room_names = HashMap::new();
+        for message in &mut messages {
+            let room_name = if let Some(name) = room_names.get(&message.room_id) {
+                name
+            } else {
+                room_names.insert(
+                    message.room_id,
+                    message_room_display_name(&db, message.room_id)?,
+                );
+                &room_names[&message.room_id]
+            };
+            message.room_name = room_name.clone();
         }
     }
-    let db = pool(&s)?;
+    let results = messages
+        .iter()
+        .map(|message| message_html(&s, message, Some(&headers)))
+        .collect::<String>();
     let mut recent_query = db
         .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT 10")
         .map_err(db_err)?;
@@ -4888,19 +4893,35 @@ async fn search_get(
         .query_map([u.id], |r| r.get::<_, String>(0))
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)?
+        .map_err(db_err)?;
+    let recent = recent
         .iter()
         .map(|item| {
             let encoded = form_urlencoded::Serializer::new(String::new())
                 .append_pair("q", item)
                 .finish();
-            format!("<li><a href='/searches?{encoded}'>{}</a></li>", esc(item))
+            format!("<a class='search-recent' href='/searches?{encoded}'>“{}”</a>", esc(item))
         })
         .collect::<String>();
+    let clear_button = if recent.is_empty() {
+        String::new()
+    } else {
+        "<form method='post' action='/searches/clear'><button class='search-clear' type='submit' aria-label='Clear recent searches' title='Clear recent searches'><img src='/static/icons/broom.svg' alt=''></button></form>".to_string()
+    };
+    let back_room = cookie(&headers, "last_room")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| room_for(&s, u.id, *id).is_ok())
+        .or_else(|| rooms_for(&s, u.id).ok()?.first().map(|room| room.id));
+    let back_href = back_room.map_or("/".to_string(), |id| format!("/rooms/{id}"));
+    let query_heading = if query.is_empty() {
+        "Search".to_string()
+    } else {
+        format!("“{}” <small>{}</small>", esc(&query), messages.len())
+    };
     Ok(render(
         "Search",
         &format!(
-            "<section class='search-page'><h1>Search</h1><form method='post' action='/searches'><input name='q' value='{}' placeholder='Search messages' autofocus><button class='button'>Search</button></form>{results}<h2>Recent searches</h2><ul>{recent}</ul><form method='post' action='/searches/clear'><button>Clear searches</button></form></section>",
+            "<div class='app-shell search-shell'><aside class='sidebar search-sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/icons/menu.svg' alt=''></button><div class='search-sidebar-head'><strong>Recent searches</strong>{clear_button}</div><nav>{recent}</nav><div class='search-sidebar-footer'><a href='{back_href}'>Back to room</a></div></aside><section class='search-main'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{query_heading}</h1><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div><div id='message-area' class='message-area'><div id='search-results' class='messages searches__results' data-controller='search-results' data-search-results-target='messages'>{results}</div></div><footer class='search-footer'><a href='{back_href}' class='search-exit' aria-label='Exit search'><img src='/static/icons/arrow-left.svg' alt=''></a><form method='post' action='/searches'><input name='q' value='{}' role='searchbox' aria-label='Search messages' placeholder='Search messages' autofocus required><a href='/searches' class='search-reset' aria-label='Clear search field'><img src='/static/icons/remove.svg' alt=''></a><button class='search-submit' type='submit' aria-label='Search'><img src='/static/icons/arrow-up.svg' alt=''></button></form></footer></section></div>",
             esc(&query)
         ),
         Some(&u),

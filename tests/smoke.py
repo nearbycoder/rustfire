@@ -179,8 +179,13 @@ def main():
             assert code == 200 and len(json.loads(payload)) == 2
             code, _, page = request(admin, base, "/searches?q=hello")
             assert code == 200 and "hello from smoke" in page
+            assert "id='search-results' class='messages searches__results'" in page
+            assert "id='message_test-1'" in page and f"href='/rooms/1/@{message['id']}'" in page
+            assert "class='search-main'" in page and "class='search-footer'" in page
             code, _, page = request(admin, base, "/searches?q=smoking")
             assert code == 200 and "hello from smoke" in page
+            code, _, page = request(admin, base, "/searches?q=attached")
+            assert code == 200 and "Share note.txt" in page and "id='search-results'" in page
             code, _, page = request(admin, base, "/searches", {"q": "hello"})
             assert code == 200 and "Recent searches" in page
             for index in range(11):
@@ -360,6 +365,8 @@ def main():
                 assert check_db.execute("SELECT id,involvement,unread_at FROM memberships WHERE room_id=2 AND user_id=2").fetchone() == membership_before
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "1"}, method="PATCH")
             assert code == 303
+            assert "private unread" not in request(member, base, "/searches?q=private")[2]
+            assert "private unread" in request(admin, base, "/searches?q=private")[2]
             code, redirected, _ = request(member, base, "/rooms/2")
             assert code == 200 and redirected.endswith("/rooms/1"), (code, redirected)
             code, _, _ = request(member, base, "/rooms/2/refresh?after=0", headers={"Accept":"application/json"})
