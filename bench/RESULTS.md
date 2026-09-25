@@ -555,3 +555,24 @@ With the source-shaped sidebar frame in the release build, a fresh reverse-order
 Two HTTP creations before socket setup and two subscribed-stream creations after setup warmed each app. A 500 ms settling interval followed. The measured interval covers ten sequential POSTs, each on a fresh connection, and delivery to the final socket; per-delivery p95 starts when its room POST starts. Server startup, socket connection, warmup, and settling are excluded. These matched short bursts show faster direct-room creation and sidebar delivery in this fixture. They do not establish sustained throughput, a maximum connection count, memory use, or full application parity; all sockets represent the same account and receive the same per-user stream.
 
 After changing the direct shortcut forms, the same ten-room probe delivered all expected events with identical sampled payloads and no delivery errors. With 1,000 sockets, Rustfire took **135 ms elapsed / 21 ms p95** versus Campfire's **1,058 ms / 146 ms**. With 5,000 sockets and Campfire run first, Rustfire took **539 ms / 84 ms p95** versus Campfire's **1,302 ms / 179 ms p95**. These fresh local runs confirm that the release build with the new forms still passes the short bursts, within the same limits above.
+
+## Paired conditional message-list reads
+
+`bench/paired_message_cache.py` seeded 40 matching messages with distinct subsecond creation times in disposable databases and ran the pinned Campfire build with isolated Redis. Rustfire now sends weak ETag, Last-Modified, and `Cache-Control: max-age=0, private, must-revalidate` headers on nonempty message pages. Both apps returned 304 with an empty body for matching ETag or Last-Modified, 200 for a stale date, and 204 for an empty page. The default and before/after pages contained the same ordered message IDs. After one message's update timestamp changed, both returned 200 with a new validator. The source and Rustfire ETag values and full HTML bodies differ: the 40-message 200 pages were **407,158** and **317,237 bytes**, respectively.
+
+The first Rustfire implementation loaded the complete message rows before checking the validator. In one 15-second run with 22 Puma workers for Campfire, it served **4,015 / 3,984** conditional 304 requests/s at 32 / 128 clients versus Campfire's **4,233 / 4,327**. Rustfire then moved the matching-validator check to an indexed metadata query and skipped full message loading for 304. Fifteen-second serial same-host runs in opposite orders measured:
+
+| Clients | Trial order | Rustfire requests/s / p95 | Campfire requests/s / p95 |
+| ---: | --- | ---: | ---: |
+| 32 | Campfire first | 28,496 / 1.57 ms | 4,319 / 15.04 ms |
+| 128 | Campfire first | 28,588 / 7.11 ms | 4,597 / 39.96 ms |
+| 32 | Rustfire first | 26,757 / 1.69 ms | 4,225 / 15.45 ms |
+| 128 | Rustfire first | 27,757 / 7.31 ms | 4,567 / 40.95 ms |
+| 256 | Campfire first | 28,071 / 15.41 ms | 4,430 / 124.70 ms |
+| 512 | Campfire first | 27,518 / 36.45 ms | 4,650 / 152.61 ms |
+| 256 | Rustfire first | 30,417 / 16.19 ms | 4,494 / 121.69 ms |
+| 512 | Rustfire first | 29,994 / 34.51 ms | 4,539 / 157.06 ms |
+
+Every measured response in those eight paired trials had the expected 304 status, empty body hash, ETag, and Last-Modified; there were zero errors. Two warmups per client and server startup were outside the timed intervals. At a provisional 20 ms p95 target, Rustfire passed through 256 tested clients in both orders and exceeded it at 512; Campfire passed 32 and exceeded it at 128, 256, and 512. Counts between 32 and 128 were not sampled. The load generator shared the server host, and these runs did not measure CPU, memory, maximum concurrency, long-lived sockets, writes, or mixed user activity. This establishes a faster feature-matched conditional read with a larger sampled concurrency margin on this fixture, not whole-app speed or sustained maximum capacity at complete parity.
+
+A separate `bench/paired_bot_messages.py --messages 1000 --iterations 30 --clients 1 8 32 --seconds 3 --campfire-workers 22` regression check still matched the latest 40 parsed JSON messages after origin normalization, with zero measured response errors in both apps. At 32 clients Rustfire served **3,118** JSON reads/s (13.60 ms p95) versus Campfire's **1,550** (40.49 ms p95). The JSON bodies still differ in escaping and size, and this short trial is not a full-response parity or capacity claim.

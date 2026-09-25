@@ -45,6 +45,7 @@ use std::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration as StdDuration, UNIX_EPOCH},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Semaphore, broadcast, mpsc};
@@ -4169,6 +4170,101 @@ struct Paging {
     before: Option<i64>,
     after: Option<i64>,
 }
+fn message_page_metadata(
+    s: &AppState,
+    rid: i64,
+    before: Option<i64>,
+    after: Option<i64>,
+) -> Result<Vec<(i64, String, String)>, StatusCode> {
+    let db = pool(s)?;
+    let (predicate, order, cursor) = if let Some(id) = after {
+        if id > 0 {
+            ("m.created_at_ns>?2", "ASC", Some(id))
+        } else {
+            ("1=1", "ASC", None)
+        }
+    } else if let Some(id) = before {
+        ("m.created_at_ns<?2", "DESC", Some(id))
+    } else {
+        ("1=1", "DESC", None)
+    };
+    let cursor_time = cursor
+        .map(|id| {
+            db.query_row(
+                "SELECT created_at_ns FROM messages WHERE room_id=?1 AND id=?2",
+                params![rid, id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .ok_or(StatusCode::NOT_FOUND)
+        })
+        .transpose()?;
+    let sql = format!("SELECT m.id,m.created_at,m.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3");
+    let mut query = db.prepare(&sql).map_err(db_err)?;
+    let mut rows = query
+        .query_map(params![rid, cursor_time, 40], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    if after.is_none() {
+        rows.reverse();
+    }
+    Ok(rows)
+}
+fn message_page_validator<'a>(
+    messages: impl IntoIterator<Item = (i64, &'a str, &'a str)>,
+    rid: i64,
+    before: Option<i64>,
+    after: Option<i64>,
+    json: bool,
+) -> Result<(String, String, i64), StatusCode> {
+    let mut key = format!("room={rid};before={before:?};after={after:?};json={json};");
+    let mut latest = i64::MIN;
+    for (id, created_at, updated_at) in messages {
+        latest = latest.max(
+            message_timestamp_ns(updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+        );
+        key.push_str(&format!("{id}:{created_at}:{updated_at};"));
+    }
+    let digest = openssl::hash::hash(MessageDigest::md5(), key.as_bytes()).map_err(db_err)?;
+    let etag = format!(
+        "W/\"{}\"",
+        digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    );
+    let seconds = latest.div_euclid(1_000_000_000);
+    let modified = httpdate::fmt_http_date(
+        UNIX_EPOCH + StdDuration::from_secs(seconds.max(0) as u64),
+    );
+    Ok((etag, modified, seconds))
+}
+fn message_page_cache_headers(response: &mut Response, etag: &str, modified: &str) {
+    response.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::LAST_MODIFIED, modified.parse().unwrap());
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "max-age=0, private, must-revalidate".parse().unwrap(),
+    );
+}
+fn message_page_fresh(headers: &HeaderMap, etag: &str, modified_seconds: i64) -> bool {
+    if let Some(value) = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) {
+        value.split(',').any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == "*" || candidate.trim_start_matches("W/") == etag.trim_start_matches("W/")
+        })
+    } else {
+        headers
+            .get(header::IF_MODIFIED_SINCE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .and_then(|date| date.duration_since(UNIX_EPOCH).ok())
+            .is_some_and(|date| date.as_secs() as i64 >= modified_seconds)
+    }
+}
 async fn messages_index(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4194,26 +4290,61 @@ async fn messages_index(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .contains("application/json");
+    // Matching validators need only the selected page's IDs and timestamps.
+    if headers.contains_key(header::IF_NONE_MATCH)
+        || headers.contains_key(header::IF_MODIFIED_SINCE)
+    {
+        let metadata = message_page_metadata(&s, rid, q.before, q.after)?;
+        if metadata.is_empty() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        let (etag, modified, modified_seconds) = message_page_validator(
+            metadata
+                .iter()
+                .map(|(id, created, updated)| (*id, created.as_str(), updated.as_str())),
+            rid,
+            q.before,
+            q.after,
+            wants_json,
+        )?;
+        if message_page_fresh(&headers, &etag, modified_seconds) {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            message_page_cache_headers(&mut response, &etag, &modified);
+            return Ok(response);
+        }
+    }
     let messages = message_list_with_room_name(&s, rid, 40, q.before, q.after, !wants_json)?;
     if messages.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    if wants_json {
-        return Ok(Json(
+    let (etag, modified, _) = message_page_validator(
+        messages.iter().map(|message| {
+            (message.id, message.created_at.as_str(), message.updated_at.as_str())
+        }),
+        rid,
+        q.before,
+        q.after,
+        wants_json,
+    )?;
+    let mut response = if wants_json {
+        Json(
             messages
                 .iter()
                 .map(|m| message_json(&s, m, Some(&headers)))
                 .collect::<Result<Vec<_>, _>>()?,
         )
-        .into_response());
-    }
-    Ok(Html(
-        messages
-            .iter()
-            .map(|m| message_html(&s, m, Some(&headers)))
-            .collect::<String>(),
-    )
-    .into_response())
+        .into_response()
+    } else {
+        Html(
+            messages
+                .iter()
+                .map(|m| message_html(&s, m, Some(&headers)))
+                .collect::<String>(),
+        )
+        .into_response()
+    };
+    message_page_cache_headers(&mut response, &etag, &modified);
+    Ok(response)
 }
 fn message_json(
     s: &AppState,

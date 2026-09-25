@@ -17,6 +17,7 @@ bcrypt = "0.17"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 html-escape = "0.2"
+httpdate = "1"
 futures-util = "0.3"
 form_urlencoded = "1"
 ammonia = "4.2"

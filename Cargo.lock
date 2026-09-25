@@ -2564,6 +2564,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "html-escape",
+ "httpdate",
  "openssl",
  "qrcodegen",
  "r2d2",

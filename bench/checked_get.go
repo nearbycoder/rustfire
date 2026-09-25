@@ -1,5 +1,5 @@
 // checked_get measures one stable GET response with concurrent keep-alive clients.
-// Each request must return HTTP 200 and the expected SHA-256 body hash.
+// Each request must return the expected status, headers, and SHA-256 body hash.
 package main
 
 import (
@@ -38,6 +38,11 @@ func main() {
 	path := flag.String("path", "", "GET path and query")
 	cookie := flag.String("cookie", "", "session cookie")
 	expectedHex := flag.String("expected-sha256", "", "SHA-256 of the expected response body")
+	expectedStatus := flag.Int("expected-status", http.StatusOK, "expected HTTP status")
+	expectedETag := flag.String("expected-etag", "", "expected ETag response header")
+	expectedModified := flag.String("expected-last-modified", "", "expected Last-Modified response header")
+	ifNoneMatch := flag.String("if-none-match", "", "conditional request ETag")
+	accept := flag.String("accept", "application/json", "Accept request header")
 	clients := flag.Int("clients", 32, "number of concurrent keep-alive clients")
 	seconds := flag.Float64("seconds", 15, "measured duration")
 	flag.Parse()
@@ -64,7 +69,10 @@ func main() {
 			return false, err
 		}
 		request.Header.Set("Cookie", *cookie)
-		request.Header.Set("Accept", "application/json")
+		request.Header.Set("Accept", *accept)
+		if *ifNoneMatch != "" {
+			request.Header.Set("If-None-Match", *ifNoneMatch)
+		}
 		response, err := client.Do(request)
 		if err != nil {
 			return false, err
@@ -75,7 +83,14 @@ func main() {
 			return false, err
 		}
 		digest := sha256.Sum256(body)
-		return response.StatusCode == http.StatusOK && string(digest[:]) == string(expected), nil
+		valid := response.StatusCode == *expectedStatus && string(digest[:]) == string(expected)
+		if *expectedETag != "" {
+			valid = valid && response.Header.Get("ETag") == *expectedETag
+		}
+		if *expectedModified != "" {
+			valid = valid && response.Header.Get("Last-Modified") == *expectedModified
+		}
+		return valid, nil
 	}
 	ready := make(chan struct{}, *clients)
 	start := make(chan struct{})
