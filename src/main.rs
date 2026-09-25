@@ -33,7 +33,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use regex::Regex;
 use rusqlite::{OptionalExtension, params};
-use scraper::{Html as ParsedHtml, Selector};
+use scraper::{Html as ParsedHtml, Node as HtmlNode, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -548,19 +548,72 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
         } else {
             html.clone()
         };
-    let with_breaks = plain_input
-        .replace("</div>", "\n")
-        .replace("</p>", "\n")
-        .replace("<br>", "\n")
-        .replace("<br />", "\n");
-    let text = ammonia::Builder::default()
-        .tags(HashSet::new())
-        .clean(&with_breaks)
-        .to_string();
-    (
-        html_escape::decode_html_entities(&text).trim().to_string(),
-        html,
-    )
+    (action_text_plain(&plain_input).trim().to_string(), html)
+}
+fn trim_plain_newlines(value: &str) -> &str {
+    value.trim_end_matches('\n')
+}
+fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
+    if let Some(text) = node.value().as_text() {
+        return trim_plain_newlines(text).to_string();
+    }
+    let Some(element) = node.value().as_element() else {
+        return node.children().map(action_text_plain_node).collect();
+    };
+    let name = element.name();
+    if name == "script" || name == "style" {
+        return String::new();
+    }
+    if name == "br" {
+        return "\n".to_string();
+    }
+    let children: String = node.children().map(action_text_plain_node).collect();
+    let children = trim_plain_newlines(&children);
+    match name {
+        "div" => format!("{children}\n"),
+        "p" | "h1" => format!("{children}\n\n"),
+        "ul" | "ol" => {
+            let nested = node.ancestors().any(|ancestor| {
+                ancestor
+                    .value()
+                    .as_element()
+                    .is_some_and(|parent| matches!(parent.name(), "ul" | "ol"))
+            });
+            format!("{}{children}\n\n", if nested { "\n" } else { "" })
+        }
+        "li" => {
+            let lists = node
+                .ancestors()
+                .filter_map(|ancestor| ancestor.value().as_element().map(|parent| parent.name().to_string()))
+                .filter(|name| name == "ul" || name == "ol")
+                .collect::<Vec<_>>();
+            let bullet = if lists.first().is_some_and(|name| name == "ol") {
+                format!("{}.", node.prev_siblings().filter(|sibling| sibling.value().as_element().is_some_and(|element| element.name() == "li")).count() + 1)
+            } else {
+                "•".to_string()
+            };
+            format!("{}{} {children}\n", "  ".repeat(lists.len().saturating_sub(1)), bullet)
+        }
+        "blockquote" => {
+            let mut value = format!("{children}\n\n");
+            if let (Some(first), Some(last)) = (
+                value.char_indices().find(|(_, c)| !c.is_whitespace()).map(|(i, _)| i),
+                value.char_indices().rfind(|(_, c)| !c.is_whitespace()).map(|(i, c)| i + c.len_utf8()),
+            ) {
+                value.insert_str(last, "”");
+                value.insert_str(first, "“");
+            } else {
+                return "“”".to_string();
+            }
+            value
+        }
+        "figcaption" => format!("[{children}]"),
+        _ => children.to_string(),
+    }
+}
+fn action_text_plain(input: &str) -> String {
+    let document = ParsedHtml::parse_fragment(input);
+    trim_plain_newlines(&action_text_plain_node(document.tree.root())).to_string()
 }
 fn mention_signature(
     key: &[u8],
@@ -8578,6 +8631,22 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn rich_text_plain_matches_campfire_blocks_and_lists() {
+        let cases = [
+            ("<div>One</div><div>Two</div>", "One\nTwo"),
+            ("<div>Line<br>break</div>", "Line\nbreak"),
+            ("<ul><li>One</li><li>Two</li></ul>", "• One\n• Two"),
+            ("<ol><li>One</li><li>Two</li></ol>", "1. One\n2. Two"),
+            ("<blockquote><div>Quoted text</div></blockquote>", "“Quoted text”"),
+            ("<div>Before</div><ul><li>One</li><li>Two</li></ul><div>After</div>", "Before\n• One\n• Two\n\nAfter"),
+            ("<p>A</p><p>B</p>", "A\n\nB"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(super::rich_body(input, None).0, expected, "{input}");
+        }
+    }
 
     #[test]
     fn webhook_html_uses_campfire_action_text_mentions() {
