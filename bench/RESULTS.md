@@ -507,3 +507,16 @@ All four pairs had zero missed, duplicate, or unexpected deliveries and zero ear
 ## Paired direct-room sidebar markup
 
 The paired direct-sidebar probe used the pinned source and a Rustfire release build with matching user names, avatar timestamps, and signing secret. It created four direct rooms for the signed-in user with one, two, three, and five other users. Both apps returned those rooms in the sidebar and delivered four signed per-user Turbo prepend frames with the same room IDs and no unexpected events. Each rendered direct link and each received Turbo frame was byte-identical after replacing only its independently generated room `data-sorted-list-number` epoch-millisecond value; both values were validated as current times first. The check includes the four-avatar group limit, abbreviation text, and signed avatar paths. It does not time either app or verify the full sidebar, unread states, or sustained socket load.
+
+## Paired direct-room creation and sidebar fanout
+
+`bench/paired_direct_fanout.py` created ten direct rooms, each with the same two memberships, while 1,000 or 5,000 sockets subscribed as the creator to the signed per-user sidebar stream. It used the pinned Campfire checkout with 22 Puma workers and isolated Redis, and one Rustfire release process. The fixture aligned user names, avatar versions, and signing secret. Every subscribed socket received every `prepend` event, with no missed, duplicate, unexpected, or early-closed deliveries. The first sampled Turbo frame was byte-identical after normalizing only the independently generated epoch-millisecond room sort value; both values were checked against current time. Average delivered frame size was 815 bytes in each app.
+
+| Subscribed sockets | Expected deliveries per app | Order | Rustfire elapsed / p95 | Campfire elapsed / p95 |
+| ---: | ---: | --- | ---: | ---: |
+| 1,000 | 10,000 | Rustfire first | 139 / 21 ms | 1,115 / 150 ms |
+| 1,000 | 10,000 | Campfire first | 135 / 20 ms | 654 / 125 ms |
+| 5,000 | 50,000 | Rustfire first | 474 / 73 ms | 1,421 / 178 ms |
+| 5,000 | 50,000 | Campfire first | 517 / 84 ms | 1,095 / 171 ms |
+
+Two HTTP creations before socket setup and two subscribed-stream creations after setup warmed each app. A 500 ms settling interval followed. The measured interval covers ten sequential POSTs, each on a fresh connection, and delivery to the final socket; per-delivery p95 starts when its room POST starts. Server startup, socket connection, warmup, and settling are excluded. These matched short bursts show faster direct-room creation and sidebar delivery in this fixture. They do not establish sustained throughput, a maximum connection count, memory use, or full application parity; all sockets represent the same account and receive the same per-user stream.
