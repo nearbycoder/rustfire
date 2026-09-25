@@ -16,7 +16,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use bcrypt::{DEFAULT_COST, hash, verify};
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use openssl::{
     bn::BigNumContext,
@@ -805,6 +805,48 @@ fn blob_token(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack>
         .collect::<String>();
     Ok(format!("{encoded}--{digest}"))
 }
+fn blob_attachable_sgid(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
+    let payload = json!({"_rails":{"data":format!("gid://campfire/ActiveStorage::Blob/{id}?expires_in"),"pur":"attachable"}}).to_string();
+    let encoded = STANDARD.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())?;
+    let digest = signature.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
+fn direct_upload_storage_key() -> Result<String, openssl::error::ErrorStack> {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut result = String::with_capacity(28);
+    while result.len() < 28 {
+        let mut random = [0u8; 32];
+        openssl::rand::rand_bytes(&mut random)?;
+        for byte in random {
+            if byte < 252 && result.len() < 28 {
+                result.push(ALPHABET[(byte % 36) as usize] as char);
+            }
+        }
+    }
+    Ok(result)
+}
+fn disk_token(key: &[u8], purpose: &str, data: Value) -> Result<String, openssl::error::ErrorStack> {
+    let expiry = (Utc::now() + Duration::minutes(5)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let payload = json!({"_rails":{"data":data,"exp":expiry,"pur":purpose}}).to_string();
+    let encoded = STANDARD.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())?;
+    let digest = signature.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
+fn disk_token_data(key: &[u8], token: &str, purpose: &str) -> Option<Value> {
+    if token.len() > 4096 { return None; }
+    let (encoded, signature) = token.split_once("--")?;
+    if signature.len() != 40 { return None; }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1()).ok()?
+        .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) { return None; }
+    let envelope: Value = serde_json::from_slice(&STANDARD.decode(encoded).ok()?).ok()?;
+    let metadata = envelope.get("_rails")?;
+    if metadata.get("pur")?.as_str()? != purpose { return None; }
+    if chrono::DateTime::parse_from_rfc3339(metadata.get("exp")?.as_str()?).ok()? <= Utc::now() { return None; }
+    metadata.get("data").cloned()
+}
 fn blob_id_from_token(key: &[u8], token: &str) -> Option<i64> {
     if token.len() > 1024 {
         return None;
@@ -833,8 +875,8 @@ fn blob_id_from_token(key: &[u8], token: &str) -> Option<i64> {
     }
     metadata.get("data")?.as_i64().filter(|id| *id > 0)
 }
-fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> {
-    let encoded_filename = filename
+fn encoded_blob_filename(filename: &str) -> String {
+    filename
         .bytes()
         .map(|byte| {
             if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
@@ -843,7 +885,10 @@ fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> 
                 format!("%{byte:02X}")
             }
         })
-        .collect::<String>();
+        .collect::<String>()
+}
+fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> {
+    let encoded_filename = encoded_blob_filename(filename);
     Ok(format!(
         "/rails/active_storage/blobs/redirect/{}/{encoded_filename}",
         blob_token(key, id).map_err(db_err)?
@@ -2285,11 +2330,21 @@ async fn reject_banned_ip(
             _ => {}
         }
         let path = request.uri().path();
+        let anonymous_direct_upload = path == "/rails/active_storage/direct_uploads"
+            && request.method() == Method::POST
+            && session_token(&s, request.headers()).is_none();
         let preauth_route = path == "/first_run"
             || (path == "/session" && request.method() == Method::POST)
             || path.starts_with("/join/")
             || path.starts_with("/session/transfers/");
-        let csrf = if preauth_route {
+        let csrf = if path.starts_with("/rails/active_storage/disk/") && request.method() == Method::PUT {
+            None
+        } else if anonymous_direct_upload {
+            match cookie(request.headers(), "preauth_csrf") {
+                Some(token) => Some(token),
+                None => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+            }
+        } else if preauth_route {
             match cookie(request.headers(), "preauth_csrf") {
                 Some(token) => Some(token),
                 None => return StatusCode::FORBIDDEN.into_response(),
@@ -2331,7 +2386,7 @@ async fn reject_banned_ip(
                     false
                 };
                 if !form_valid {
-                    return StatusCode::FORBIDDEN.into_response();
+                    return (if anonymous_direct_upload { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::FORBIDDEN }).into_response();
                 }
                 request = Request::from_parts(parts, Body::from(bytes));
             }
@@ -7879,7 +7934,7 @@ async fn attachment_get(
 async fn signed_blob_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((token, _filename)): Path<(String, String)>,
+    Path((token, filename)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     let id = blob_id_from_token(&s.blob_signing_key, &token)
@@ -7889,7 +7944,22 @@ async fn signed_blob_get(
                 .and_then(|key| blob_id_from_token(key, &token))
         })
         .ok_or(StatusCode::NOT_FOUND)?;
-    let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
+    let (filename, content_type, stored) = match attachment_record_unchecked(&s, id) {
+        Ok((_, filename, content_type, stored)) => (filename, content_type, stored),
+        Err(StatusCode::NOT_FOUND) => {
+            let db = pool(&s)?;
+            let row: Option<(String, String, String, bool)> = db.query_row(
+                "SELECT filename,content_type,storage_key,uploaded FROM direct_upload_blobs WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ).optional().map_err(db_err)?;
+            let (actual_filename, content_type, storage_key, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
+            if !uploaded || filename != actual_filename { return Err(StatusCode::NOT_FOUND); }
+            let token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"content_type":content_type,"service_name":"local"})).map_err(db_err)?;
+            return Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{token}/{}", encoded_blob_filename(&actual_filename)))));
+        }
+        Err(error) => return Err(error),
+    };
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
     serve_attachment(
         &std::path::Path::new(&dir).join(stored),
@@ -7900,6 +7970,77 @@ async fn signed_blob_get(
             && (safe_inline_image(&content_type) || safe_inline_video(&content_type)),
     )
     .await
+}
+async fn direct_upload_create(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> AppResult {
+    user(&s, &headers)?;
+    let blob = payload.get("blob").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let filename = blob.get("filename").and_then(Value::as_str).filter(|name| !name.is_empty() && name.len() <= 255 && !name.contains('/') && !name.contains('\\')).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let byte_size = blob.get("byte_size").and_then(Value::as_i64).filter(|size| (0..=25 * 1024 * 1024).contains(size)).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let checksum = blob.get("checksum").and_then(Value::as_str).filter(|value| STANDARD.decode(value).is_ok_and(|digest| digest.len() == 16)).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let content_type = blob.get("content_type").and_then(Value::as_str).filter(|value| !value.is_empty() && value.len() <= 255).unwrap_or("application/octet-stream");
+    let storage_key = direct_upload_storage_key().map_err(db_err)?;
+    let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut db = pool(&s)?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let id: i64 = tx.query_row("SELECT MAX(1000000000000,COALESCE((SELECT MAX(id)+1 FROM direct_upload_blobs),1000000000000),COALESCE((SELECT MAX(id)+1 FROM attachments),1000000000000),COALESCE((SELECT MAX(id)+1 FROM inline_blobs),1000000000000))", [], |r| r.get(0)).map_err(db_err)?;
+    tx.execute("INSERT INTO direct_upload_blobs(id,storage_key,filename,content_type,byte_size,checksum,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,storage_key,filename,content_type,byte_size,checksum,created_at]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    let upload_token = disk_token(&s.blob_signing_key, "blob_token", json!({"key":storage_key,"content_type":content_type,"content_length":byte_size,"checksum":checksum,"service_name":"local"})).map_err(db_err)?;
+    Ok(Json(json!({
+        "id":id,"byte_size":byte_size,"checksum":checksum,"content_type":content_type,
+        "created_at":created_at,"filename":filename,"key":storage_key,"metadata":{},"service_name":"local",
+        "attachable_sgid":blob_attachable_sgid(&s.mention_signing_key,id).map_err(db_err)?,
+        "signed_id":blob_token(&s.blob_signing_key,id).map_err(db_err)?,
+        "direct_upload":{"url":public_url(&headers,&format!("/rails/active_storage/disk/{upload_token}")),"headers":{"Content-Type":content_type}}
+    })).into_response())
+}
+async fn direct_upload_put(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+    body: Bytes,
+) -> AppResult {
+    user(&s, &headers)?;
+    let data = disk_token_data(&s.blob_signing_key, &token, "blob_token").ok_or(StatusCode::NOT_FOUND)?;
+    let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    let content_type = data.get("content_type").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    let expected_length = data.get("content_length").and_then(Value::as_i64).ok_or(StatusCode::NOT_FOUND)?;
+    let checksum = data.get("checksum").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    if headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) != Some(content_type)
+        || body.len() as i64 != expected_length
+        || STANDARD.encode(openssl::hash::hash(MessageDigest::md5(), &body).map_err(db_err)?.as_ref()) != checksum {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM direct_upload_blobs WHERE storage_key=?1 AND content_type=?2 AND byte_size=?3 AND checksum=?4)",params![storage_key,content_type,expected_length,checksum],|r|r.get(0)).map_err(db_err)?;
+    if !exists { return Err(StatusCode::NOT_FOUND); }
+    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+    tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
+    let target = std::path::Path::new(&dir).join(storage_key);
+    let temporary = std::path::Path::new(&dir).join(format!("{storage_key}.upload-{}", Uuid::new_v4()));
+    tokio::fs::write(&temporary, &body).await.map_err(db_err)?;
+    if let Err(error) = tokio::fs::rename(&temporary, &target).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(db_err(error));
+    }
+    pool(&s)?.execute("UPDATE direct_upload_blobs SET uploaded=1 WHERE storage_key=?1",[storage_key]).map_err(db_err)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+async fn direct_upload_disk_get(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((token, filename)): Path<(String, String)>,
+) -> AppResult {
+    let data = disk_token_data(&s.blob_signing_key, &token, "blob_key").ok_or(StatusCode::NOT_FOUND)?;
+    let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    let row: Option<(String,String,bool)> = pool(&s)?.query_row("SELECT filename,content_type,uploaded FROM direct_upload_blobs WHERE storage_key=?1",[storage_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_err)?;
+    let (actual_filename, content_type, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
+    if !uploaded || filename != actual_filename { return Err(StatusCode::NOT_FOUND); }
+    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+    serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,&content_type,&headers,false).await
 }
 async fn signed_representation_get(
     State(s): State<Arc<AppState>>,
@@ -8663,6 +8804,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
+        CREATE TABLE IF NOT EXISTS direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS inline_embeds(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,blob_id INTEGER NOT NULL REFERENCES inline_blobs(id) ON DELETE CASCADE,PRIMARY KEY(message_id,blob_id));
         CREATE INDEX IF NOT EXISTS idx_inline_embeds_blob ON inline_embeds(blob_id);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
@@ -9222,6 +9364,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/rails/active_storage/blobs/redirect/{token}/{filename}",
             get(signed_blob_get),
         )
+        .route("/rails/active_storage/direct_uploads",post(direct_upload_create))
+        .route("/rails/active_storage/disk/{token}",axum::routing::put(direct_upload_put))
+        .route("/rails/active_storage/disk/{token}/{filename}",get(direct_upload_disk_get))
         .route(
             "/rails/active_storage/representations/redirect/{token}/{variation}/{filename}",
             get(signed_representation_get),
