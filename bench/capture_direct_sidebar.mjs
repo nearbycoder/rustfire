@@ -1,4 +1,4 @@
-// Capture signed per-user direct-room Turbo prepend events from one Action Cable socket.
+// Capture signed direct-room prepends and the global remove event from one Action Cable socket.
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -22,13 +22,17 @@ const sidebar = await response.text();
 const sources = [...sidebar.matchAll(/<turbo-cable-stream-source\b[^>]*>/gi)].map(match => match[0]);
 const userSource = sources.find(tag => /channel=(['"])Turbo::StreamsChannel\1/.test(tag) && /signed-stream-name=(['"])IloybGtPaTh2/.test(tag));
 const signedName = userSource?.match(/signed-stream-name=(['"])(.*?)\1/)?.[2];
-if (!signedName) throw new Error('Signed user room-list stream is missing');
+const globalSource = sources.find(tag => /channel=(['"])Turbo::StreamsChannel\1/.test(tag) && /signed-stream-name=(['"])InJvb21zIg==--/.test(tag));
+const globalName = globalSource?.match(/signed-stream-name=(['"])(.*?)\1/)?.[2];
+if (!signedName || !globalName) throw new Error('Signed room-list streams are missing');
 const identifier = JSON.stringify({ channel: 'Turbo::StreamsChannel', signed_stream_name: signedName });
+const globalIdentifier = JSON.stringify({ channel: 'Turbo::StreamsChannel', signed_stream_name: globalName });
 const socket = net.createConnection({ host: base.hostname, port: Number(base.port) });
 let buffer = Buffer.alloc(0);
 let handshake = false;
-let ready = false;
+const confirmed = new Set();
 let unexpected = 0;
+let deleted = false;
 const events = new Map();
 const timeout = setTimeout(() => { console.error(`Timed out with ${events.size}/${count} events`); process.exit(1); }, 30000);
 
@@ -50,7 +54,7 @@ socket.on('connect', () => {
   socket.write(`GET /cable HTTP/1.1\r\nHost: ${base.host}\r\nOrigin: ${base.origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${cookie}\r\n\r\n`);
 });
 socket.on('error', error => { console.error(error); process.exit(1); });
-socket.on('close', () => { if (events.size < count) process.exitCode = 1; });
+socket.on('close', () => { if (events.size < count || !deleted) process.exitCode = 1; });
 socket.on('data', chunk => {
   buffer = Buffer.concat([buffer, chunk]);
   if (!handshake) {
@@ -73,9 +77,15 @@ socket.on('data', chunk => {
     if (opcode !== 1) continue;
     let event;
     try { event = JSON.parse(body.toString()); } catch { unexpected++; continue; }
-    if (event.type === 'welcome') socket.write(frame(JSON.stringify({ command: 'subscribe', identifier })));
-    else if (event.type === 'confirm_subscription' && event.identifier === identifier) { ready = true; console.log('READY'); }
-    else if (event.type === 'reject_subscription' && event.identifier === identifier) throw new Error('User room-list stream rejected');
+    if (event.type === 'welcome') {
+      socket.write(frame(JSON.stringify({ command: 'subscribe', identifier })));
+      socket.write(frame(JSON.stringify({ command: 'subscribe', identifier: globalIdentifier })));
+    }
+    else if (event.type === 'confirm_subscription' && [identifier, globalIdentifier].includes(event.identifier)) {
+      confirmed.add(event.identifier);
+      if (confirmed.size === 2) console.log('READY');
+    }
+    else if (event.type === 'reject_subscription' && [identifier, globalIdentifier].includes(event.identifier)) throw new Error('Room-list stream rejected');
     else if (event.identifier === identifier && typeof event.message === 'string') {
       const html = event.message;
       const match = html.match(/id="list_rooms_direct_(\d+)"/);
@@ -87,11 +97,20 @@ socket.on('data', chunk => {
       if (events.size === count) {
         fs.mkdirSync(output, { recursive: true });
         for (const [id, value] of events) fs.writeFileSync(path.join(output, `${id}.html`), value);
-        console.log(JSON.stringify({ received: events.size, unexpected, ids: [...events.keys()].sort((a, b) => a - b) }));
-        clearTimeout(timeout);
-        socket.destroy();
-        if (unexpected) process.exitCode = 1;
+        console.log('CREATES_READY');
       }
+    }
+    else if (event.identifier === globalIdentifier && typeof event.message === 'string') {
+      if (deleted || !/^<turbo-stream action="remove" target="list_rooms_direct_2"><\/turbo-stream>$/.test(event.message)) {
+        unexpected++;
+        continue;
+      }
+      deleted = true;
+      fs.writeFileSync(path.join(output, 'delete.html'), event.message);
+      console.log(JSON.stringify({ received: events.size, unexpected, ids: [...events.keys()].sort((a, b) => a - b), deleted }));
+      clearTimeout(timeout);
+      socket.destroy();
+      if (unexpected) process.exitCode = 1;
     }
   }
 });

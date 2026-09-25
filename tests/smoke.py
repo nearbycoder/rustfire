@@ -341,6 +341,13 @@ def main():
                 assert 'id="list_rooms_open_1"' not in sidebar_response.read().decode()
             assert request(member, base, "/rooms/1")[0] == 200
             assert request(member, base, "/rooms/1/involvement", {"involvement": "everything"})[0] == 200
+            code, _, open_form = request(admin, base, "/rooms/opens/new")
+            assert code == 200 and 'style="view-transition-name: new-room"' in open_form
+            assert 'action="/rooms/opens"' in open_form and 'name="room[name]"' in open_form
+            code, _, closed_form = request(admin, base, "/rooms/closeds/new")
+            assert code == 200 and 'action="/rooms/closeds"' in closed_form
+            assert 'type="hidden" name="user_ids[]"' in closed_form
+            assert 'Give Member Two access to this room' in closed_form
             code, _, payload = request(admin, base, "/rooms/closeds", {"name": "Private", "user_ids": "1"})
             assert code == 200, (code, payload)
             code, redirected, _ = request(member, base, "/rooms/2")

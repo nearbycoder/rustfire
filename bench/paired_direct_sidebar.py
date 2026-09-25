@@ -1,4 +1,4 @@
-"""Compare Campfire and Rustfire direct-room sidebar links on matching fixtures.
+"""Compare Campfire and Rustfire room sidebar, settings, and creation forms on matching fixtures.
 
 Requires a release Rustfire build and the pinned Campfire checkout/bundle.
 Uses disposable SQLite databases and an isolated Redis server.
@@ -56,6 +56,21 @@ def delete_direct(port, room_id, cookie, csrf):
         return error.code, urllib.parse.urlparse(error.headers.get("Location", "")).path
 
 
+def create_room_from_form(port, kind, cookie, csrf, name, user_ids=()):
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, file, code, message, headers, new_url):
+            return None
+
+    body = urllib.parse.urlencode([("room[name]", name), ("authenticity_token", csrf)] + [("user_ids[]", user_id) for user_id in user_ids]).encode()
+    headers = {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": csrf}
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/{kind}", headers=headers, data=body)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
+            return response.status, urllib.parse.urlparse(response.headers.get("Location", "")).path
+    except urllib.error.HTTPError as error:
+        return error.code, urllib.parse.urlparse(error.headers.get("Location", "")).path
+
+
 def run(port, cookie, csrf, capture_dir):
     process = subprocess.Popen(
         ["node", "bench/capture_direct_sidebar.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", cookie, "--count", "4", "--output", str(capture_dir)],
@@ -70,6 +85,7 @@ def run(port, cookie, csrf, capture_dir):
         placeholder_counts = []
         _, _, initial_sidebar = request(port, "/users/me/sidebar", cookie)
         _, _, new_ping_page = request(port, "/rooms/directs/new", cookie)
+        new_room_pages = [request(port, f"/rooms/{kind}/new", cookie)[2] for kind in ("opens", "closeds")]
         placeholder_counts.append(count_placeholders(initial_sidebar))
         placeholder_users = [placeholder_ids(initial_sidebar)]
         placeholder_html = [placeholder_fragments(initial_sidebar)]
@@ -85,14 +101,19 @@ def run(port, cookie, csrf, capture_dir):
             placeholder_users.append(placeholder_ids(sidebar))
             placeholder_html.append(placeholder_fragments(sidebar))
             sidebar_pages.append(sidebar)
-        output, error = process.communicate(timeout=35)
-        assert process.returncode == 0, (output, error)
-        received = json.loads(output.strip().splitlines()[-1])
-        assert received == {"received": 4, "unexpected": 0, "ids": [2, 3, 4, 5]}, received
+        assert process.stdout.readline().strip() == "CREATES_READY", "Direct-room prepends were not captured"
         streams = [(capture_dir / f"{room_id}.html").read_text() for room_id in (2, 3, 4, 5)]
         edit_pages = [request(port, f"/rooms/directs/{room_id}/edit", cookie)[2] for room_id in (2, 3, 4, 5)]
         delete_result = delete_direct(port, 2, cookie, csrf)
-        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, delete_result
+        output, error = process.communicate(timeout=35)
+        assert process.returncode == 0, (output, error)
+        received = json.loads(output.strip().splitlines()[-1])
+        assert received == {"received": 4, "unexpected": 0, "ids": [2, 3, 4, 5], "deleted": True}, received
+        delete_stream = (capture_dir / "delete.html").read_text()
+        _, _, deleted_sidebar = request(port, "/users/me/sidebar", cookie)
+        assert 'id="list_rooms_direct_2"' not in deleted_sidebar
+        created_rooms = [create_room_from_form(port, "opens", cookie, csrf, "New public room"), create_room_from_form(port, "closeds", cookie, csrf, "New private room", (1, 42))]
+        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, delete_result, delete_stream, deleted_sidebar, new_room_pages, created_rooms
     finally:
         if process.poll() is None:
             process.kill()
@@ -121,6 +142,18 @@ def normalized_placeholders(groups):
     return [[re.sub(r'(name="authenticity_token" value=")[^"]+', r'\1<csrf>', fragment) for fragment in group] for group in groups]
 
 
+def remaining_direct_rooms(database):
+    with sqlite3.connect(database) as db:
+        rooms = [row[0] for row in db.execute("SELECT id FROM rooms WHERE type='Rooms::Direct' ORDER BY id")]
+        deleted_memberships = db.execute("SELECT COUNT(*) FROM memberships WHERE room_id=2").fetchone()[0]
+    return rooms, deleted_memberships
+
+
+def created_room_state(database):
+    with sqlite3.connect(database) as db:
+        return [(name, kind, [row[0] for row in db.execute("SELECT user_id FROM memberships WHERE room_id=? ORDER BY user_id", (rid,))]) for rid, name, kind in db.execute("SELECT id,name,type FROM rooms WHERE name IN ('New public room','New private room') ORDER BY id").fetchall()]
+
+
 class SidebarTree(HTMLParser):
     def __init__(self, frame_id=None, target_class=None):
         super().__init__()
@@ -134,7 +167,7 @@ class SidebarTree(HTMLParser):
         values = dict(attrs)
         if not self.active:
             matches_frame = self.frame_id is not None and tag == "turbo-frame" and values.get("id") == self.frame_id
-            matches_class = self.target_class is not None and tag == "div" and self.target_class in values.get("class", "").split()
+            matches_class = self.target_class is not None and self.target_class in values.get("class", "").split()
             if not (matches_frame or matches_class):
                 return
             self.active = True
@@ -196,7 +229,7 @@ def main():
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
-            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_delete = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
+            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_delete, rust_delete_stream, rust_deleted_sidebar, rust_new_room_pages, rust_created_rooms = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
         finally:
             stop_server(rust)
 
@@ -207,7 +240,7 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_delete = run(camp_port, cookie, csrf, temp / "camp-streams")
+            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_delete, camp_delete_stream, camp_deleted_sidebar, camp_new_room_pages, camp_created_rooms = run(camp_port, cookie, csrf, temp / "camp-streams")
         finally:
             if camp is not None:
                 stop_server(camp)
@@ -231,6 +264,13 @@ def main():
             for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
                 (args.sample_dir / f"rustfire-edit-ping-{room_id}.html").write_text(rust_edit)
                 (args.sample_dir / f"campfire-edit-ping-{room_id}.html").write_text(camp_edit)
+            (args.sample_dir / "rustfire-delete-ping.html").write_text(rust_delete_stream)
+            (args.sample_dir / "campfire-delete-ping.html").write_text(camp_delete_stream)
+            (args.sample_dir / "rustfire-deleted-sidebar.html").write_text(rust_deleted_sidebar)
+            (args.sample_dir / "campfire-deleted-sidebar.html").write_text(camp_deleted_sidebar)
+            for kind, rust_page, camp_page in zip(("opens", "closeds"), rust_new_room_pages, camp_new_room_pages):
+                (args.sample_dir / f"rustfire-new-{kind}.html").write_text(rust_page)
+                (args.sample_dir / f"campfire-new-{kind}.html").write_text(camp_page)
         for index, (rust_link, camp_link) in enumerate(zip(rust_links, camp_links), 2):
             assert normalized(rust_link) == normalized(camp_link), f"Direct room {index} markup differs; use --sample-dir to inspect"
             assert normalized(rust_streams[index - 2]) == normalized(camp_streams[index - 2]), f"Direct room {index} Turbo event differs; use --sample-dir to inspect"
@@ -245,7 +285,17 @@ def main():
         for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
             assert panel_tree(rust_edit) == panel_tree(camp_edit), f"Direct settings panel differs for room {room_id}; use --sample-dir to inspect"
         assert rust_delete == camp_delete == (302, "/"), (rust_delete, camp_delete)
-        print("PASS paired direct links, Turbo events, 80 shortcut forms, five sidebar frames, new-ping frame, four direct settings panels, and delete form; only room epoch milliseconds, form CSRF tokens, and origins normalized")
+        assert rust_delete_stream == camp_delete_stream, (rust_delete_stream, camp_delete_stream)
+        assert frame_tree(rust_deleted_sidebar, "user_sidebar") == frame_tree(camp_deleted_sidebar, "user_sidebar"), "Sidebar differs after direct-room deletion; use --sample-dir to inspect"
+        assert remaining_direct_rooms(rust_db) == remaining_direct_rooms(camp_db) == ([3, 4, 5], 0)
+        with sqlite3.connect(rust_db) as db:
+            assert db.execute("SELECT COUNT(*) FROM direct_room_sets WHERE room_id=2").fetchone()[0] == 0
+        for kind, rust_page, camp_page in zip(("opens", "closeds"), rust_new_room_pages, camp_new_room_pages):
+            assert panel_tree(rust_page) == panel_tree(camp_page), f"New {kind} room panel differs; use --sample-dir to inspect"
+        assert rust_created_rooms == camp_created_rooms == [(302, "/rooms/6"), (302, "/rooms/7")], (rust_created_rooms, camp_created_rooms)
+        expected_created = [("New public room", "Rooms::Open", list(range(1, 52))), ("New private room", "Rooms::Closed", [1, 42])]
+        assert created_room_state(rust_db) == created_room_state(camp_db) == expected_created
+        print("PASS paired direct links, create and delete Turbo events, 80 shortcut forms, six sidebar frames, new-ping frame, four direct settings panels, delete form, two new-room panels, and open/private room creation; only room epoch milliseconds, form CSRF tokens, and origins normalized")
 
 
 if __name__ == "__main__":

@@ -129,6 +129,25 @@ function initPingForm(){
   renderSelected();input.focus();
 }
 initPingForm();
+const newRoomPanel=document.querySelector('section.panel[style="view-transition-name: new-room"]');
+if(newRoomPanel){
+  const nameInput=newRoomPanel.querySelector('#room_name');
+  const savedName=sessionStorage.getItem('rustfire-new-room-name');
+  if(savedName!==null&&nameInput){nameInput.value=savedName;sessionStorage.removeItem('rustfire-new-room-name');}
+  const filterInput=newRoomPanel.querySelector('menu #search');
+  if(filterInput){
+    const people=[...newRoomPanel.querySelectorAll('[data-filter-target="list"] > li[data-value]')];
+    filterInput.addEventListener('input',()=>{
+      const query=filterInput.value.trim().toLocaleLowerCase();
+      for(const person of people)person.hidden=!person.dataset.value.includes(query);
+    });
+  }
+  newRoomPanel.querySelector('[data-turbo-action="replace"]')?.addEventListener('click',event=>{
+    event.preventDefault();
+    if(nameInput)sessionStorage.setItem('rustfire-new-room-name',nameInput.value);
+    location.href=event.currentTarget.href;
+  });
+}
 const chat = document.querySelector('.chat');
 if(!chat){
   document.addEventListener('click',event=>{

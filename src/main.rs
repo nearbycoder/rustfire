@@ -5167,6 +5167,29 @@ async fn message_delete(
         Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
     }
 }
+fn new_room_translation_button() -> String {
+    let translations = [
+        ("🇺🇸", "Name the room"),
+        ("🇪🇸", "Nombrar la sala"),
+        ("🇫🇷", "Nommez la salle"),
+        ("🇮🇳", "कमरे का नाम दें"),
+        ("🇩🇪", "Geben Sie dem Raum einen Namen"),
+        ("🇧🇷", "Dê um nome a essa sala"),
+        ("🇯🇵", "ルームに名前を付ける"),
+    ];
+    let entries = translations.iter().map(|(flag, phrase)| format!("<dt>{flag}</dt><dd class=\"margin-none\">{phrase}</dd>")).collect::<String>();
+    format!("<details class=\"position-relative\" data-controller=\"popup\" data-action=\"keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside\" data-popup-orientation-top-class=\"popup-orientation-top\"><summary class=\"btn\" tabindex=\"-1\"><img aria-hidden=\"true\" class=\"color-icon\" src=\"/assets/globe-8c54d23b.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Translate</span></summary><div class=\"language-list-menu shadow\" data-popup-target=\"menu\"><dl class=\"language-list\">{entries}</dl></div></details>")
+}
+fn new_room_user_row(id: i64, name: &str, bio: &str, updated_at: &str, closed: bool, current_id: i64, avatar_key: &[u8]) -> Result<String, StatusCode> {
+    let avatar = avatar_path(avatar_key, id, updated_at)?;
+    let title = if bio.trim().is_empty() { name.to_string() } else { format!("{name} – {bio}") };
+    let control = if !closed || id == current_id {
+        format!("{}<img class=\"colorize--black flex-item-no-shrink\" aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" />", if closed { format!("<input type=\"hidden\" name=\"user_ids[]\" value=\"{id}\" />") } else { String::new() })
+    } else {
+        format!("<label class=\"switch flex-item-no-shrink\"><input type=\"checkbox\" name=\"user_ids[]\" value=\"{id}\" class=\"switch__input\" /><span class=\"switch__btn round\"></span><span class=\"for-screen-reader\">Give {} access to this room</span></label>", esc(name))
+    };
+    Ok(format!("<li class=\"flex align-center gap margin-none\" data-value=\"{}\"><figure class=\"avatar flex-item-no-shrink\" style=\"--avatar-size: 4ch;\"><a title=\"{}\" class=\"btn avatar\" data-turbo-frame=\"_top\" href=\"/users/{id}\"><img aria-hidden=\"true\" loading=\"lazy\" src=\"{avatar}\" width=\"48\" height=\"48\" /></a></figure><div class=\"min-width\"><div class=\"overflow-ellipsis fill-shade\"><strong>{}</strong></div></div><hr class=\"separator\" aria-hidden=\"true\" />{control}</li>", esc(&name.to_lowercase()), esc(&title), esc(name)))
+}
 async fn new_room(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -5180,26 +5203,33 @@ async fn new_room(
     ensure_room_creation_allowed(&s, &u)?;
     let db = pool(&s)?;
     let mut q = db
-        .prepare("SELECT id,name FROM users WHERE status=0 ORDER BY lower(name)")
+        .prepare("SELECT id,name,COALESCE(bio,''),updated_at FROM users WHERE status=0 ORDER BY lower(name)")
         .map_err(db_err)?;
     let users = q
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
-    let choices = if closed {
-        users.iter().map(|(id,name)|format!("<label class='check'><input type='checkbox' name='user_ids' value='{id}' {}>{}</label>",if *id==u.id{"checked"}else{""},esc(name))).collect::<String>()
-    } else {
-        String::new()
-    };
-    let label = if closed { "Private room" } else { "Room" };
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    let rows = users.iter().map(|(id,name,bio,updated_at)| new_room_user_row(*id,name,bio,updated_at,closed,u.id,avatar_key)).collect::<Result<String, _>>()?;
+    let type_change_path = if closed { "/rooms/opens/new" } else { "/rooms/closeds/new" };
+    let type_description = if closed { "Give everyone access to this room" } else { "Give only some access to this room" };
+    let checked = if closed { "" } else { " checked=\"checked\"" };
+    let search = if users.len() > 20 { "<input type=\"search\" id=\"search\" autocorrect=\"off\" autocomplete=\"off\" data-1p-ignore=\"true\" class=\"input input--transparent full-width\" placeholder=\"Filter…\" data-action=\"input-&gt;filter#filter\">" } else { "" };
+    let everyone = format!("<li class=\"flex align-center gap margin-none\"><figure class=\"avatar flex-item-no-shrink\" style=\"--avatar-border-radius: 0; --avatar-size: 4ch;\"><img aria-hidden=\"true\" class=\"colorize--black\" style=\"background-color: transparent\" src=\"/assets/everyone-4ca1d460.svg\" /><span class=\"for-screen-reader\">Everyone</span></figure><div class=\"min-width\"><div class=\"overflow-ellipsis fill-shade\"><strong>Everyone</strong></div></div><hr class=\"separator\" aria-hidden=\"true\"><a class=\"btn--faux flex-inline\" tabindex=\"-1\" data-turbo-action=\"replace\" href=\"{type_change_path}\"><label for=\"room_type\" class=\"switch\"><input type=\"checkbox\" id=\"room_type\" class=\"switch__input\"{checked}><span class=\"switch__btn round\"></span><span class=\"for-screen-reader\">{type_description}</span></label></a></li><hr class=\"separator full-width\" style=\"--border-style: solid\">");
+    let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
+    let panel = format!("<nav class=\"new-room-back\"><a class=\"btn\" href=\"/\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Go Back</span></a></nav><section class=\"panel txt-align-center\" style=\"view-transition-name: new-room\"><form action=\"/rooms/{kind}\" accept-charset=\"UTF-8\" method=\"post\"><input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /><div class=\"flex align-center gap\">{}<label class=\"flex-item-grow txt-large\"><input name=\"room[name]\" id=\"room_name\" class=\"input full-width\" required=\"required\" autofocus=\"autofocus\" placeholder=\"Name the room\" data-turbo-permanent=\"true\" data-action=\"keydown.enter-&gt;form#submit:prevent\" type=\"text\" value=\"New room\" /><span class=\"for-screen-reader\">Name this room</span></label></div><hr class=\"margin-block borderless\"><section class=\"room-access margin-block pad-inline fill-shade border-radius\"><menu class=\"flex flex-column gap margin-none pad overflow-y constrain-height\" data-controller=\"filter\" data-filter-active-class=\"filter--active\" data-filter-selected-class=\"selected\">{everyone}{search}<div data-filter-target=\"list\" contents>{rows}</div></menu></section><button name=\"button\" type=\"submit\" class=\"btn btn--reversed txt-large center\"><img aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Save</span></button></form></section>", new_room_translation_button());
     Ok(render(
-        &format!("New {label}"),
-        &format!(
-            "<section class='form-card'><h1>New {label}</h1><form method='post' action='/rooms/{kind}'><label>Name<input name='name' required value='New room'></label>{choices}<button class='button'>Create {label}</button></form></section>"
-        ),
+        "New chat room",
+        &panel,
         Some(&u),
     ))
+}
+async fn new_open_room(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+    new_room(State(s), headers, Path("opens".to_string())).await
+}
+async fn new_closed_room(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+    new_room(State(s), headers, Path("closeds".to_string())).await
 }
 fn fields(raw: &[u8]) -> (std::collections::HashMap<String, String>, Vec<i64>) {
     let mut values = std::collections::HashMap::new();
@@ -5278,7 +5308,7 @@ async fn create_room(
     tx.commit().map_err(db_err)?;
     notify_room_lists(&s, ids.iter().copied());
     broadcast_room_created(&s, &Room { id: rid, name: name.trim().to_owned(), kind: ty.to_owned(), creator_id: u.id }, &ids);
-    Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+    Ok(found_redirect(&format!("/rooms/{rid}")))
 }
 async fn create_open_room(
     State(s): State<Arc<AppState>>,
@@ -9593,7 +9623,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/rooms/{id}/update", post(room_update))
         .route("/rooms/{id}/delete", post(room_delete))
-        .route("/rooms/{kind}/new", get(new_room))
+        .route("/rooms/opens/new", get(new_open_room))
+        .route("/rooms/closeds/new", get(new_closed_room))
         .route(
             "/rooms/opens/{id}",
             get(room_kind_show)
