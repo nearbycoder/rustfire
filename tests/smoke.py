@@ -388,6 +388,8 @@ def main():
             assert code == 302
             code, _, page = request(admin, base, "/account")
             assert code == 200 and "Team Fire" in page
+            roster = page.split("<turbo-frame id='account_users'>", 1)[1].split("</turbo-frame>", 1)[0]
+            assert roster.index("<strong>Admin</strong>") < roster.index('<hr class="separator full-width">') < roster.index("<strong>Member Two</strong>")
             code, _, page = request(admin, base, "/account/custom_styles/edit")
             assert code == 200 and "Custom styles" in page
             code, _, _ = request(member, base, "/account/custom_styles", {"account[custom_styles]": "body{color:red}"})
@@ -429,7 +431,7 @@ def main():
             with client().open(base+"/account/logo") as res:
                 image=res.read()
                 assert res.status==200 and int.from_bytes(image[16:20],"big")==1
-            assert request(admin,base,"/account/logo",method="DELETE")[0]==303
+            assert request(admin,base,"/account/logo",method="DELETE")[0]==302
             with client().open(base+"/account/logo") as res:
                 assert res.read()==stock
             assert request(admin,base,"/account/update",{"restrict_room_creation":"off"})[0]==200

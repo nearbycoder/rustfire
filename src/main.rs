@@ -4633,12 +4633,13 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
             Ok((r.get(0)?, r.get(1)?))
         })
         .map_err(db_err)?;
-    let mut list = String::new();
+    let mut administrators = String::new();
+    let mut members = String::new();
     let mut q = db
-        .prepare("SELECT id,name,email_address,role,status FROM users WHERE status IN (0,2) ORDER BY lower(name)")
+        .prepare("SELECT id,name,email_address,role,status FROM users WHERE status=0 OR (?1 AND status=2) ORDER BY lower(name)")
         .map_err(db_err)?;
     for row in q
-        .query_map([], |r| {
+        .query_map([is_admin(&u)], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -4662,8 +4663,8 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         } else {
             String::new()
         };
-        list.push_str(&format!(
-            "<li><a href='/users/{id}'>{}</a> · {} {} {controls}</li>",
+        let item = format!(
+            "<li><a href='/users/{id}'><strong>{}</strong></a> · {} {} {controls}</li>",
             esc(&n),
             esc(email.as_deref().unwrap_or("")),
             if status == 2 {
@@ -4673,8 +4674,21 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
             } else {
                 ""
             }
-        ));
+        );
+        if role == 1 {
+            administrators.push_str(&item);
+        } else {
+            members.push_str(&item);
+        }
     }
+    let divider = if !administrators.is_empty() && !members.is_empty() {
+        "<hr class=\"separator full-width\">"
+    } else {
+        ""
+    };
+    let list = format!(
+        "<turbo-frame id='account_users'><ul class='people-list'>{administrators}</ul>{divider}<ul class='people-list'>{members}</ul></turbo-frame>"
+    );
     let restricted: bool = db
         .query_row(
             "SELECT restrict_room_creation FROM account_settings WHERE id=1",
@@ -4696,7 +4710,7 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
     Ok(render(
         "Account",
         &format!(
-            "<section class='form-card'><h1>{}</h1>{account_controls}<h2>People</h2><ul class='people-list'>{list}</ul><p><a href='/join/{code}'>Invite link</a> · {invite_qr}</p><label>Share this link<input readonly value='{}'></label><p><a href='/account/bots'>Bots</a></p></section>",
+            "<section class='form-card'><h1>{}</h1>{account_controls}<h2>People</h2>{list}<p><a href='/join/{code}'>Invite link</a> · {invite_qr}</p><label>Share this link<input readonly value='{}'></label><p><a href='/account/bots'>Bots</a></p></section>",
             esc(&name),
             esc(&invite)
         ),
