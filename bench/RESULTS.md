@@ -488,3 +488,16 @@ After indexing attachment filenames for file-only messages, `bench/paired_turbo_
 Release build `7b60fa9` repeated that paired attachment trial after the inline media importer changes. Each app delivered **2,000/2,000** events with matching attachment-message identities and no unexpected frames. Rustfire measured **36.68 ms p95** and Campfire **186.23 ms p95**. Average event sizes were unchanged at **10,459 / 11,571 bytes**. This is a short fanout regression check; storage and notification side effects still differ.
 
 Revision `98f65b9` also passed paired 200-socket, 10-post bursts. For text messages, each app delivered **2,000/2,000** expected events with matching message identities; Rustfire measured **35.52 ms p95** and Campfire **163.63 ms p95**, averaging **8,505 / 9,589 bytes** per event. For text attachments, both delivered **2,000/2,000** events with matching attachment-message identities; Rustfire measured **23.73 ms p95** and Campfire **201.26 ms p95**, averaging **10,459 / 11,571 bytes**. These bursts do not establish sustained user capacity or full side-effect parity.
+
+## Paired signed sidebar creation burst
+
+`bench/paired_sidebar_fanout.py` created 10 open rooms on each disposable app database, each with the same 51 active-user memberships. Every subscribed socket received every `Turbo::StreamsChannel` prepend to `shared_rooms`; the sampled 443-byte Turbo payloads were byte-identical. The runs used a Rustfire release process and Campfire's packaged 22 Puma workers with isolated Redis. Room creation and socket delivery were measured after HTTP and subscribed-stream warmups, with a fresh HTTP connection per POST. Server startup, socket connection, warmup, and a 500 ms settling interval were excluded.
+
+| Subscribed sockets | Expected deliveries per app | Order | Rustfire elapsed / p95 | Campfire elapsed / p95 |
+| ---: | ---: | --- | ---: | ---: |
+| 1,000 | 10,000 | Rustfire first | 124 / 18 ms | 663 / 96 ms |
+| 1,000 | 10,000 | Campfire first | 132 / 20 ms | 648 / 128 ms |
+| 5,000 | 50,000 | Rustfire first | 516 / 80 ms | 1,180 / 144 ms |
+| 5,000 | 50,000 | Campfire first | 511 / 81 ms | 1,132 / 149 ms |
+
+All four pairs had zero missed, duplicate, or unexpected deliveries and zero early socket closes. The elapsed interval includes sequential room POSTs and delivery to the last socket; p95 is per socket from its room's POST start. This establishes a faster matched room-creation/sidebar-broadcast burst on this host. It does not establish sustained user capacity, memory advantage, or whole-app parity. Other sidebar markup and app side effects still differ.

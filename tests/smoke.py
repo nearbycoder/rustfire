@@ -327,18 +327,18 @@ def main():
             code, _, _ = request(admin, base, "/rooms/1/messages", {"message[body]": "second", "message[client_message_id]": "test-2"}, headers={"Accept": "application/json"})
             assert code == 201
             code, _, page = request(member, base, "/users/me/sidebar")
-            assert code == 200 and re.search(r"<a id='list_rooms_open_1'[^>]*class='[^']*\bunread\b", page)
+            assert code == 200 and re.search(r'<a id="list_rooms_open_1"[^>]*class="[^"]*\bunread\b', page)
             code, _, _ = request(member, base, "/rooms/1/involvement", {"involvement": "everything"})
             assert code == 200
             code, _, page = request(member, base, "/users/me/sidebar")
-            assert code == 200 and re.search(r"<a id='list_rooms_open_1'[^>]*class='[^']*\bunread\b", page)
+            assert code == 200 and re.search(r'<a id="list_rooms_open_1"[^>]*class="[^"]*\bunread\b', page)
             assert request(member, base, "/rooms/1")[0] == 200
             code, _, page = request(member, base, "/users/me/sidebar")
-            assert code == 200 and not re.search(r"<a id='list_rooms_open_1'[^>]*class='[^']*\bunread\b", page)
+            assert code == 200 and not re.search(r'<a id="list_rooms_open_1"[^>]*class="[^"]*\bunread\b', page)
             assert request(member, base, "/rooms/1/involvement", {"involvement": "invisible"})[0] == 200
             with member.open(base + "/users/me/sidebar?active=1") as sidebar_response:
                 assert sidebar_response.headers["x-rustfire-active-room-accessible"] == "1"
-                assert "href='/rooms/1'" not in sidebar_response.read().decode()
+                assert 'id="list_rooms_open_1"' not in sidebar_response.read().decode()
             assert request(member, base, "/rooms/1")[0] == 200
             assert request(member, base, "/rooms/1/involvement", {"involvement": "everything"})[0] == 200
             code, _, payload = request(admin, base, "/rooms/closeds", {"name": "Private", "user_ids": "1"})
@@ -428,10 +428,10 @@ def main():
             code, repeated_url, _ = request(admin, base, "/rooms/directs", {"user_ids": "2"})
             assert repeated_url == direct_url
             assert request(member, base, "/rooms/3/involvement", {"involvement": "invisible"})[0] == 200
-            assert "href='/rooms/3'" not in request(member, base, "/users/me/sidebar")[2]
+            assert "id='list_rooms_direct_3'" not in request(member, base, "/users/me/sidebar")[2]
             assert request(member, base, "/rooms/3")[0] == 200
             assert request(member, base, "/rooms/3/involvement", {"involvement": "everything"})[0] == 200
-            assert "href='/rooms/3'" in request(member, base, "/users/me/sidebar")[2]
+            assert "id='list_rooms_direct_3'" in request(member, base, "/users/me/sidebar")[2]
             code, _, page = request(member, base, "/rooms/directs/3/edit")
             assert code == 200 and "Ping settings" in page
             code, alias_url, _ = request(member, base, "/rooms/directs/3")

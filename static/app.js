@@ -248,7 +248,7 @@ if (chat) {
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
   const sidebarStreamIdents=[...document.querySelectorAll('.sidebar turbo-cable-stream-source[channel="Turbo::StreamsChannel"]')].map(source=>JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:source.getAttribute('signed-stream-name')}));
-  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar .room-link[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
+  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar a[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
     if(sidebarRefreshPending){sidebarRefreshAgain=true;return;}
@@ -286,7 +286,7 @@ if (chat) {
       if(action==='remove'){target.remove();continue;}
       const fragment=stream.querySelector('template')?.content.cloneNode(true);
       if(!fragment)continue;
-      for(const link of fragment.querySelectorAll('.room-link')){
+      for(const link of fragment.querySelectorAll('a[id^="list_rooms_"]')){
         if(link.id)document.getElementById(link.id)?.remove();
         link.classList.toggle('active',link.getAttribute('href')===`/rooms/${roomId}`);
       }

@@ -45,8 +45,10 @@ body:has(.app-shell)>header { display: none; }
 .direct-placeholder:hover,.direct-placeholder:focus-visible { border-radius: 8px; background: var(--chat-bubble); }
 .sidebar-rooms { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px 13.3px; }
 .sidebar-rooms nav { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.sidebar .sidebar-rooms .room-link { display: inline-flex; align-items: center; min-height: 40px; max-width: 100%; padding: 8px 17px; border: 1px solid var(--chat-border); border-radius: 20px; background: var(--chat-bg); color: var(--chat-text); font-size: 16px; line-height: 22px; }
-.sidebar .sidebar-rooms .room-link:hover { border-color: var(--chat-pill); }
+.sidebar .sidebar-rooms .room { display: inline-flex; align-items: center; min-height: 40px; max-width: 100%; padding: 8px 17px; border: 1px solid var(--chat-border); border-radius: 20px; background: var(--chat-bg); color: var(--chat-text); font-size: 16px; line-height: 22px; text-decoration: none; }
+.sidebar .sidebar-rooms .room:hover { border-color: var(--chat-pill); }
+.sidebar .sidebar-rooms .room.unread { font-weight: 800; }
+.sidebar .sidebar-rooms .room.unread::after { content: '●'; font-size: 9px; color: #d86b2e; margin-left: 8px; }
 .sidebar-new-room { display: grid; place-items: center; width: 58px; height: 38px; border: 1px solid var(--chat-border); border-radius: 12px; background: var(--chat-bg); }
 .sidebar-new-room img { width: 20px; height: 20px; }
 .sidebar-tools { display: flex; flex: none; align-items: center; justify-content: flex-end; height: 90px; gap: 9px; padding: 24px 13.3px; backdrop-filter: blur(12px); }

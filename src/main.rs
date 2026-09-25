@@ -2920,21 +2920,13 @@ fn rooms_for(s: &AppState, uid: i64) -> Result<Vec<Room>, StatusCode> {
         .map_err(db_err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
 }
-fn sidebar_room_link(room: &Room, active: Option<i64>, unread: bool) -> String {
+fn sidebar_room_link(room: &Room, _active: Option<i64>, unread: bool) -> String {
     format!(
-        "<a id='{}' data-rooms-list-target='room' data-room-id='{}' data-badge-dot-target='unread' data-sorted-list-target='item' data-sorted-list-name='{}' style='--column-gap: 0.5em' class='align-center gap room btn txt-nowrap room-link {}' href='/rooms/{}'><span class='overflow-ellipsis'>{}</span></a>",
+        "<a id=\"{}\" data-rooms-list-target=\"room\" data-room-id=\"{}\" data-badge-dot-target=\"unread\" data-sorted-list-target=\"item\" data-sorted-list-name=\"{}\" style=\"--column-gap: 0.5em\" class=\"align-center gap room btn txt-nowrap{}\" href=\"/rooms/{}\">\n  <span class=\"overflow-ellipsis\">{}</span>\n</a>",
         room_list_target(room),
         room.id,
         esc(&room.name),
-        format!(
-            "{} {}",
-            if active == Some(room.id) {
-                "active"
-            } else {
-                ""
-            },
-            if unread { "unread" } else { "" }
-        ),
+        if unread { " unread" } else { "" },
         room.id,
         esc(&room.name)
     )

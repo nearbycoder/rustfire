@@ -81,7 +81,7 @@ try{
   await setInvolvement('everything');
   const visibleEvent=await nextFrame();
   assert.equal(visibleEvent.identifier,userListIdentifier);
-  assert.match(visibleEvent.message,/^<turbo-stream action="prepend" target="shared_rooms"><template><a id='list_rooms_open_1'/);
+  assert.match(visibleEvent.message,/^<turbo-stream action="prepend" target="shared_rooms"><template><a id="list_rooms_open_1"/);
   sendCommand({command:'unsubscribe',identifier:globalListIdentifier});
   sendCommand({command:'unsubscribe',identifier:userListIdentifier});
   const streamClientId='ws-stream-1';
@@ -190,7 +190,7 @@ try{
     assert.equal(frame.message.type,'rooms_changed');
     const sidebar=await fetch(base+'/users/me/sidebar?active=1',{headers:{Cookie:cookie}});
     assert.equal(sidebar.headers.get('x-rustfire-active-room-accessible'),'1');
-    assert.equal((await sidebar.text()).includes("href='/rooms/1'"),involvement!=='invisible');
+    assert.equal((await sidebar.text()).includes('id="list_rooms_open_1"'),involvement!=='invisible');
   }
   sendCommand({command:'subscribe',identifier:globalListIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
@@ -201,10 +201,10 @@ try{
   const privateRoomId=Number(privateRoom.headers.get('location').match(/\/rooms\/(\d+)/)[1]);
   const createdEvents=[await nextFrame(),await nextFrame()];
   assert(createdEvents.some(event=>event.identifier===roomListIdentifier&&event.message.type==='rooms_changed'));
-  assert(createdEvents.some(event=>event.identifier===userListIdentifier&&event.message.includes(`action="prepend" target="shared_rooms"`)&&event.message.includes(`id='list_rooms_closed_${privateRoomId}'`)));
+  assert(createdEvents.some(event=>event.identifier===userListIdentifier&&event.message.includes(`action="prepend" target="shared_rooms"`)&&event.message.includes(`id="list_rooms_closed_${privateRoomId}"`)));
   const sidebarAfterCreate=await fetch(base+'/users/me/sidebar?active=1',{headers:{Cookie:cookie}});
   assert.equal(sidebarAfterCreate.status,200);
-  assert.match(await sidebarAfterCreate.text(),new RegExp(`href='/rooms/${privateRoomId}'`));
+  assert.match(await sidebarAfterCreate.text(),new RegExp(`id="list_rooms_closed_${privateRoomId}"`));
   const otherSocket=net.createConnection({host:'127.0.0.1',port});
   const otherReady=new Promise((resolve,reject)=>{otherSocket.once('error',reject);otherSocket.once('data',data=>data.toString().startsWith('HTTP/1.1 101')?resolve():reject(new Error('other socket handshake failed')))});
   otherSocket.on('connect',()=>otherSocket.write(`GET /cable HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${otherCookie}\r\n\r\n`));
@@ -224,7 +224,7 @@ try{
   sendCommand({command:'unsubscribe',identifier:userListIdentifier});
   const sidebarAfterDelete=await fetch(base+'/users/me/sidebar?active=1',{headers:{Cookie:cookie}});
   assert.equal(sidebarAfterDelete.status,200);
-  assert.doesNotMatch(await sidebarAfterDelete.text(),new RegExp(`href='/rooms/${privateRoomId}'`));
+  assert.doesNotMatch(await sidebarAfterDelete.text(),new RegExp(`id="list_rooms_closed_${privateRoomId}"`));
   await Promise.race([otherClosed,new Promise((_,reject)=>setTimeout(()=>reject(new Error('revoked member socket remained open')),3000))]);
   sendCommand({command:'subscribe',identifier:userListIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
