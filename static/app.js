@@ -1,7 +1,7 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
-const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-datetime]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;node.textContent=new Intl.DateTimeFormat(undefined,{dateStyle:'short',timeStyle:'short'}).format(date);node.title=new Intl.DateTimeFormat(undefined,{dateStyle:'short',timeStyle:'short'}).format(date)});
+const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-datetime]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
 const pingForm=document.getElementById('ping-form');
 if(pingForm){
@@ -69,22 +69,17 @@ if (chat) {
     });
   };
   const formatMessageGroups=()=>{
-    messages.querySelectorAll('.day-separator').forEach(node=>node.remove());
     let previous=null,previousDay=null;
     for(const message of messages.querySelectorAll('.message')){
-      const time=new Date(message.querySelector('time')?.dateTime||'').getTime();
-      const priorTime=previous?new Date(previous.querySelector('time')?.dateTime||'').getTime():NaN;
+      const time=Number(message.dataset.messageTimestamp);
+      const priorTime=previous?Number(previous.dataset.messageTimestamp):NaN;
       message.classList.toggle('threaded',!!previous&&message.dataset.creatorId===previous.dataset.creatorId&&Number.isFinite(time)&&Number.isFinite(priorTime)&&Math.abs(time-priorTime)<=300000);
       if(Number.isFinite(time)){
         const date=new Date(time);
         const day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
-        if(day!==previousDay){
-          const separator=document.createElement('div');separator.className='day-separator';
-          const label=document.createElement('time');label.dateTime=day;label.textContent=new Intl.DateTimeFormat(undefined,{dateStyle:'long'}).format(date);
-          separator.append(label);message.before(separator);
-        }
+        message.classList.toggle('message--first-of-day',day!==previousDay);
         previousDay=day;
-      }
+      }else message.classList.remove('message--first-of-day');
       previous=message;
     }
   };

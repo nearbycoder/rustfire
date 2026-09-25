@@ -73,6 +73,8 @@ def check_message_targets(sample_file):
     missing = [prefix for prefix in required if not any(value.startswith(prefix) for value in ids)]
     if missing:
         raise RuntimeError(f"Message stream lacks frame or DOM targets {missing}: {sample_file}")
+    if not re.search(r"<h2\s+class=['\"]message__day-separator['\"]>\s*<time\b", sample):
+        raise RuntimeError(f"Message stream lacks its day heading: {sample_file}")
 
 
 def main():
