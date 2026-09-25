@@ -96,6 +96,7 @@ def main():
             assert "id='system_welcome'" in page and "Welcome to Rustfire" in page and "id='invite_url'" in page
             assert "data-room-notification data-room-id='1' data-room-kind='shared'" in page
             assert "class='room-notifications-dialog'" in page and "Notifications aren’t allowed" in page
+            assert "id='composer-filelist'" in page and "name='message[attachment]' multiple" in page
             assert request(admin, base, "/rooms/1/messages")[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"http://127.0.0.1/secret"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"file:///etc/passwd"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204

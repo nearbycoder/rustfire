@@ -361,11 +361,55 @@ if (chat) {
   let lastTypingSent=0;
   typingInput.addEventListener('trix-change',()=>{clearTimeout(typingTimer);if(typingInput.editor?.getDocument().toString().trim()){if(Date.now()-lastTypingSent>750){sendTyping('start');lastTypingSent=Date.now();}typingTimer=setTimeout(()=>sendTyping('stop'),2500);}else sendTyping('stop');});
   typingInput.addEventListener('blur',()=>{clearTimeout(typingTimer);sendTyping('stop');});
+  const fileInput=composer.querySelector('input[type=file]');
+  const fileList=document.getElementById('composer-filelist');
+  const queuedFiles=[];
+  const renderQueuedFiles=()=>{
+    fileList.replaceChildren();
+    fileList.hidden=queuedFiles.length===0;
+    queuedFiles.forEach((entry,index)=>{
+      const card=document.createElement('div');card.className='composer-file';
+      const thumb=document.createElement('img');thumb.className='composer-file-thumb';thumb.src=entry.url||'/static/icons/common-file-text.svg';thumb.alt='';
+      const name=document.createElement('span');name.className='composer-file-name';name.textContent=entry.file.name;
+      const remove=document.createElement('button');remove.type='button';remove.className='composer-file-remove';remove.textContent='×';remove.setAttribute('aria-label',`Remove ${entry.file.name}`);remove.disabled=!!entry.uploading;
+      remove.addEventListener('click',()=>{if(entry.url)URL.revokeObjectURL(entry.url);queuedFiles.splice(index,1);renderQueuedFiles()});
+      card.append(thumb,name,remove);
+      if(entry.uploading){const status=document.createElement('small');status.textContent='Uploading…';card.append(status)}
+      fileList.append(card);
+    });
+  };
+  const addFiles=files=>{
+    for(const file of files)queuedFiles.push({file,url:file.type.startsWith('image/')?URL.createObjectURL(file):null,uploading:false});
+    queuedFiles.sort((a,b)=>a.file.name.localeCompare(b.file.name));
+    renderQueuedFiles();
+  };
+  fileInput.addEventListener('change',()=>{addFiles(fileInput.files);fileInput.value=''});
+  composer.addEventListener('paste',event=>{if(event.clipboardData?.files?.length){event.preventDefault();addFiles(event.clipboardData.files)}});
+  composer.addEventListener('dragover',event=>{if(Array.from(event.dataTransfer?.types||[]).includes('Files'))event.preventDefault()});
+  composer.addEventListener('drop',event=>{if(event.dataTransfer?.files?.length){event.preventDefault();addFiles(event.dataTransfer.files)}});
+  let sending=false;
   composer.addEventListener('submit', async e => {
-    e.preventDefault(); const form=e.currentTarget; const file=form.querySelector('input[type=file]'); if (!typingInput.editor?.getDocument().toString().trim() && !file.files.length) return;
+    e.preventDefault(); const form=e.currentTarget;
+    if(sending||(!typingInput.editor?.getDocument().toString().trim()&&!queuedFiles.length))return;
+    sending=true;
+    const sendingFiles=[...queuedFiles];sendingFiles.forEach(entry=>entry.uploading=true);renderQueuedFiles();
     clearTimeout(typingTimer);sendTyping('stop');
-    const res=await fetch(form.action,{method:'POST',body:new FormData(form),headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
-    if (res.ok) { bodyInput.value=''; typingInput.editor.loadHTML(''); file.value=''; form.querySelector('[name="message[client_message_id]"]').value=crypto.randomUUID(); if(historyMode)location.href=`/rooms/${roomId}`; } else alert('Could not send message');
+    try{
+      if(typingInput.editor?.getDocument().toString().trim()){
+        const body=new FormData(form);body.delete('message[attachment]');
+        const response=await fetch(form.action,{method:'POST',body,headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
+        if(!response.ok)throw Error('Could not send message');
+        bodyInput.value='';typingInput.editor.loadHTML('');form.querySelector('[name="message[client_message_id]"]').value=crypto.randomUUID();
+      }
+      for(const entry of sendingFiles){
+        const body=new FormData();body.append('message[attachment]',entry.file,entry.file.name);body.append('message[client_message_id]',crypto.randomUUID());
+        const response=await fetch(form.action,{method:'POST',body,headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
+        if(!response.ok)throw Error(`Could not upload ${entry.file.name}`);
+        queuedFiles.splice(queuedFiles.indexOf(entry),1);if(entry.url)URL.revokeObjectURL(entry.url);renderQueuedFiles();
+      }
+      if(historyMode)location.href=`/rooms/${roomId}`;
+    }catch(error){sendingFiles.forEach(entry=>entry.uploading=false);renderQueuedFiles();alert(error.message||'Could not send message')}
+    finally{sending=false}
   });
   function revealBoost(node){
     const boost=node.closest('.boost-item');
