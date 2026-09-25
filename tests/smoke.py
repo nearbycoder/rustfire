@@ -119,7 +119,12 @@ def main():
             code,_,page=request(admin,base,f"/messages/{message['id']}/boosts",{"boost[content]":"🔥"})
             assert code==200 and "🔥" in page
             custom_id=int(re.search(r"<li id='boost-(\d+)'>🔥",page).group(1))
-            assert "🔥" not in request(admin,base,f"/messages/{message['id']}/boosts/{custom_id}/delete",{},method="POST")[2]
+            code,_,page=request(admin,base,f"/messages/{message['id']}/boosts",{"boost[content]":"🔥"})
+            duplicate_id=max(int(value) for value in re.findall(r"<li id='boost-(\d+)'>🔥",page))
+            assert duplicate_id>custom_id
+            assert request(admin,base,f"/messages/{message['id']}/boosts/{custom_id}/delete",{},method="POST")[0]==200
+            code,_,room_page=request(admin,base,"/rooms/1")
+            assert code==200 and f"id='boost-{custom_id}'" not in room_page and f"id='boost-{duplicate_id}'" in room_page
             boundary = "test-boundary"
             multipart = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"message[body]\"\r\n\r\nattached\r\n"
                          f"--{boundary}\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents\r\n"

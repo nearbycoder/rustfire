@@ -12,11 +12,13 @@ const base = new URL(args.base ?? 'http://127.0.0.1:3000');
 const app = args.app ?? 'rustfire';
 const cookie = args.cookie;
 const room = Number(args.room ?? 1);
+const messageId = Number(args['message-id'] ?? 1);
+const operation = args.operation ?? 'messages';
 const socketCount = Number(args.sockets ?? 100);
 const messageCount = Number(args.messages ?? 20);
 const timeoutMs = Number(args.timeout ?? 30000);
-if (!cookie || !['rustfire','rustfire-turbo','campfire'].includes(app) || !Number.isSafeInteger(room) || room < 1 || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || base.protocol !== 'http:') {
-  console.error('Use --app rustfire|rustfire-turbo|campfire --base http://host:port --cookie name=value [--room 1 --sockets 100 --messages 20]');
+if (!cookie || !['rustfire','rustfire-turbo','campfire'].includes(app) || !['messages','boosts'].includes(operation) || !Number.isSafeInteger(room) || room < 1 || !Number.isSafeInteger(messageId) || messageId < 1 || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || base.protocol !== 'http:') {
+  console.error('Use --app rustfire|rustfire-turbo|campfire --base http://host:port --cookie name=value [--operation messages|boosts --message-id 1 --room 1 --sockets 100 --messages 20]');
   process.exit(2);
 }
 let identifier = JSON.stringify({ channel: 'RoomMessagesChannel', room_id: room });
@@ -94,9 +96,10 @@ function connect(index) {
         try { event = JSON.parse(payload.toString()); } catch { unexpected++; continue; }
         if (event.type === 'welcome') socket.write(maskedTextFrame(JSON.stringify({ command: 'subscribe', identifier })));
         else if (event.type === 'confirm_subscription') { ready = true; clearTimeout(timer); resolve(socket); }
-        else if (event.message?.type === 'message' || typeof event.message === 'string') {
-          const body = app === 'rustfire' ? event.message.message?.body?.plain_text : event.message;
-          const id = app === 'rustfire' && typeof body === 'string' && body.startsWith('fanout ') ? body.slice(7)
+        else if (operation === 'boosts' ? (event.message?.type === 'boost' || typeof event.message === 'string' && /<turbo-stream\b[^>]*action="append"[^>]*target="boosts[_-]/.test(event.message)) : (event.message?.type === 'message' || typeof event.message === 'string' && /<turbo-stream\b[^>]*action="append"/.test(event.message))) {
+          const body = operation === 'boosts' ? (app === 'rustfire' ? event.message.content : event.message) : (app === 'rustfire' ? event.message.message?.body?.plain_text : event.message);
+          const id = operation === 'boosts' ? (typeof body === 'string' ? body.match(/z[0-9a-f]{8}/)?.[0] : undefined)
+            : app === 'rustfire' && typeof body === 'string' && body.startsWith('fanout ') ? body.slice(7)
             : typeof body === 'string' ? body.match(/fanout ([\w-]+)/)?.[1] : undefined;
           const start = sent.get(id);
           if (start === undefined) unexpected++;
@@ -115,21 +118,22 @@ try {
   const runId = crypto.randomUUID();
   const begin = performance.now();
   for (let i = 0; i < messageCount; i++) {
-    const id = `${runId}-${i}`;
+    const id = operation === 'boosts' ? `z${crypto.randomBytes(4).toString('hex')}` : `${runId}-${i}`;
     sent.set(id, performance.now());
-    const response = await fetch(new URL(`/rooms/${room}/messages`, base), {
+    const response = await fetch(new URL(operation === 'boosts' ? `/messages/${messageId}/boosts` : `/rooms/${room}/messages`, base), {
       method: 'POST',
+      redirect: 'manual',
       headers: { Cookie: cookie, Accept: app === 'rustfire' ? 'application/json' : 'text/vnd.turbo-stream.html, text/html', 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ 'message[body]': `fanout ${id}`, 'message[client_message_id]': id, ...(csrf ? { authenticity_token: csrf } : {}) }),
+      body: new URLSearchParams({ ...(operation === 'boosts' ? { 'boost[content]': id } : { 'message[body]': `fanout ${id}`, 'message[client_message_id]': id }), ...(csrf ? { authenticity_token: csrf } : {}) }),
     });
-    if (!response.ok) throw new Error(`POST ${i} returned ${response.status}`);
+    if (!(operation === 'boosts' ? [302,303].includes(response.status) : response.ok)) throw new Error(`POST ${i} returned ${response.status}`);
   }
   const expected = socketCount * messageCount;
   while (received < expected && performance.now() - begin < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
   samples.sort((a, b) => a - b);
   const percentile = fraction => samples.length ? samples[Math.floor((samples.length - 1) * fraction)].toFixed(2) : 'n/a';
   const elapsed = ((performance.now() - begin) / 1000).toFixed(2);
-  console.log(`sockets=${socketCount} messages=${messageCount} expected_deliveries=${expected} received=${received} missed=${expected - received} unexpected=${unexpected} avg_message_bytes=${received ? Math.round(receivedBytes / received) : 0} elapsed_s=${elapsed} p50_ms=${percentile(.50)} p95_ms=${percentile(.95)} p99_ms=${percentile(.99)}`);
+  console.log(`operation=${operation} sockets=${socketCount} messages=${messageCount} expected_deliveries=${expected} received=${received} missed=${expected - received} unexpected=${unexpected} avg_message_bytes=${received ? Math.round(receivedBytes / received) : 0} elapsed_s=${elapsed} p50_ms=${percentile(.50)} p95_ms=${percentile(.95)} p99_ms=${percentile(.99)}`);
   if (received !== expected || closedEarly) process.exitCode = 1;
 } finally {
   for (const socket of clients) socket.destroy();

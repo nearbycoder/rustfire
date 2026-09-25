@@ -231,8 +231,8 @@ if (chat) {
         if (data.type === 'message') { if (!document.getElementById(`message-${data.message.id}`)) { const scrollToLatest=nearBottom()||data.message.creator?.id===Number(document.body.dataset.userId); messages.insertAdjacentHTML('beforeend', data.html); formatLocalTimes(messages); decorateOwn(); formatMessageGroups(); if(scrollToLatest)messages.scrollTop=messages.scrollHeight; updateReturnButton(); const sound=document.querySelector(`#message-${data.message.id} [data-sound]`); if(sound) new Audio(sound.dataset.sound).play().catch(()=>{}); } if (!catchingUp) cursor = Math.max(cursor, data.message.id); }
         if (data.type === 'message_deleted') {document.getElementById(`message-${data.id}`)?.remove();formatMessageGroups();}
         if (data.type === 'message_updated') { const node=document.querySelector(`#message-${data.id} .message-body`); if(node&&!node.querySelector('.inline-edit')) {if(data.html!==undefined&&data.html!==null)node.innerHTML=`<div class='trix-content'>${data.html}</div>`;else node.textContent=data.body;} }
-        if (data.type === 'boost') { const node=document.querySelector(`#message-${data.message_id} .boosts`); if(node) node.textContent+=` ${data.content}`; }
-        if (data.type === 'boost_deleted') { const node=document.querySelector(`#message-${data.message_id} .boosts`); if(node&&data.content)node.textContent=node.textContent.replace(data.content,'').trim(); }
+        if (data.type === 'boost') { const node=document.getElementById(`boosts-message-${data.message_id}`); if(node&&data.boost_html&&!document.getElementById(`boost-${data.id}`))node.insertAdjacentHTML('beforeend',data.boost_html); }
+        if (data.type === 'boost_deleted') document.getElementById(`boost-${data.id}`)?.remove();
       } catch {}
     });
     socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});

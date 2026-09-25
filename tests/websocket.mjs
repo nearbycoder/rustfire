@@ -67,7 +67,12 @@ try{
   const streamBoost=await fetch(base+`/messages/${streamMessageId}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});
   assert.equal(streamBoost.status,303);
   const boostEvents=[await nextFrame(),await nextFrame()];
-  assert(boostEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="replace"')&&frame.message.includes('🔥')));
+  const streamBoostId=Number(execFileSync('python',['-c','import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute("select max(id) from boosts").fetchone()[0])',path.join(temp,'test.db')]).toString().trim());
+  assert(boostEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="append" target="boosts-message-${streamMessageId}">`)&&frame.message.includes(`id='boost-${streamBoostId}'`)&&frame.message.includes('🔥')));
+  const streamBoostDelete=await fetch(base+`/messages/${streamMessageId}/boosts/${streamBoostId}`,{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf,Accept:'text/vnd.turbo-stream.html'},redirect:'manual'});
+  assert.equal(streamBoostDelete.status,200);
+  const boostDeleteEvents=[await nextFrame(),await nextFrame()];
+  assert(boostDeleteEvents.some(frame=>frame.identifier===signedIdentifier&&frame.message===`<turbo-stream action="remove" target="boost-${streamBoostId}"></turbo-stream>`));
   const streamDelete=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'DELETE',headers:{Cookie:cookie,Accept:'text/vnd.turbo-stream.html','X-CSRF-Token':csrf},redirect:'manual'});
   assert.equal(streamDelete.status,200);
   const deleteEvents=[await nextFrame(),await nextFrame()];

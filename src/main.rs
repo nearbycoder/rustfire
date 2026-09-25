@@ -180,7 +180,13 @@ struct ChatMessage {
     created_at: String,
     client_message_id: String,
     attachment: Option<Attachment>,
-    boosts: String,
+    boosts: Vec<BoostSummary>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct BoostSummary {
+    id: i64,
+    booster_id: i64,
+    content: String,
 }
 #[derive(Clone, Serialize)]
 struct Attachment {
@@ -1941,7 +1947,7 @@ fn message_list(
         })
         .transpose()?;
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
@@ -1956,7 +1962,7 @@ fn message_list(
 fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
     let db = pool(s)?;
     db.query_row(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
         params![rid, mid],
         chat_message_from_row,
     )
@@ -1983,7 +1989,7 @@ fn messages_after_position(
     } else {
         i64::MIN
     };
-    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
+    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
     query
         .query_map(
             params![rid, cursor_time, after, limit],
@@ -2012,7 +2018,13 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
             filename: r.get(8).unwrap_or_default(),
             content_type: r.get(9).unwrap_or_default(),
         }),
-        boosts: r.get(10)?,
+        boosts: serde_json::from_str(&r.get::<_, String>(10)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
     })
 }
 fn messages_since(
@@ -2032,7 +2044,7 @@ fn messages_since(
         ("m.created_at_ns>?2", "ASC", "idx_messages_room_created_ns")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'content',content)) FROM (SELECT id,booster_id,content FROM boosts WHERE message_id=m.id ORDER BY id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
@@ -2043,6 +2055,12 @@ fn messages_since(
         messages.reverse();
     }
     Ok(messages)
+}
+fn boost_html(id: i64, booster_id: i64, content: &str) -> String {
+    format!(
+        "<span class='boost-item' id='boost-{id}' data-booster-id='{booster_id}'>{}</span> ",
+        esc(content)
+    )
 }
 fn message_html(m: &ChatMessage) -> String {
     let timestamp = chrono::DateTime::parse_from_rfc3339(&m.created_at)
@@ -2080,8 +2098,13 @@ fn message_html(m: &ChatMessage) -> String {
         "<details class='message-options'><summary aria-label='Message options' title='Message options'><img src='/static/icons/menu-dots-horizontal.svg' alt=''></summary><div class='message-options-menu'><div class='quick-boosts'>{quick_boosts}</div><button type='button' class='custom-boost-link' data-custom-boost>New boost</button><form class='custom-boost-form' method='post' action='/messages/{}/boosts' hidden><input name='boost[content]' maxlength='16' required aria-label='Boost text'><button type='submit' aria-label='Submit boost'>✓</button></form><div class='message-options-links'>{content_action}<a href='/messages/{}/boosts'>Boosts</a><button type='button' data-copy-link='/rooms/{}/@{}' title='Copy link'>Copy link</button><a href='/rooms/{}/messages/{}/edit' data-edit-message>Edit</a></div></div></details>",
         m.id, m.id, m.room_id, m.id, m.room_id, m.id
     );
+    let boosts = m
+        .boosts
+        .iter()
+        .map(|boost| boost_html(boost.id, boost.booster_id, &boost.content))
+        .collect::<String>();
     format!(
-        "<article class='message' id='message-{}' data-message-id='{}' data-creator-id='{}'><div class='avatar'><img src='/users/{}/avatar' alt='{}'></div><div class='message-main'><div class='message-meta'><strong>{}</strong><a href='/rooms/{}/@{}'><time datetime='{}' data-local-datetime>{}</time></a></div><div class='message-body'>{}{}</div><div class='boosts'>{}</div></div><div class='message-actions'>{actions}</div></article>",
+        "<article class='message' id='message-{}' data-message-id='{}' data-creator-id='{}'><div class='avatar'><img src='/users/{}/avatar' alt='{}'></div><div class='message-main'><div class='message-meta'><strong>{}</strong><a href='/rooms/{}/@{}'><time datetime='{}' data-local-datetime>{}</time></a></div><div class='message-body'>{}{}</div><div class='boosts' id='boosts-message-{}'>{}</div></div><div class='message-actions'>{actions}</div></article>",
         m.id,
         m.id,
         m.creator_id,
@@ -2094,7 +2117,8 @@ fn message_html(m: &ChatMessage) -> String {
         esc(&timestamp),
         presentation,
         attachment,
-        esc(&m.boosts)
+        m.id,
+        boosts
     )
 }
 fn sound_presentation(body: &str) -> Option<String> {
@@ -2799,7 +2823,7 @@ fn insert_message(
         created_at: t,
         client_message_id: cid,
         attachment,
-        boosts: String::new(),
+        boosts: Vec::new(),
     };
     let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"message":message_json(s,&m,None)?,"html":message_html(&m)}).to_string()});
     for uid in newly_unread {
@@ -5638,13 +5662,14 @@ async fn boost_create(
         params![mid, u.id, content, now()],
     )
     .map_err(db_err)?;
+    let bid = db.last_insert_rowid();
     touch_message(&db, mid, rid)?;
     drop(db);
-    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
+    let boost_html = boost_html(bid, u.id, content);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
-            json!({"type":"boost","room_id":rid,"message_id":mid,"content":content,"user_id":u.id,"presentation_html":presentation_html})
+            json!({"type":"boost","room_id":rid,"message_id":mid,"id":bid,"content":content,"user_id":u.id,"boost_html":boost_html})
                 .to_string(),
     });
     Ok(Redirect::to(&format!("/messages/{mid}/boosts")).into_response())
@@ -5749,9 +5774,7 @@ async fn boost_delete(
     db.execute("DELETE FROM boosts WHERE id=?1", [bid])
         .map_err(db_err)?;
     touch_message(&db, mid, rid)?;
-    drop(db);
-    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
-    s.events.send(Event{room_id:rid,payload:json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content,"presentation_html":presentation_html}).to_string()});
+    s.events.send(Event{room_id:rid,payload:json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content}).to_string()});
     if headers
         .get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
@@ -5800,10 +5823,10 @@ async fn bot_boost_create(
     let id = db.last_insert_rowid();
     touch_message(&db, mid, rid)?;
     drop(db);
-    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
+    let boost_html = boost_html(id, bot.id, content);
     s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"boost","room_id":rid,"message_id":mid,"content":content,"user_id":bot.id,"presentation_html":presentation_html})
+        payload: json!({"type":"boost","room_id":rid,"message_id":mid,"id":id,"content":content,"user_id":bot.id,"boost_html":boost_html})
             .to_string(),
     });
     let created_at = chrono::DateTime::parse_from_rfc3339(&created)
@@ -5840,11 +5863,9 @@ async fn bot_boost_delete(
         return Err(StatusCode::NOT_FOUND);
     }
     touch_message(&db, mid, rid)?;
-    drop(db);
-    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
     s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content,"presentation_html":presentation_html}).to_string(),
+        payload: json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content}).to_string(),
     });
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -5854,17 +5875,22 @@ fn turbo_room_event(payload: &Value) -> Option<String> {
             "<turbo-stream action=\"append\" target=\"messages\"><template>{}</template></turbo-stream>",
             payload.get("html")?.as_str()?
         )),
-        "message_updated" | "boost" | "boost_deleted" => {
-            let mid = if payload.get("type")?.as_str()? == "message_updated" {
-                payload.get("id")?.as_i64()?
-            } else {
-                payload.get("message_id")?.as_i64()?
-            };
+        "message_updated" => {
+            let mid = payload.get("id")?.as_i64()?;
             Some(format!(
                 "<turbo-stream action=\"replace\" target=\"message-{mid}\"><template>{}</template></turbo-stream>",
                 payload.get("presentation_html")?.as_str()?
             ))
         }
+        "boost" => Some(format!(
+            "<turbo-stream action=\"append\" target=\"boosts-message-{}\"><template>{}</template></turbo-stream>",
+            payload.get("message_id")?.as_i64()?,
+            payload.get("boost_html")?.as_str()?
+        )),
+        "boost_deleted" => Some(format!(
+            "<turbo-stream action=\"remove\" target=\"boost-{}\"></turbo-stream>",
+            payload.get("id")?.as_i64()?
+        )),
         "message_deleted" => Some(format!(
             "<turbo-stream action=\"remove\" target=\"message-{}\"></turbo-stream>",
             payload.get("id")?.as_i64()?

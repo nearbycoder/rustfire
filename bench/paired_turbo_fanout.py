@@ -5,7 +5,9 @@ Both runs use the same number of sockets and messages. Message HTML still differ
 """
 
 import argparse
+from datetime import datetime, timezone
 import pathlib
+import sqlite3
 import subprocess
 import tempfile
 
@@ -13,13 +15,24 @@ from direct_lookup import ROOT, free_port, start_server, stop_server
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 
 
-def fanout(app, port, cookie, csrf, sockets, messages):
+def seed_boost_message(rust_db, camp_db):
+    instant = datetime.now(timezone.utc)
+    rust_time = instant.isoformat().replace("+00:00", "Z")
+    camp_time = instant.strftime("%Y-%m-%d %H:%M:%S.%f")
+    with sqlite3.connect(rust_db) as db:
+        db.execute("INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(1,1,1,'Boost fixture','boost-fixture',?1,?1)", [rust_time])
+    with sqlite3.connect(camp_db) as db:
+        db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(1,1,1,'boost-fixture',?1,?1)", [camp_time])
+        db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Boost fixture','Message',1,?1,?1)", [camp_time])
+
+
+def fanout(app, port, cookie, csrf, sockets, messages, operation):
     result = subprocess.run(
         [
             "node", "bench/fanout.mjs", "--app", app,
             "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
             "--csrf", csrf, "--room", "1", "--sockets", str(sockets),
-            "--messages", str(messages),
+            "--messages", str(messages), "--operation", operation,
         ],
         cwd=ROOT, text=True, capture_output=True,
     )
@@ -32,6 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
     parser.add_argument("--messages", type=int, default=5)
+    parser.add_argument("--operation", choices=["messages", "boosts"], default="messages")
     parser.add_argument("--campfire-workers", type=int, default=1)
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
@@ -51,13 +65,15 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers)
+        if args.operation == "boosts":
+            seed_boost_message(rust_db, camp_db)
 
         rust = start_server(rust_db, rust_port, {
             "RUSTFIRE_DISABLE_PUSH": "0", "RUSTFIRE_DISABLE_WEBHOOKS": "0",
             "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"],
         })
         try:
-            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages)
+            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation)
         finally:
             stop_server(rust)
 
@@ -69,7 +85,7 @@ def main():
             try:
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
-                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages)
+                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation)
             except Exception:
                 log.flush()
                 log.seek(0)
