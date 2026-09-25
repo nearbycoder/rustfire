@@ -64,7 +64,7 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
-            for mid in (1, 2, 3, 4, 5, 6, 7, 8):
+            for mid in range(1, 11):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(1,'Message',1,'body',?,?,?)", (source_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
@@ -105,6 +105,13 @@ def main():
             gallery_body = f'<div class="attachment-gallery attachment-gallery--3"><action-text-attachment sgid="{image_sgid}" content-type="image/png" filename="pixel.png"></action-text-attachment><action-text-attachment sgid="{pdf_sgid}" content-type="application/pdf" filename="page.pdf"></action-text-attachment><action-text-attachment sgid="{video_sgid}" content-type="video/mp4" filename="clip.mp4"></action-text-attachment></div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(7,'Message',8,'body',?,?,?)", (gallery_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(8,?)", ("[pixel.png] [page.pdf] [clip.mp4]",))
+            for message_id, rich_id, blob_id, content_type, filename, label in ((9, 8, 14, "image/tiff", "scan.tiff", "Scan"), (10, 9, 15, "image/svg+xml", "icon.svg", "Icon")):
+                payload = f'{{"_rails":{{"data":"gid://campfire/ActiveStorage::Blob/{blob_id}?expires_in","pur":"attachable"}}}}'.encode()
+                encoded = base64.urlsafe_b64encode(payload).decode()
+                signed = f"{encoded}--{hmac.new(signing_key, encoded.encode(), hashlib.sha1).hexdigest()}"
+                body = f'<div>{label} <action-text-attachment sgid="{signed}" content-type="{content_type}" filename="{filename}"></action-text-attachment></div>'
+                fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(?,'Message',?,'body',?,?,?)", (rich_id, message_id, body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+                fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(?,?)", (message_id, f"{label} [{filename}]"))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
@@ -161,6 +168,27 @@ def main():
                 VALUES(15,'embeds','ActionText::RichText',7,12,'2026-01-01 00:00:00')""")
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                 VALUES(16,'embeds','ActionText::RichText',7,13,'2026-01-01 00:00:00')""")
+            tiff_key = "ab14cdef1234567890"
+            tiff_file = source_files / tiff_key[:2] / tiff_key[2:4] / tiff_key
+            tiff_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory() as tiff_temp:
+                generated = Path(tiff_temp) / "scan.tiff"
+                subprocess.run(("vips", "copy", str(image_file), str(generated)), capture_output=True, check=True)
+                tiff_bytes = generated.read_bytes()
+            tiff_file.write_bytes(tiff_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(14,?,'scan.tiff','image/tiff',?,'local',?,'2026-01-01 00:00:00')""", (tiff_key, json.dumps({"width": 1, "height": 1, "identified": True}), len(tiff_bytes)))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(17,'embeds','ActionText::RichText',8,14,'2026-01-01 00:00:00')""")
+            svg_key = "ab15cdef1234567890"
+            svg_file = source_files / svg_key[:2] / svg_key[2:4] / svg_key
+            svg_file.parent.mkdir(parents=True, exist_ok=True)
+            svg_bytes = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+            svg_file.write_bytes(svg_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(15,?,'icon.svg','image/svg+xml','{}','local',?,'2026-01-01 00:00:00')""", (svg_key, len(svg_bytes)))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(18,'embeds','ActionText::RichText',9,15,'2026-01-01 00:00:00')""")
             for blob_id, record_type, record_id, name in ((8, "User", 1, "avatar"), (9, "Account", 1, "logo")):
                 media_key = f"ab{blob_id}cdef1234567890"
                 media_file = source_files / media_key[:2] / media_key[2:4] / media_key
@@ -183,7 +211,7 @@ def main():
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
-        assert result["messages"] == 8 and result["attachments"] == 1 and result["inline_embeds"] == 7, result
+        assert result["messages"] == 10 and result["attachments"] == 1 and result["inline_embeds"] == 9, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -236,6 +264,16 @@ def main():
             assert variation_data(gallery_urls[0]) == {"format": "png", "resize_to_limit": [800, 600]}
             assert variation_data(gallery_urls[1]) == {"resize_to_limit": [800, 600]}
             assert variation_data(gallery_urls[2]) == {"resize_to_limit": [800, 600]}
+            tiff_html = imported.execute("SELECT body_html FROM messages WHERE id=9").fetchone()[0]
+            assert "attachment--preview attachment--tiff" in tiff_html, tiff_html
+            tiff_url = re.search(r'<img src="([^"]+)"', tiff_html)
+            assert tiff_url and variation_data(tiff_url.group(1)) == {"format": "png", "resize_to_limit": [1024, 768]}
+            tiff_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=14").fetchone()[0]
+            assert (target_uploads / tiff_stored).read_bytes() == tiff_bytes
+            svg_html = imported.execute("SELECT body_html FROM messages WHERE id=10").fetchone()[0]
+            assert "attachment--file attachment--svg" in svg_html and "<img" not in svg_html, svg_html
+            svg_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=15").fetchone()[0]
+            assert (target_uploads / svg_stored).read_bytes() == svg_bytes
             assert imported.execute("SELECT id FROM attachments WHERE message_id=2").fetchone() == (7,)
             stored = imported.execute("SELECT stored_name FROM attachments WHERE id=7").fetchone()[0]
             assert (target_uploads / stored).read_bytes() == file_bytes
@@ -298,6 +336,9 @@ def main():
                 assert response.status == 200 and response.headers["Content-Type"] == "image/jpeg"
                 assert response.read().startswith(b"\xff\xd8")
             assert video_variant.is_file()
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{tiff_url.group(1)}", timeout=10) as response:
+                assert response.status == 200 and response.headers["Content-Type"] == "image/png"
+                assert response.read().startswith(b"\x89PNG\r\n\x1a\n")
             for gallery_url, media_type, signature in zip(gallery_urls, ("image/png", "image/png", "image/jpeg"), (b"\x89PNG\r\n\x1a\n", b"\x89PNG\r\n\x1a\n", b"\xff\xd8")):
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}{gallery_url}", timeout=10) as response:
                     assert response.status == 200 and response.headers["Content-Type"] == media_type

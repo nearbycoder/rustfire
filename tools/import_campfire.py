@@ -45,7 +45,7 @@ def store_blob(source_files, uploads, key, byte_size):
 
 
 def prepare_inline_image(uploads, stored, content_type, width, height):
-    formats = {"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif"}
+    formats = {"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "image/tiff": "png"}
     variant_dir = uploads / "variants"
     variant_dir.mkdir(exist_ok=True)
     output = variant_dir / f"{stored}-inline.{formats[content_type]}"
@@ -194,17 +194,19 @@ def import_data(source, target, source_files, uploads):
         FROM active_storage_attachments attachment JOIN active_storage_blobs blob ON blob.id=attachment.blob_id
         JOIN action_text_rich_texts rich ON rich.id=attachment.record_id AND rich.record_type='Message' AND rich.name='body'
         WHERE attachment.record_type='ActionText::RichText' AND attachment.name='embeds'""")
+    preview_images = ("image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/tiff")
+    file_images = ("image/svg+xml", "image/bmp")
     counts["inline_embeds"] = 0
     for message_id, blob_id, key, filename, content_type, size, created, metadata in inline:
-        if (content_type.startswith("image/") and content_type not in ("image/png", "image/jpeg", "image/gif", "image/webp", "image/avif")) or (content_type.startswith("video/") and content_type not in ("video/mp4", "video/webm", "video/quicktime", "video/ogg")):
+        if (content_type.startswith("image/") and content_type not in preview_images + file_images) or (content_type.startswith("video/") and content_type not in ("video/mp4", "video/webm", "video/quicktime", "video/ogg")):
             raise ValueError(f"inline media preview for blob {blob_id} ({content_type}) needs migration support")
         if not target.execute("SELECT EXISTS(SELECT 1 FROM inline_blobs WHERE id=?)", (blob_id,)).fetchone()[0]:
             details = json.loads(metadata or "{}")
             width, height = details.get("width"), details.get("height")
-            if content_type.startswith("image/") and (not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0):
+            if content_type in preview_images and (not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0):
                 raise ValueError(f"inline image blob {blob_id} is missing dimensions")
             stored = store_blob(source_files, uploads, key, size)
-            if content_type.startswith("image/"):
+            if content_type in preview_images:
                 prepare_inline_image(uploads, stored, content_type, width, height)
             elif content_type == "application/pdf":
                 prepare_inline_pdf(uploads, stored)

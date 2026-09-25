@@ -841,6 +841,7 @@ fn image_format(content_type: &str) -> Option<&'static str> {
         "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
         "image/avif" => Some("avif"),
+        "image/tiff" => Some("png"),
         _ => None,
     }
 }
@@ -7930,7 +7931,9 @@ async fn signed_representation_get(
     if tokio::fs::metadata(&output).await.is_err() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let response_type = if kind.starts_with("inline-pdf") {
+    let response_type = if content_type == "image/tiff" {
+        "image/png"
+    } else if kind.starts_with("inline-pdf") {
         "image/png"
     } else if kind.starts_with("inline-video") {
         "image/jpeg"
