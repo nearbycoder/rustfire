@@ -406,7 +406,7 @@ if (chat) {
     const form=e.target.closest('.custom-boost-form');if(!form)return;
     e.preventDefault();
     const response=await fetch(form.action,{method:'POST',body:new URLSearchParams(new FormData(form)),headers:{'X-CSRF-Token':csrfToken}});
-    if(response.ok){form.reset();form.hidden=true;form.closest('details').open=false;}
+    if(response.ok){form.reset();form.hidden=true;const details=form.closest('details');if(details)details.open=false;}
     else alert('Could not boost message');
   });
 }

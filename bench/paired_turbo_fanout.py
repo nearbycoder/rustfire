@@ -63,6 +63,18 @@ def stream_message_id(sample_file):
     return int(matched.group(1))
 
 
+def check_message_targets(sample_file):
+    sample = sample_file.read_text()
+    ids = set(re.findall(r"\bid=['\"]([^'\"]+)['\"]", sample))
+    required = (
+        "message_", "edit_message_", "presentation_message_",
+        "boosting_message_", "boosts_message_", "new_boost_message_",
+    )
+    missing = [prefix for prefix in required if not any(value.startswith(prefix) for value in ids)]
+    if missing:
+        raise RuntimeError(f"Message stream lacks frame or DOM targets {missing}: {sample_file}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
@@ -132,6 +144,9 @@ def main():
             raise RuntimeError(f"Avatar identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
         if args.operation == "messages" and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
             raise RuntimeError("Message IDs differ in paired stream samples")
+        if args.operation == "messages":
+            check_message_targets(output_dir / "rustfire.html")
+            check_message_targets(output_dir / "campfire.html")
         print(f"{args.operation}_identity_match=true")
 
 
