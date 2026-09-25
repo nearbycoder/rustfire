@@ -1,6 +1,11 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
+document.addEventListener('keydown',event=>{
+  if(event.key!=='Enter'||(!event.ctrlKey&&!event.metaKey)||event.shiftKey||event.altKey)return;
+  const form=event.target instanceof Element?event.target.closest('.custom-styles-panel form'):null;
+  if(form){event.preventDefault();form.requestSubmit();}
+});
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();

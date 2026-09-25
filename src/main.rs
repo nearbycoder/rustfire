@@ -1635,18 +1635,30 @@ fn found_redirect(path: &str) -> Response {
     response
 }
 fn csrf_forms(html: &str, token: &str) -> String {
+    fn tag_end(tag: &str) -> Option<usize> {
+        let mut quote = None;
+        for (index, byte) in tag.bytes().enumerate() {
+            match (quote, byte) {
+                (None, b'\'' | b'"') => quote = Some(byte),
+                (Some(open), close) if open == close => quote = None,
+                (None, b'>') => return Some(index),
+                _ => {}
+            }
+        }
+        None
+    }
     let mut out = String::with_capacity(html.len() + 512);
     let mut rest = html;
     while let Some(start) = rest.find("<form") {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
-        let Some(end) = rest.find('>') else { break };
+        let Some(end) = tag_end(rest) else { break };
         let tag = &rest[..=end];
         out.push_str(tag);
         rest = &rest[end + 1..];
         if tag.contains("method='post'") {
             if rest.starts_with("<input type='hidden' name='_method'") {
-                if let Some(method_end) = rest.find('>') {
+                if let Some(method_end) = tag_end(rest) {
                     out.push_str(&rest[..=method_end]);
                     rest = &rest[method_end + 1..];
                 }
@@ -9412,6 +9424,14 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn csrf_forms_handles_arrow_in_quoted_form_attributes() {
+        let input = "<form data-action='keydown.ctrl+enter->form#submit' action='/account/custom_styles' method='post'><input type='hidden' name='_method' value='patch'><textarea name='account[custom_styles]'></textarea></form>";
+        let output = super::csrf_forms(input, "test-token");
+        assert!(output.contains("name='_method' value='patch'><input type='hidden' name='authenticity_token' value='test-token'>"));
+        assert_eq!(output.matches("name='authenticity_token'").count(), 1);
+    }
 
     #[test]
     fn imported_rails_session_cookie_verifies_purpose_expiry_and_signature() {
