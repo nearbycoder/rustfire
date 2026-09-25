@@ -195,6 +195,7 @@ def main():
     parser.add_argument("--sample-dir", type=pathlib.Path, help="Write one received Turbo event from each app to this directory")
     parser.add_argument("--image-size", help="Use a generated PNG of WIDTHxHEIGHT for image uploads; default is 1x1")
     parser.add_argument("--video-size", default="16x16", help="Generate a video of WIDTHxHEIGHT for video uploads; default is 16x16")
+    parser.add_argument("--video-sar", help="Set sample aspect ratio NUM/DEN in the generated video")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
@@ -205,6 +206,8 @@ def main():
         parser.error("--image-size requires images and WIDTHxHEIGHT, each below 10000")
     if args.operation == "videos" and not re.fullmatch(r"[1-9]\d{0,3}x[1-9]\d{0,3}", args.video_size):
         parser.error("--video-size must be WIDTHxHEIGHT, each below 10000")
+    if args.video_sar and (args.operation != "videos" or not re.fullmatch(r"[1-9]\d{0,2}/[1-9]\d{0,2}", args.video_sar)):
+        parser.error("--video-sar requires videos and NUM/DEN")
     repo = args.campfire_repo.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     if revision != "91d294f4a09f9bbe37f9548959bfcb43645678fb":
@@ -227,7 +230,10 @@ def main():
             expected_image_dimensions = (round(width * factor), round(height * factor))
         video_file = temp / "upload.mp4" if args.operation == "videos" else None
         if video_file:
-            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c=red:s={args.video_size}:r=5:d=1", "-c:v", "mpeg4", "-y", str(video_file)], check=True)
+            video_command = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c=red:s={args.video_size}:r=5:d=1"]
+            if args.video_sar:
+                video_command.extend(["-vf", f"setsar={args.video_sar}"])
+            subprocess.run(video_command + ["-c:v", "mpeg4", "-y", str(video_file)], check=True)
         rust_port, camp_port = free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)

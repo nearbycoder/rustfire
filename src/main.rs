@@ -202,9 +202,9 @@ struct Attachment {
     filename: String,
     content_type: String,
     #[serde(skip_serializing)]
-    width: Option<i64>,
+    width: Option<f64>,
     #[serde(skip_serializing)]
-    height: Option<i64>,
+    height: Option<f64>,
 }
 
 fn now() -> String {
@@ -750,29 +750,70 @@ fn analyze_image_and_thumbnail(
     }
     dimensions
 }
-fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<i64>, Option<i64>) {
+fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f64>, Option<f64>) {
     let dimensions = std::process::Command::new("ffprobe")
         .args([
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0",
         ])
         .arg(input)
         .output()
         .ok()
         .filter(|result| result.status.success())
-        .and_then(|result| String::from_utf8(result.stdout).ok())
-        .and_then(|text| {
-            let (width, height) = text.trim().split_once(',')?;
-            Some((
-                width.parse::<i64>().ok().filter(|value| *value > 0),
-                height.parse::<i64>().ok().filter(|value| *value > 0),
-            ))
+        .and_then(|result| serde_json::from_slice::<Value>(&result.stdout).ok())
+        .and_then(|probe| {
+            let stream =
+                probe.get("streams")?.as_array()?.iter().find(|stream| {
+                    stream.get("codec_type").and_then(Value::as_str) == Some("video")
+                })?;
+            let encoded_width = stream.get("width").and_then(Value::as_f64);
+            let encoded_height = stream.get("height").and_then(Value::as_f64);
+            let computed_height = stream
+                .get("display_aspect_ratio")
+                .and_then(Value::as_str)
+                .and_then(|ratio| ratio.split_once(':'))
+                .and_then(|(numerator, denominator)| {
+                    Some((
+                        numerator.parse::<f64>().ok()?,
+                        denominator.parse::<f64>().ok()?,
+                    ))
+                })
+                .and_then(|(numerator, denominator)| {
+                    if numerator > 0.0 {
+                        Some(encoded_width? * denominator / numerator)
+                    } else {
+                        None
+                    }
+                });
+            let angle = stream
+                .get("tags")
+                .and_then(|tags| tags.get("rotate"))
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<i64>().ok())
+                .or_else(|| {
+                    stream
+                        .get("side_data_list")
+                        .and_then(Value::as_array)?
+                        .iter()
+                        .find(|data| {
+                            data.get("side_data_type").and_then(Value::as_str)
+                                == Some("Display Matrix")
+                        })?
+                        .get("rotation")?
+                        .as_f64()
+                        .map(|value| value as i64)
+                });
+            let rotated = matches!(angle, Some(90 | -90 | 270 | -270));
+            let display_height = computed_height.or(encoded_height);
+            Some(if rotated {
+                (display_height, encoded_width)
+            } else {
+                (encoded_width, display_height)
+            })
         })
         .unwrap_or((None, None));
     let frame = std::process::Command::new("ffmpeg")
@@ -2418,36 +2459,32 @@ fn image_preview_dimensions(
     float_source: bool,
 ) -> Option<(String, String, String)> {
     let (width, height) = (attachment.width?, attachment.height?);
-    if width <= 0 || height <= 0 {
+    if width <= 0.0 || height <= 0.0 {
         return None;
     }
-    if width <= 1200 && height <= 800 {
+    if width <= 1200.0 && height <= 800.0 {
         let (display_width, display_height, half_width) = if float_source {
             (
-                format!("{:?}", width as f64),
-                format!("{:?}", height as f64),
-                format!("{:?}", width as f64 / 2.0),
+                format!("{width:?}"),
+                format!("{height:?}"),
+                format!("{:?}", width / 2.0),
             )
         } else {
             (
-                width.to_string(),
-                height.to_string(),
-                (width / 2).to_string(),
+                (width as i64).to_string(),
+                (height as i64).to_string(),
+                ((width as i64) / 2).to_string(),
             )
         };
         return Some((
             display_width,
             display_height,
-            format!(
-                "{}px; aspect-ratio: {:?};",
-                half_width,
-                width as f64 / height as f64
-            ),
+            format!("{}px; aspect-ratio: {:?};", half_width, width / height),
         ));
     }
-    let factor = (1200.0 / width as f64).min(800.0 / height as f64);
-    let scaled_width = width as f64 * factor;
-    let scaled_height = height as f64 * factor;
+    let factor = (1200.0 / width).min(800.0 / height);
+    let scaled_width = width * factor;
+    let scaled_height = height * factor;
     Some((
         format!("{scaled_width:?}"),
         format!("{scaled_height:?}"),
@@ -3295,7 +3332,11 @@ fn insert_message(
         let input = std::path::Path::new(&dir).join(&stored);
         std::fs::write(&input, file.bytes).map_err(db_err)?;
         let (width, height) = if let Some(format) = image_format(&file.content_type) {
-            analyze_image_and_thumbnail(&input, &stored, "thumb", format)
+            let (width, height) = analyze_image_and_thumbnail(&input, &stored, "thumb", format);
+            (
+                width.map(|value| value as f64),
+                height.map(|value| value as f64),
+            )
         } else if safe_inline_video(&file.content_type) {
             analyze_video_and_poster(&input, &stored)
         } else {
@@ -6701,7 +6742,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         END;
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
-        CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
+        CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -6735,7 +6776,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         if !exists {
             conn.execute(
-                &format!("ALTER TABLE attachments ADD COLUMN {column} INTEGER"),
+                &format!("ALTER TABLE attachments ADD COLUMN {column} REAL"),
                 [],
             )?;
         }
