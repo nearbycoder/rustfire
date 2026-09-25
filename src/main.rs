@@ -5581,7 +5581,7 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
     }
     let db = pool(&s)?;
     let mut q = db
-        .prepare("SELECT id,name,bot_token FROM users WHERE role=2 AND bot_token IS NOT NULL AND status=0 ORDER BY LOWER(name)")
+        .prepare("SELECT id,name,bot_token,updated_at FROM users WHERE role=2 AND bot_token IS NOT NULL AND status=0 ORDER BY LOWER(name)")
         .map_err(db_err)?;
     let rows = q
         .query_map([], |r| {
@@ -5589,23 +5589,64 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
+    drop(q);
+    let mut room_query = db.prepare("SELECT m.user_id,r.id,r.name FROM memberships m JOIN rooms r ON r.id=m.room_id JOIN users u ON u.id=m.user_id WHERE u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL AND r.type!='Rooms::Direct' ORDER BY m.user_id,LOWER(r.name)").map_err(db_err)?;
+    let room_rows = room_query
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    drop(room_query);
+    let mut bot_rooms: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for (bot_id, room_id, room_name) in room_rows {
+        bot_rooms
+            .entry(bot_id)
+            .or_default()
+            .push((room_id, room_name));
+    }
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
     let mut list = String::new();
-    for (id, name, token) in rows {
+    for (id, name, token, updated_at) in rows {
         let key = format!("{id}-{token}");
-        list.push_str(&format!("<li>{} · key: <code>{}</code> <a href='/account/bots/{id}/edit'>Edit</a> <form method='post' action='/account/bots/{id}/delete'><button>Delete</button></form></li>",esc(&name),esc(&key)));
+        let avatar = avatar_path(avatar_key, id, &updated_at)?;
+        list.push_str(&format!("<li class='bot-row flex flex-column gap flush fill-shade border-radius pad-block pad-inline-double'><div class='flex align-center gap'><figure class='avatar flex-item--no-shrink' style='--avatar-size: 2.65em;'><a href='/users/{id}' title='{}' class='btn avatar' data-turbo-frame='_top'><img src='{}' aria-hidden='true' alt='' width='48' height='48' loading='lazy'></a></figure><div class='min-width'><div class='overflow-ellipsis txt-large'><strong>{}</strong></div></div><a href='/account/bots/{id}/edit' class='btn flex-item-justify-end' style='view-transition-name: chat-bot-{id}'><img src='/static/icons/pencil.svg' aria-hidden='true' alt='' width='20' height='20'><span class='for-screen-reader'>Edit {}</span></a></div>",esc(&name),esc(&avatar),esc(&name),esc(&name)));
+        for (room_id, room_name) in bot_rooms.remove(&id).unwrap_or_default() {
+            let endpoint = public_url(&headers, &format!("/rooms/{room_id}/{key}/messages"));
+            let text_line = format!("curl -d 'Hello!' {endpoint}");
+            let upload_line = format!("curl -F \"attachment=@/path/to/file\" {endpoint}");
+            list.push_str(&format!("<fieldset class='gap max-width pad border border-radius'><legend class='min-width txt-align-start pad-inline'><strong class='overflow-ellipsis'>{}</strong></legend>{}{}</fieldset>",esc(&room_name),bot_command_html(&text_line,"messages-outlined.svg","curl command for posting messages","Copy message command"),bot_command_html(&upload_line,"attachment.svg","curl command for posting attachments","Copy attachment command")));
+        }
+        list.push_str("</li>");
     }
     Ok(render(
-        "Bots",
+        "Chat bots",
         &format!(
-            "<section class='form-card'><h1>Chat bots</h1><p>With Chat bots, other sites and services can post updates directly to Campfire.</p><p><a class='button' href='/account/bots/new' aria-label='Add a chat bot'>Add a chat bot</a></p><ul>{list}</ul></section>"
+            "<p class='bot-back'><a href='/account/edit' aria-label='Back to account'>Back</a></p><section class='form-card bot-index panel panel--wide txt-align-center flex flex-column position-relative' style='view-transition-name: chat-bots'><div class='flex align-center gap'><div class='pad-inline-double center'><h1 class='margin-none'>Chat bots</h1><p class='margin-none-block-start'>With Chat bots, other sites and services can post updates directly to Campfire.</p><a href='/account/bots/new' class='btn btn--reversed txt-large' aria-label='Add a chat bot'><img src='/static/icons/bot.svg' aria-hidden='true' alt='' width='20' height='20'><img src='/static/icons/add.svg' aria-hidden='true' alt='' width='20' height='20'></a></div></div><div class='pad-inline pad-block-start'><menu class='flex flex-column gap margin-none pad'>{list}</menu></div></section>"
         ),
         Some(&u),
     ))
+}
+fn bot_command_html(command: &str, icon: &str, input_label: &str, copy_label: &str) -> String {
+    format!(
+        "<div class='flex align-center gap bot-command'><img src='/static/icons/{icon}' aria-hidden='true' alt='' width='24' height='24' class='colorize--black'><div class='flex-item-grow'><input type='text' class='input full-width fill-white' value='{}' aria-label='{input_label}' readonly></div><div class='txt-small'><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{}'><img src='/static/icons/copy-paste.svg' aria-hidden='true' alt='' width='20' height='20'><span class='for-screen-reader'>{copy_label}</span></button></div></div>",
+        esc(command),
+        esc(command)
+    )
 }
 async fn bot_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
@@ -5753,12 +5794,11 @@ async fn bot_edit(
         [id],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional().map_err(db_err)?;
-    let (name, token, webhook_url) = bot.ok_or(StatusCode::NOT_FOUND)?;
-    let key = format!("{id}-{token}");
+    let (name, _token, webhook_url) = bot.ok_or(StatusCode::NOT_FOUND)?;
     Ok(render(
         "Edit bot",
         &format!(
-            "<p><a href='/account/bots' aria-label='Back to chat bots'>Back</a></p><section class='panel form-card' style='view-transition-name: chat-bot-{id}'>{}<hr class='separator full-width margin-block-double'><div class='flex align-center gap justify-space-between'><form method='post' action='/account/bots/{id}'><input type='hidden' name='_method' value='delete'><button class='btn txt--small btn--negative' aria-label='Delete this chat bot'>Delete this chat bot</button></form><form method='post' action='/account/bots/{id}/key'><input type='hidden' name='_method' value='put'><button class='btn full-width txt--small btn--negative' aria-label='Generate a new key'>Generate a new key</button></form></div><p>Key: <code>{}</code></p></section>",
+            "<p><a href='/account/bots' aria-label='Back to chat bots'>Back</a></p><section class='panel form-card' style='view-transition-name: chat-bot-{id}'>{}<hr class='separator full-width margin-block-double'><div class='flex align-center gap justify-space-between'><form method='post' action='/account/bots/{id}'><input type='hidden' name='_method' value='delete'><button class='btn txt--small btn--negative' aria-label='Delete this chat bot'>Delete this chat bot</button></form><form method='post' action='/account/bots/{id}/key'><input type='hidden' name='_method' value='put'><button class='btn full-width txt--small btn--negative' aria-label='Generate a new key'>Generate a new key</button></form></div></section>",
             bot_form_html(
                 &format!("/account/bots/{id}"),
                 &name,
@@ -5766,7 +5806,6 @@ async fn bot_edit(
                 &format!("/users/{id}/avatar"),
                 true
             ),
-            esc(&key),
         ),
         Some(&u),
     ))

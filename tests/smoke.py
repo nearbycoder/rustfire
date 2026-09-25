@@ -54,6 +54,10 @@ def request(opener, base, path, data=None, method=None, headers=None):
         return error.code, error.geturl(), error.read().decode()
 
 
+def bot_key_from_page(page):
+    return re.search(r"/rooms/1/([0-9]+-[A-Za-z0-9]+)/messages", html.unescape(page)).group(1)
+
+
 def main():
     port = free_port()
     base = f"http://127.0.0.1:{port}"
@@ -425,7 +429,9 @@ def main():
             assert code == 200 and "name='user[avatar]'" in page and "name='user[name]'" in page and "name='user[webhook_url]'" in page
             assert request(client(), base, "/account/bots/new")[0] == 401
             code, _, page = request(admin, base, "/account/bots", {"name": "Robot"})
-            key = re.search(r"key: <code>([\w-]+)</code>", page).group(1)
+            key = bot_key_from_page(page)
+            assert f"curl -d 'Hello!' {base}/rooms/1/{key}/messages" in html.unescape(page)
+            assert f'curl -F "attachment=@/path/to/file" {base}/rooms/1/{key}/messages' in html.unescape(page)
             bot_create_body=(b"--bot-create\r\nContent-Disposition: form-data; name=\"user[name]\"\r\n\r\nPicture Bot\r\n"
                              b"--bot-create\r\nContent-Disposition: form-data; name=\"user[webhook_url]\"\r\n\r\nhttps://example.com/hook\r\n"
                              b"--bot-create\r\nContent-Disposition: form-data; name=\"user[avatar]\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--bot-create--\r\n")
@@ -442,7 +448,7 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as db:
                 assert db.execute("SELECT COUNT(*) FROM users WHERE name='Invalid Bot'").fetchone()[0] == 0
             code, _, page = request(admin, base, "/account/bots/3/edit")
-            assert code == 200 and "Robot" in page and key in page
+            assert code == 200 and "Robot" in page and "name='user[avatar]'" in page
             code, _, _ = request(admin, base, "/account/bots/3/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200
             with admin.open(base+"/users/3/avatar") as res:
@@ -593,7 +599,7 @@ def main():
             assert code == 204
             code, _, page = request(admin, base, "/account/bots/3/key", {})
             assert code == 200
-            rotated = re.search(r"key: <code>([\w-]+)</code>", page).group(1)
+            rotated = bot_key_from_page(page)
             assert rotated != key
             code, _, _ = request(client(), base, f"/rooms/1/{key}/messages")
             assert code == 401

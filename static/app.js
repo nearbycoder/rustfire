@@ -3,6 +3,18 @@ const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
+document.addEventListener('click',async event=>{
+  const copy=event.target.closest('[data-action~="copy-to-clipboard#copy"]');
+  if(!copy)return;
+  event.preventDefault();
+  const successClass=copy.dataset.copyToClipboardSuccessClass||'btn--success';
+  copy.classList.remove(successClass);
+  void copy.offsetWidth;
+  try{
+    await navigator.clipboard.writeText(copy.dataset.copyToClipboardContentValue||'');
+    copy.classList.add(successClass);
+  }catch{}
+});
 document.querySelectorAll('[data-controller~="upload-preview"]').forEach(control=>{
   const input=control.querySelector('[data-upload-preview-target="input"]');
   const image=control.querySelector('[data-upload-preview-target="image"]');
@@ -433,8 +445,6 @@ if (chat) {
       const link=document.createElement('a');link.href=article.querySelector('.message__meta a')?.href||'#';link.textContent='#';cite.append(link);
       typingInput.editor.loadHTML(block.outerHTML+cite.outerHTML+'<br>');typingInput.focus();reply.closest('details').open=false;return;
     }
-    const copy=e.target.closest('[data-action~="copy-to-clipboard#copy"]');
-    if(copy){try{await navigator.clipboard.writeText(new URL(copy.dataset.copyToClipboardContentValue,location.origin).href);copy.setAttribute('aria-label','Copied');copy.title='Copied';setTimeout(()=>{copy.setAttribute('aria-label','Copy link');copy.title='Copy link';},1500);}catch{}return;}
   });
   messages.addEventListener('submit', async e => {
     const deleteForm=e.target.closest('form[id^="delete_form_message_"]');

@@ -8,6 +8,7 @@ import argparse
 import base64
 import html
 import http.client
+from html.parser import HTMLParser
 import pathlib
 import re
 import sqlite3
@@ -20,6 +21,18 @@ from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, w
 
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=")
+
+
+class InputValues(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.values = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "input":
+            attributes = dict(attrs)
+            if label := attributes.get("aria-label"):
+                self.values[label] = attributes.get("value", "")
 
 
 def request(port, method, path, cookie, csrf, body=b"", content_type=None):
@@ -80,6 +93,15 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     statuses["created_record"] = (name, role, state, len(token), webhook[0] if webhook else None, attachment, memberships)
     statuses["avatar_original_matches"] = avatar_file.read_bytes() == PNG
     assert re.fullmatch(r"[A-Za-z0-9]{12}", token), token
+    status, _, page = request(port, "GET", "/account/bots", cookie, csrf)
+    assert status == 200, (status, page[:300])
+    input_values = InputValues()
+    input_values.feed(page.decode())
+    statuses["index_examples"] = tuple(
+        re.sub(r"https?://127\.0\.0\.1:\d+", "ORIGIN", input_values.values.get(label, ""))
+        .replace(f"/rooms/1/{bot_id}-{token}/messages", "/rooms/1/BOT_KEY/messages")
+        for label in ("curl command for posting messages", "curl command for posting attachments")
+    )
     status, _, payload = request(port, "GET", f"/rooms/1/{bot_id}-{token}/messages", "", "")
     statuses["bot_api"] = status
     assert status == 200, (status, payload[:300])
