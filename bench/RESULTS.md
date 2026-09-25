@@ -113,7 +113,7 @@ The selected-room lookup is much faster in Rustfire at these fixture sizes. This
 
 | Active users | Rustfire median / p95 | Campfire median / p95 | Rustfire / Campfire JSON bytes |
 |---:|---:|---:|---:|
-| 1,000 | 0.146 / 0.252 ms | 5.571 / 21.022 ms | 3,742 / 7,526 |
-| 10,000 | 0.718 / 0.878 ms | 6.485 / 18.997 ms | 3,811 / 7,642 |
+| 1,000 | 0.172 / 0.300 ms | 7.354 / 22.440 ms | 4,769 / 7,526 |
+| 10,000 | 0.788 / 1.147 ms | 7.005 / 18.341 ms | 4,884 / 7,642 |
 
-The result lists are the same, but response bodies differ: Campfire uses Rails signed global IDs and signed, versioned avatar URLs; Rustfire uses its own persistent signed IDs and shorter avatar URLs. This is a **single-client endpoint comparison**, not a feature-equivalent full-app speedup or a user-capacity result. The probe and servers shared the host, and no concurrency sweep or sustained-load run was made.
+The result lists are the same, but response bodies differ: both apps now use the Rails signed-global-ID envelope, while Rustfire signs with its own persistent key by default and uses shorter avatar URLs. Campfire's avatar URLs are signed and versioned. The latest table follows that signed-ID format change; short-run variation also affects latency. This is a **single-client endpoint comparison**, not a feature-equivalent full-app speedup or a user-capacity result. The probe and servers shared the host, and no concurrency sweep or sustained-load run was made.

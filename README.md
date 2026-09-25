@@ -26,6 +26,7 @@ Configuration:
 - `RUSTFIRE_DISABLE_WEBHOOKS` — set to `true` to suppress outbound bot webhook delivery
 - `RUSTFIRE_DISABLE_PUSH` — set to `true` to suppress outbound Web Push delivery
 - `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid.
+- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to verify imported Rails mention IDs. Keep it configured while imported messages or attachments use those IDs.
 - `RUSTFIRE_TRUSTED_PROXY_IPS` — comma-separated IPs of reverse proxies that append `X-Forwarded-For`; empty by default. Session IPs and bans use the direct peer unless it is listed here.
 
 The server creates its SQLite schema at startup and enables WAL mode. Run behind a TLS proxy for network use. Back up the database and upload directory together.
@@ -42,7 +43,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Bot creation, renaming, avatar editing, key rotation, deletion, message read/post/update/delete API, boost create/delete API, and outbound webhooks with text or common image/PDF replies
 - Built-in `/play` sound messages with the upstream audio and image assets
 - Trix rich-text composition and editing with server-side HTML sanitization; formatted messages retain searchable plain text. Pasted links can request Open Graph previews through a public-IP-only fetcher. Saved preview attachments are rendered from validated attributes, dropping invalid, address-based, and same-host link or image URLs.
-- Mention autocomplete with Campfire's response fields, persistent signed mention IDs, verified Trix mention attachments, and bot webhook dispatch for selected bot mentions; older Rustfire mention attachments remain readable
+- Mention autocomplete with Campfire's response fields and Rails-format signed mention IDs, verified Trix mention attachments, and bot webhook dispatch for selected bot mentions; older Rustfire IDs remain readable, and original Campfire IDs can be verified when its secret key base is configured
 - Basic boosts, profile name/email/password/bio and avatar editing, account logos and custom CSS, administrator role changes, deactivation and bans, four-hour session transfer links, live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
 - Session and room access control
 - CSRF checks for authenticated writes and public setup, sign-in, join, and device sign-in forms; same-origin WebSocket handshakes; sign-in limited to 10 attempts per IP over three minutes
@@ -54,7 +55,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior
 - Remaining ActionText rich-text behavior, inline attachments, exact image/video variant behavior, and exact link preview rendering
-- Exact ActionText mention rendering and webhook triggering, including support for imported Rails signed IDs; full presence integration and notification behavior; exact upstream typing and unread behavior
+- Exact ActionText mention HTML and webhook triggering, full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior and cross-browser push delivery validation
 - Full webhook response/MIME behavior and JSON API compatibility
 - Remaining account/user administration and exact behavior for bans and session transfer

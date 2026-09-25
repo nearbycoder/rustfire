@@ -55,7 +55,7 @@ def main():
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     with tempfile.TemporaryDirectory() as tmp:
-        env = dict(os.environ, RUSTFIRE_ADDR=f"127.0.0.1:{port}", RUSTFIRE_DB=f"{tmp}/test.db", RUSTFIRE_UPLOAD_DIR=f"{tmp}/uploads", RUSTFIRE_TRUSTED_PROXY_IPS="127.0.0.1", RUSTFIRE_DISABLE_PUSH="1")
+        env = dict(os.environ, RUSTFIRE_ADDR=f"127.0.0.1:{port}", RUSTFIRE_DB=f"{tmp}/test.db", RUSTFIRE_UPLOAD_DIR=f"{tmp}/uploads", RUSTFIRE_TRUSTED_PROXY_IPS="127.0.0.1", RUSTFIRE_DISABLE_PUSH="1", RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE="test-secret-key-base")
         process = subprocess.Popen([str(ROOT / "target/debug/rustfire")], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         webhook_server = None
         try:
@@ -433,6 +433,13 @@ def main():
                 time.sleep(.05)
             else:
                 raise AssertionError("structured mention webhook did not arrive")
+            imported_sgid = "eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvMz9leHBpcmVzX2luIiwicHVyIjoiYXR0YWNoYWJsZSJ9fQ==--407356a6ecde1089c9bdc4a0c980e4b6a1016234"
+            assert imported_sgid != bot_suggestion["sgid"]
+            imported_body = mention_html(3).replace(bot_suggestion["sgid"], imported_sgid)
+            code, _, imported_payload = request(admin, base, "/rooms/1/messages", {"message[body]":imported_body,"message[format]":"html"}, headers={"Accept":"application/json"})
+            assert code == 201
+            imported_id = json.loads(imported_payload)["id"]
+            assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(imported_id,)).fetchone() == (3,)
             edit_page = request(admin, base, f"/rooms/1/messages/{structured_id}/edit")[2]
             assert "data-trix-attachment" in html.unescape(edit_page)
             assert request(admin, base, f"/rooms/1/messages/{structured_id}", {"message[body]":mention_html(3).replace("selected mention", "edited mention"),"message[format]":"html"}, method="PATCH")[0] == 303

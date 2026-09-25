@@ -24,6 +24,7 @@ use openssl::{
     hash::MessageDigest,
     memcmp,
     nid::Nid,
+    pkcs5::pbkdf2_hmac,
     pkey::PKey,
     sign::Signer,
 };
@@ -73,6 +74,7 @@ struct AppState {
     webhooks_enabled: bool,
     vapid_private: Vec<u8>,
     mention_signing_key: Vec<u8>,
+    imported_mention_signing_key: Option<Vec<u8>>,
     push_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
@@ -360,6 +362,7 @@ fn replace_mention_attachments(
     input: &str,
     db: &rusqlite::Connection,
     signing_key: &[u8],
+    imported_key: Option<&[u8]>,
 ) -> Result<String, StatusCode> {
     if !input.contains("application/vnd.campfire.mention")
         && !input.contains("application/vnd.rustfire.mention")
@@ -405,7 +408,7 @@ fn replace_mention_attachments(
                 | Some("application/vnd.rustfire.mention") => {
                     let id = if kind.as_deref() == Some("application/vnd.campfire.mention") {
                         sgid.as_deref()
-                            .and_then(|sgid| mention_id_from_sgid(signing_key, sgid))
+                            .and_then(|sgid| verified_mention_id(signing_key, imported_key, sgid))
                     } else {
                         legacy_id.filter(|id| *id > 0)
                     };
@@ -473,38 +476,86 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
         html,
     )
 }
-fn mention_signature(key: &[u8], payload: &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+fn mention_signature(
+    key: &[u8],
+    payload: &[u8],
+    digest: MessageDigest,
+) -> Result<Vec<u8>, openssl::error::ErrorStack> {
     let pkey = PKey::hmac(key)?;
-    let mut signer = Signer::new(MessageDigest::sha256(), &pkey)?;
+    let mut signer = Signer::new(digest, &pkey)?;
     signer.sign_oneshot_to_vec(payload)
 }
+fn rails_sgid_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    let mut key = vec![0u8; 64];
+    pbkdf2_hmac(
+        secret_key_base.as_bytes(),
+        b"signed_global_ids",
+        1000,
+        MessageDigest::sha256(),
+        &mut key,
+    )?;
+    Ok(key)
+}
 fn mention_sgid(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
-    let payload = format!("gid://rustfire/User/{id}/attachable");
-    let signature = mention_signature(key, payload.as_bytes())?;
-    Ok(format!(
-        "{}--{}",
-        URL_SAFE_NO_PAD.encode(payload),
-        URL_SAFE_NO_PAD.encode(signature)
-    ))
+    let payload = json!({"_rails":{"data":format!("gid://campfire/User/{id}?expires_in"),"pur":"attachable"}}).to_string();
+    let encoded = URL_SAFE.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())?;
+    let digest = signature
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
 }
 fn mention_id_from_sgid(key: &[u8], sgid: &str) -> Option<i64> {
-    if sgid.len() > 512 {
+    if sgid.len() > 1024 {
         return None;
     }
     let (encoded, signature) = sgid.split_once("--")?;
+    if signature.len() == 40 {
+        let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())
+            .ok()?
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+            return None;
+        }
+        let payload = URL_SAFE.decode(encoded).ok()?;
+        let envelope: Value = serde_json::from_slice(&payload).ok()?;
+        let metadata = envelope.get("_rails")?;
+        if metadata.get("pur").and_then(Value::as_str) != Some("attachable") {
+            return None;
+        }
+        if let Some(expiry) = metadata.get("exp").filter(|expiry| !expiry.is_null()) {
+            let expiry = expiry.as_str()?;
+            if chrono::DateTime::parse_from_rfc3339(expiry).ok()? <= Utc::now() {
+                return None;
+            }
+        }
+        let id = metadata
+            .get("data")?
+            .as_str()?
+            .strip_prefix("gid://campfire/User/")?
+            .strip_suffix("?expires_in")?;
+        return id.parse::<i64>().ok().filter(|id| *id > 0);
+    }
     let payload = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
-    let expected = mention_signature(key, &payload).ok()?;
+    let expected = mention_signature(key, &payload, MessageDigest::sha256()).ok()?;
     if signature.len() != expected.len() || !memcmp::eq(&signature, &expected) {
         return None;
     }
-    let path = std::str::from_utf8(&payload)
+    let id = std::str::from_utf8(&payload)
         .ok()?
         .strip_prefix("gid://rustfire/User/")?
         .strip_suffix("/attachable")?;
-    path.parse::<i64>().ok().filter(|id| *id > 0)
+    id.parse::<i64>().ok().filter(|id| *id > 0)
 }
-fn mention_ids(input: &str, signing_key: &[u8]) -> Vec<i64> {
+fn verified_mention_id(key: &[u8], imported_key: Option<&[u8]>, sgid: &str) -> Option<i64> {
+    mention_id_from_sgid(key, sgid)
+        .or_else(|| imported_key.and_then(|imported| mention_id_from_sgid(imported, sgid)))
+}
+fn mention_ids(input: &str, signing_key: &[u8], imported_key: Option<&[u8]>) -> Vec<i64> {
     if !input.contains("application/vnd.campfire.mention")
         && !input.contains("application/vnd.rustfire.mention")
     {
@@ -524,7 +575,7 @@ fn mention_ids(input: &str, signing_key: &[u8]) -> Vec<i64> {
             Some("application/vnd.campfire.mention") => value
                 .get("sgid")
                 .and_then(Value::as_str)
-                .and_then(|sgid| mention_id_from_sgid(signing_key, sgid)),
+                .and_then(|sgid| verified_mention_id(signing_key, imported_key, sgid)),
             Some("application/vnd.rustfire.mention") => value
                 .get("userId")
                 .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok())),
@@ -544,7 +595,7 @@ fn mention_ids(input: &str, signing_key: &[u8]) -> Vec<i64> {
         let id = attachment
             .value()
             .attr("sgid")
-            .and_then(|sgid| mention_id_from_sgid(signing_key, sgid));
+            .and_then(|sgid| verified_mention_id(signing_key, imported_key, sgid));
         if let Some(id) = id {
             if !ids.contains(&id) {
                 ids.push(id);
@@ -2439,13 +2490,22 @@ fn insert_message(
         && (body.contains("application/vnd.rustfire.mention")
             || body.contains("application/vnd.campfire.mention"));
     let candidate_mentions = if rich {
-        mention_ids(body, &s.mention_signing_key)
+        mention_ids(
+            body,
+            &s.mention_signing_key,
+            s.imported_mention_signing_key.as_deref(),
+        )
     } else {
         Vec::new()
     };
     let db = pool(s)?;
     let (plain, body_html) = if rich && !body.trim().is_empty() {
-        let trusted = replace_mention_attachments(body, &db, &s.mention_signing_key)?;
+        let trusted = replace_mention_attachments(
+            body,
+            &db,
+            &s.mention_signing_key,
+            s.imported_mention_signing_key.as_deref(),
+        )?;
         let (plain, html) = rich_body(&trusted, request_host);
         (plain, Some(html))
     } else {
@@ -3019,7 +3079,12 @@ async fn message_update(
     let body = form_value(&f, "body", "message[body]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let rich = form_value(&f, "format", "message[format]") == Some("html");
     let (plain, body_html) = if rich {
-        let trusted = replace_mention_attachments(body, &db, &s.mention_signing_key)?;
+        let trusted = replace_mention_attachments(
+            body,
+            &db,
+            &s.mention_signing_key,
+            s.imported_mention_signing_key.as_deref(),
+        )?;
         let (plain, html) = rich_body(
             &trusted,
             headers
@@ -3048,7 +3113,11 @@ async fn message_update(
     db.execute("DELETE FROM message_mentions WHERE message_id=?1", [mid])
         .map_err(db_err)?;
     if rich {
-        for mentioned_id in mention_ids(body, &s.mention_signing_key) {
+        for mentioned_id in mention_ids(
+            body,
+            &s.mention_signing_key,
+            s.imported_mention_signing_key.as_deref(),
+        ) {
             let allowed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND m.user_id=?2 AND u.status=0)",params![rid,mentioned_id],|r|r.get(0)).map_err(db_err)?;
             if allowed {
                 db.execute(
@@ -5675,6 +5744,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |row| row.get(0),
     )?;
+    let imported_mention_signing_key = env::var("RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE")
+        .ok()
+        .filter(|base| !base.is_empty())
+        .map(|base| rails_sgid_key(&base))
+        .transpose()?;
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
     let has_push_subscriptions: bool =
@@ -5705,6 +5779,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
         vapid_private,
         mention_signing_key,
+        imported_mention_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
@@ -5950,8 +6025,26 @@ mod tests {
         let attachment = format!(
             "<figure data-trix-attachment='{{\"contentType\":\"application/vnd.campfire.mention\",\"sgid\":\"{sgid}\"}}'></figure>"
         );
-        assert_eq!(super::mention_ids(&attachment, &key), vec![42]);
-        assert!(super::mention_ids(&attachment, &[8u8; 32]).is_empty());
+        assert_eq!(super::mention_ids(&attachment, &key, None), vec![42]);
+        assert!(super::mention_ids(&attachment, &[8u8; 32], None).is_empty());
+        let legacy_payload = b"gid://rustfire/User/42/attachable";
+        let legacy_signature =
+            super::mention_signature(&key, legacy_payload, openssl::hash::MessageDigest::sha256())
+                .unwrap();
+        let legacy_sgid = format!(
+            "{}--{}",
+            URL_SAFE_NO_PAD.encode(legacy_payload),
+            URL_SAFE_NO_PAD.encode(legacy_signature)
+        );
+        assert_eq!(super::mention_id_from_sgid(&key, &legacy_sgid), Some(42));
+    }
+
+    #[test]
+    fn rails_attachable_sgid_format_matches_the_pinned_verifier() {
+        let key = super::rails_sgid_key("test-secret-key-base").unwrap();
+        let token = "eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvNDI_ZXhwaXJlc19pbiIsInB1ciI6ImF0dGFjaGFibGUifX0=--3d8933c1a8fd0d7a289fd1f62b3a5ecf0045041e";
+        assert_eq!(super::mention_sgid(&key, 42).unwrap(), token);
+        assert_eq!(super::mention_id_from_sgid(&key, token), Some(42));
     }
 
     #[test]
