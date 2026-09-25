@@ -19,8 +19,9 @@ const socketCount = Number(args.sockets ?? 100);
 const messageCount = Number(args.messages ?? 20);
 const timeoutMs = Number(args.timeout ?? 30000);
 const imageBytes = operation === 'images' ? (args['image-file'] ? fs.readFileSync(args['image-file']) : Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=','base64')) : null;
-if (!cookie || !['rustfire','rustfire-turbo','campfire'].includes(app) || !['messages','boosts','attachments','images'].includes(operation) || !Number.isSafeInteger(room) || room < 1 || !Number.isSafeInteger(messageId) || messageId < 1 || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || base.protocol !== 'http:') {
-  console.error('Use --app rustfire|rustfire-turbo|campfire --base http://host:port --cookie name=value [--operation messages|boosts|attachments|images --message-id 1 --room 1 --sockets 100 --messages 20]');
+const videoBytes = operation === 'videos' ? fs.readFileSync(args['video-file']) : null;
+if (!cookie || !['rustfire','rustfire-turbo','campfire'].includes(app) || !['messages','boosts','attachments','images','videos'].includes(operation) || !Number.isSafeInteger(room) || room < 1 || !Number.isSafeInteger(messageId) || messageId < 1 || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || base.protocol !== 'http:') {
+  console.error('Use --app rustfire|rustfire-turbo|campfire --base http://host:port --cookie name=value [--operation messages|boosts|attachments|images|videos --message-id 1 --room 1 --sockets 100 --messages 20]');
   process.exit(2);
 }
 let identifier = JSON.stringify({ channel: 'RoomMessagesChannel', room_id: room });
@@ -105,7 +106,7 @@ function connect(index) {
           if (typeof event.message === 'string' && !event.message.includes(`target="${expectedTarget}"`)) { unexpected++; continue; }
           const body = operation === 'boosts' ? (app === 'rustfire' ? event.message.content : event.message) : (app === 'rustfire' ? event.message.message?.body?.plain_text : event.message);
           const id = operation === 'boosts' ? (typeof body === 'string' ? body.match(/z[0-9a-f]{8}/)?.[0] : undefined)
-            : ['attachments','images'].includes(operation) && typeof body === 'string' ? (app === 'rustfire' ? body.match(/^fanout-(?:file|image)-(.+)\.(?:txt|png)$/)?.[1] : body.match(/\bid=['"]message_([\w-]+)['"]/)?.[1])
+            : ['attachments','images','videos'].includes(operation) && typeof body === 'string' ? (app === 'rustfire' ? body.match(/^fanout-(?:file|image|video)-(.+)\.(?:txt|png|mp4)$/)?.[1] : body.match(/\bid=['"]message_([\w-]+)['"]/)?.[1])
             : app === 'rustfire' && typeof body === 'string' && body.startsWith('fanout ') ? body.slice(7)
             : typeof body === 'string' ? body.match(/fanout ([\w-]+)/)?.[1] : undefined;
           const start = sent.get(id);
@@ -128,18 +129,19 @@ try {
     const id = operation === 'boosts' ? `z${crypto.createHash('sha256').update(`${runId}-${i}`).digest('hex').slice(0,8)}` : `${runId}-${i}`;
     sent.set(id, performance.now());
     const attachmentForm = new FormData();
-    if (operation === 'attachments' || operation === 'images') {
+    if (['attachments','images','videos'].includes(operation)) {
       attachmentForm.append('message[body]','');
       attachmentForm.append('message[client_message_id]',id);
       if(operation === 'images')attachmentForm.append('message[attachment]',new Blob([imageBytes],{type:'image/png'}),`fanout-image-${id}.png`);
+      else if(operation === 'videos')attachmentForm.append('message[attachment]',new Blob([videoBytes],{type:'video/mp4'}),`fanout-video-${id}.mp4`);
       else attachmentForm.append('message[attachment]',new Blob([`fanout attachment ${id}`],{type:'text/plain'}),`fanout-file-${id}.txt`);
       if (csrf) attachmentForm.append('authenticity_token',csrf);
     }
     const response = await fetch(new URL(operation === 'boosts' ? `/messages/${messageId}/boosts` : `/rooms/${room}/messages`, base), {
       method: 'POST',
       redirect: 'manual',
-      headers: { Cookie: cookie, Accept: app === 'rustfire' ? 'application/json' : 'text/vnd.turbo-stream.html, text/html', ...(['attachments','images'].includes(operation) ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }) },
-      body: ['attachments','images'].includes(operation) ? attachmentForm : new URLSearchParams({ ...(operation === 'boosts' ? { 'boost[content]': id } : { 'message[body]': `fanout ${id}`, 'message[client_message_id]': id }), ...(csrf ? { authenticity_token: csrf } : {}) }),
+      headers: { Cookie: cookie, Accept: app === 'rustfire' ? 'application/json' : 'text/vnd.turbo-stream.html, text/html', ...(['attachments','images','videos'].includes(operation) ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }) },
+      body: ['attachments','images','videos'].includes(operation) ? attachmentForm : new URLSearchParams({ ...(operation === 'boosts' ? { 'boost[content]': id } : { 'message[body]': `fanout ${id}`, 'message[client_message_id]': id }), ...(csrf ? { authenticity_token: csrf } : {}) }),
     });
     if (!(operation === 'boosts' ? [302,303].includes(response.status) : response.ok)) throw new Error(`POST ${i} returned ${response.status}`);
   }

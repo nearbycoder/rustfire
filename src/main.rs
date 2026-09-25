@@ -694,6 +694,7 @@ fn image_format(content_type: &str) -> Option<&'static str> {
 fn analyze_image_and_thumbnail(
     input: &std::path::Path,
     stored: &str,
+    kind: &str,
     format: &str,
 ) -> (Option<i64>, Option<i64>) {
     let dimension = |field: &str| -> Option<i64> {
@@ -718,10 +719,10 @@ fn analyze_image_and_thumbnail(
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("variants");
     if std::fs::create_dir_all(&cache).is_ok() {
-        let output = cache.join(format!("{stored}-thumb.{format}"));
+        let output = cache.join(format!("{stored}-{kind}.{format}"));
         let nonce = Uuid::new_v4();
-        let stage = cache.join(format!("{stored}-thumb-{nonce}.v"));
-        let temporary = cache.join(format!("{stored}-thumb-{nonce}.{format}"));
+        let stage = cache.join(format!("{stored}-{kind}-{nonce}.v"));
+        let temporary = cache.join(format!("{stored}-{kind}-{nonce}.{format}"));
         let resized = std::process::Command::new("vips")
             .arg("thumbnail")
             .arg(input)
@@ -749,6 +750,50 @@ fn analyze_image_and_thumbnail(
     }
     dimensions
 }
+fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<i64>, Option<i64>) {
+    let dimensions = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(input)
+        .output()
+        .ok()
+        .filter(|result| result.status.success())
+        .and_then(|result| String::from_utf8(result.stdout).ok())
+        .and_then(|text| {
+            let (width, height) = text.trim().split_once(',')?;
+            Some((
+                width.parse::<i64>().ok().filter(|value| *value > 0),
+                height.parse::<i64>().ok().filter(|value| *value > 0),
+            ))
+        })
+        .unwrap_or((None, None));
+    let frame = std::process::Command::new("ffmpeg")
+        .arg("-i")
+        .arg(input)
+        .args(["-y", "-vframes", "1", "-f", "image2", "-"])
+        .output();
+    if let Ok(frame) = frame {
+        if frame.status.success() && !frame.stdout.is_empty() {
+            let dir = input.parent().unwrap_or_else(|| std::path::Path::new("."));
+            if std::fs::create_dir_all(dir).is_ok() {
+                let jpeg = dir.join(format!("{stored}-frame-{}.jpg", Uuid::new_v4()));
+                if std::fs::write(&jpeg, frame.stdout).is_ok() {
+                    let _ = analyze_image_and_thumbnail(&jpeg, stored, "poster", "webp");
+                }
+                let _ = std::fs::remove_file(jpeg);
+            }
+        }
+    }
+    dimensions
+}
 fn image_variation_token(key: &[u8], format: &str) -> Result<String, StatusCode> {
     let payload =
         json!({"_rails":{"data":{"format":format,"resize_to_limit":[1200,800]},"pur":"variation"}})
@@ -762,12 +807,15 @@ fn image_variation_token(key: &[u8], format: &str) -> Result<String, StatusCode>
         .collect::<String>();
     Ok(format!("{encoded}--{digest}"))
 }
-fn image_representation_path(s: &AppState, attachment: &Attachment) -> Result<String, StatusCode> {
+fn representation_path(
+    s: &AppState,
+    attachment: &Attachment,
+    format: &str,
+) -> Result<String, StatusCode> {
     let key = s
         .imported_blob_signing_key
         .as_deref()
         .unwrap_or(&s.blob_signing_key);
-    let format = image_format(&attachment.content_type).ok_or(StatusCode::NOT_FOUND)?;
     let blob = blob_path(key, attachment.id, &attachment.filename)?;
     let (prefix, filename) = blob
         .rsplit_once('/')
@@ -778,6 +826,10 @@ fn image_representation_path(s: &AppState, attachment: &Attachment) -> Result<St
         image_variation_token(key, format)?,
         filename
     ))
+}
+fn image_representation_path(s: &AppState, attachment: &Attachment) -> Result<String, StatusCode> {
+    let format = image_format(&attachment.content_type).ok_or(StatusCode::NOT_FOUND)?;
+    representation_path(s, attachment, format)
 }
 fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
     let version = chrono::DateTime::parse_from_rfc3339(updated_at)
@@ -2361,18 +2413,34 @@ fn attachment_blob_path(s: &AppState, attachment: &Attachment) -> String {
     blob_path(key, attachment.id, &attachment.filename)
         .unwrap_or_else(|_| format!("/attachments/{}", attachment.id))
 }
-fn image_preview_dimensions(attachment: &Attachment) -> Option<(String, String, String)> {
+fn image_preview_dimensions(
+    attachment: &Attachment,
+    float_source: bool,
+) -> Option<(String, String, String)> {
     let (width, height) = (attachment.width?, attachment.height?);
     if width <= 0 || height <= 0 {
         return None;
     }
     if width <= 1200 && height <= 800 {
+        let (display_width, display_height, half_width) = if float_source {
+            (
+                format!("{:?}", width as f64),
+                format!("{:?}", height as f64),
+                format!("{:?}", width as f64 / 2.0),
+            )
+        } else {
+            (
+                width.to_string(),
+                height.to_string(),
+                (width / 2).to_string(),
+            )
+        };
         return Some((
-            width.to_string(),
-            height.to_string(),
+            display_width,
+            display_height,
             format!(
                 "{}px; aspect-ratio: {:?};",
-                width / 2,
+                half_width,
                 width as f64 / height as f64
             ),
         ));
@@ -2399,7 +2467,7 @@ fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
             let blob_url = attachment_blob_path(s, a);
             let download_url = format!("{blob_url}?disposition=attachment");
             if safe_inline_image(&a.content_type) {
-                let (container_class, style, dimensions) = if let Some((width, height, style)) = image_preview_dimensions(a) {
+                let (container_class, style, dimensions) = if let Some((width, height, style)) = image_preview_dimensions(a, false) {
                     ("max-inline-size center flex overflow-clip", format!(" style='width: {style}'"), format!(" width='{width}' height='{height}'"))
                 } else {
                     ("max-inline-size center overflow-clip", String::new(), String::new())
@@ -2407,7 +2475,13 @@ fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
                 let representation = image_representation_path(s, a).unwrap_or_else(|_| format!("/attachments/{}/thumb", a.id));
                 format!("<div class='{container_class}'{style}><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img{dimensions} class='message__attachment' loading='lazy' src='{representation}'></a></div>")
             } else if safe_inline_video(&a.content_type) {
-                format!("<div class='max-inline-size center overflow-clip'><video src='{blob_url}' poster='/attachments/{id}/poster' controls preload='none' width='100%' height='100%' class='message__attachment'></video></div>",id=a.id)
+                let (container_class, style) = if let Some((_, _, style)) = image_preview_dimensions(a, true) {
+                    ("max-inline-size center flex overflow-clip", format!(" style='width: {style}'"))
+                } else {
+                    ("max-inline-size center overflow-clip", String::new())
+                };
+                let poster = representation_path(s, a, "webp").unwrap_or_else(|_| format!("/attachments/{}/poster", a.id));
+                format!("<div class='{container_class}'{style}><video src='{blob_url}' poster='{poster}' controls='controls' preload='none' width='100%' height='100%' class='message__attachment'></video></div>")
             } else {
                 format!("<div class='flex-inline align-center gap-half'><img class='colorize--black' aria-hidden='true' src='/assets/common-file-text-9043d980.svg' width='22' height='22'><span>{filename}</span><a class='btn message__action-btn hide-in-ios-pwa' style='--width: auto;' href='{download_url}'><img aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'><span class='for-screen-reader'>Download {filename}</span></a><button class='btn message__action-btn' style='--width: auto;' data-controller='web-share' data-action='web-share#share' data-web-share-files-value='{download_url}'><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'><span class='for-screen-reader'>Share {filename}</span></button></div>")
             }
@@ -3220,9 +3294,13 @@ fn insert_message(
         let stored = Uuid::new_v4().to_string();
         let input = std::path::Path::new(&dir).join(&stored);
         std::fs::write(&input, file.bytes).map_err(db_err)?;
-        let (width, height) = image_format(&file.content_type)
-            .map(|format| analyze_image_and_thumbnail(&input, &stored, format))
-            .unwrap_or((None, None));
+        let (width, height) = if let Some(format) = image_format(&file.content_type) {
+            analyze_image_and_thumbnail(&input, &stored, "thumb", format)
+        } else if safe_inline_video(&file.content_type) {
+            analyze_video_and_poster(&input, &stored)
+        } else {
+            (None, None)
+        };
         db.execute("INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,file.filename,file.content_type,stored,t,width,height]).map_err(db_err)?;
         Some(Attachment {
             id: db.last_insert_rowid(),
@@ -5995,7 +6073,13 @@ async fn signed_representation_get(
     .ok_or(StatusCode::NOT_FOUND)?;
     let id = blob_id_from_token(key, &token).ok_or(StatusCode::NOT_FOUND)?;
     let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
-    let format = image_format(&content_type).ok_or(StatusCode::NOT_FOUND)?;
+    let (format, kind) = if let Some(format) = image_format(&content_type) {
+        (format, "thumb")
+    } else if safe_inline_video(&content_type) {
+        ("webp", "poster")
+    } else {
+        return Err(StatusCode::NOT_FOUND);
+    };
     let expected = image_variation_token(key, format)?;
     if !memcmp::eq(variation.as_bytes(), expected.as_bytes()) {
         return Err(StatusCode::NOT_FOUND);
@@ -6006,22 +6090,34 @@ async fn signed_representation_get(
     let input = dir.join(&stored);
     let output = dir
         .join("variants")
-        .join(format!("{stored}-thumb.{format}"));
+        .join(format!("{stored}-{kind}.{format}"));
     if tokio::fs::metadata(&output).await.is_err() {
         let _permit = s.variant_slots.acquire().await.map_err(db_err)?;
         if tokio::fs::metadata(&output).await.is_err() {
             let stored_copy = stored.clone();
-            let format_copy = format.to_string();
-            let _ = tokio::task::spawn_blocking(move || {
-                analyze_image_and_thumbnail(&input, &stored_copy, &format_copy)
-            })
-            .await;
+            if kind == "poster" {
+                let _ = tokio::task::spawn_blocking(move || {
+                    analyze_video_and_poster(&input, &stored_copy)
+                })
+                .await;
+            } else {
+                let format_copy = format.to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    analyze_image_and_thumbnail(&input, &stored_copy, "thumb", &format_copy)
+                })
+                .await;
+            }
         }
     }
     if tokio::fs::metadata(&output).await.is_err() {
         return Err(StatusCode::NOT_FOUND);
     }
-    serve_attachment(&output, &filename, &content_type, &headers, true).await
+    let response_type = if kind == "poster" {
+        "image/webp"
+    } else {
+        &content_type
+    };
+    serve_attachment(&output, &filename, response_type, &headers, true).await
 }
 fn remove_attachment_files(stored: &str) {
     if Uuid::parse_str(stored).is_err() {

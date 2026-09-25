@@ -244,11 +244,16 @@ def main():
                 code,_,payload=request(admin,base,"/rooms/1/messages",data=video_body,method="POST",headers={"Accept":"application/json","Content-Type":"multipart/form-data; boundary=video-test"})
                 assert code==201,(code,payload)
                 video_id=sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
-                assert f"/attachments/{video_id}/poster" in request(admin,base,"/rooms/1")[2]
+                video_page=request(admin,base,"/rooms/1")[2]
+                video_poster=re.search(r"poster='(/rails/active_storage/representations/redirect/[^']+/clip\.mp4)'",video_page)
+                assert video_poster and "max-inline-size center flex overflow-clip' style='width: 8.0px; aspect-ratio: 1.0;'" in video_page
                 with admin.open(urllib.request.Request(base+f"/attachments/{video_id}",headers={"Range":"bytes=0-9"})) as res:
                     assert res.status==206 and res.headers.get_content_type()=="video/mp4" and len(res.read())==10
-                with admin.open(base+f"/attachments/{video_id}/poster") as res:
+                with admin.open(base+video_poster.group(1)) as res:
                     assert res.status==200 and res.headers.get_content_type()=="image/webp" and len(res.read())>0
+                with urllib.request.urlopen(base+video_poster.group(1)) as res:
+                    assert res.status==200 and res.headers.get_content_type()=="image/webp"
+                assert request(admin,base,video_poster.group(1).replace("--","-x",1))[0]==404
             avatar_body=(b"--avatar-test\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--avatar-test--\r\n")
             code, _, _ = request(member, base, "/users/me/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200

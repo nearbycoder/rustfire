@@ -34,7 +34,7 @@ def seed_boost_message(rust_db, camp_db):
         db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Boost fixture','Message',1,?1,?1)", [camp_time])
 
 
-def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None, image_file=None):
+def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None, image_file=None, video_file=None):
     command = [
         "node", "bench/fanout.mjs", "--app", app,
         "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
@@ -46,6 +46,8 @@ def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample
         command.extend(["--sample-file", str(sample_file)])
     if image_file is not None:
         command.extend(["--image-file", str(image_file)])
+    if video_file is not None:
+        command.extend(["--video-file", str(video_file)])
     result = subprocess.run(
         command,
         cwd=ROOT, text=True, capture_output=True,
@@ -144,6 +146,20 @@ def check_image_representation(sample_file, port, cookie, expected_dimensions):
     return len(body), hashlib.sha256(body).hexdigest()
 
 
+def check_video_poster(sample_file, port, cookie):
+    sample = html.unescape(sample_file.read_text())
+    path = re.search(r"<video\b[^>]*poster=['\"]([^'\"]+)['\"]", sample)
+    if not path:
+        raise RuntimeError(f"Video stream has no poster URL: {sample_file}")
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path.group(1)}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read()
+        if response.status != 200 or response.headers.get_content_type() != "image/webp" or not body.startswith(b"RIFF") or body[8:12] != b"WEBP":
+            raise RuntimeError(f"Poster URL did not serve a WebP: {sample_file}")
+    sample_file.with_suffix(".webp").write_bytes(body)
+    return len(body), hashlib.sha256(body).hexdigest()
+
+
 def write_png(path, width, height):
     def chunk(name, data):
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
@@ -174,10 +190,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
     parser.add_argument("--messages", type=int, default=5)
-    parser.add_argument("--operation", choices=["messages", "boosts", "attachments", "images"], default="messages")
+    parser.add_argument("--operation", choices=["messages", "boosts", "attachments", "images", "videos"], default="messages")
     parser.add_argument("--campfire-workers", type=int, default=1)
     parser.add_argument("--sample-dir", type=pathlib.Path, help="Write one received Turbo event from each app to this directory")
     parser.add_argument("--image-size", help="Use a generated PNG of WIDTHxHEIGHT for image uploads; default is 1x1")
+    parser.add_argument("--video-size", default="16x16", help="Generate a video of WIDTHxHEIGHT for video uploads; default is 16x16")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
@@ -186,6 +203,8 @@ def main():
         parser.error("sockets, messages, and workers must be positive")
     if args.image_size and (not re.fullmatch(r"[1-9]\d{0,3}x[1-9]\d{0,3}", args.image_size) or args.operation != "images"):
         parser.error("--image-size requires images and WIDTHxHEIGHT, each below 10000")
+    if args.operation == "videos" and not re.fullmatch(r"[1-9]\d{0,3}x[1-9]\d{0,3}", args.video_size):
+        parser.error("--video-size must be WIDTHxHEIGHT, each below 10000")
     repo = args.campfire_repo.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     if revision != "91d294f4a09f9bbe37f9548959bfcb43645678fb":
@@ -206,6 +225,9 @@ def main():
             write_png(image_file, width, height)
             factor = min(1.0, 1200 / width, 800 / height)
             expected_image_dimensions = (round(width * factor), round(height * factor))
+        video_file = temp / "upload.mp4" if args.operation == "videos" else None
+        if video_file:
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c=red:s={args.video_size}:r=5:d=1", "-c:v", "mpeg4", "-y", str(video_file)], check=True)
         rust_port, camp_port = free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
@@ -225,8 +247,9 @@ def main():
             "RUSTFIRE_PUBLIC_URL": "http://127.0.0.1",
         })
         try:
-            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html", image_file)
+            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html", image_file, video_file)
             rust_image_bytes = check_image_representation(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session", expected_image_dimensions) if args.operation == "images" else None
+            rust_poster_bytes = check_video_poster(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session") if args.operation == "videos" else None
         finally:
             stop_server(rust)
 
@@ -238,8 +261,9 @@ def main():
             try:
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
-                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html", image_file)
+                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html", image_file, video_file)
                 camp_image_bytes = check_image_representation(output_dir / "campfire.html", camp_port, cookie, expected_image_dimensions) if args.operation == "images" else None
+                camp_poster_bytes = check_video_poster(output_dir / "campfire.html", camp_port, cookie) if args.operation == "videos" else None
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -253,16 +277,16 @@ def main():
         camp_identity = stream_avatar_identity(output_dir / "campfire.html")
         if rust_identity != camp_identity:
             raise RuntimeError(f"Avatar identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
-        if args.operation in {"messages", "attachments", "images"} and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
+        if args.operation in {"messages", "attachments", "images", "videos"} and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
             raise RuntimeError("Message IDs differ in paired stream samples")
-        if args.operation in {"messages", "attachments", "images"}:
+        if args.operation in {"messages", "attachments", "images", "videos"}:
             check_message_targets(output_dir / "rustfire.html")
             check_message_targets(output_dir / "campfire.html")
             rust_room_label = message_room_label(output_dir / "rustfire.html")
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
-        if args.operation in {"messages", "attachments", "images"}:
+        if args.operation in {"messages", "attachments", "images", "videos"}:
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
             if rust_tags != camp_tags:
@@ -290,6 +314,15 @@ def main():
             if rust_image_bytes[1] != camp_image_bytes[1]:
                 raise RuntimeError("Rendered PNG preview bytes differ from Campfire")
             print(f"image_representation_bytes rustfire={rust_image_bytes[0]} campfire={camp_image_bytes[0]} sha256_equal={rust_image_bytes[1] == camp_image_bytes[1]}")
+        if args.operation == "videos":
+            expected_filename = f"fanout-video-{run_id}-0.mp4"
+            for app in ("rustfire", "campfire"):
+                sample = (output_dir / f"{app}.html").read_text()
+                if expected_filename not in sample or "message__attachment" not in sample or "<video" not in sample:
+                    raise RuntimeError(f"{app} video stream lacks its player or actions")
+            if rust_poster_bytes[1] != camp_poster_bytes[1]:
+                raise RuntimeError("Rendered WebP poster bytes differ from Campfire")
+            print(f"video_poster_bytes rustfire={rust_poster_bytes[0]} campfire={camp_poster_bytes[0]} sha256_equal={rust_poster_bytes[1] == camp_poster_bytes[1]}")
         if args.operation == "boosts":
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
