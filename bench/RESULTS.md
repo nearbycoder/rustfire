@@ -308,3 +308,9 @@ The timed run fetched the cached, **byte-identical 74,720-byte** 512-pixel JPEG 
 | 32 | 12,411 | 5,174 | 6.373 ms | 9.822 ms |
 
 This is an exact-response comparison for one warm logo-read endpoint. It does not include uploads or variant generation in the measured interval. The load generator was local, CPU and memory use were not recorded, and the three-second runs do not establish a sustained capacity limit. Full-app speed and scale remain unproven while other routes and behavior differ.
+
+## Account administration route and roster behavior
+
+Rustfire's visible account forms now submit Campfire's nested account fields to `/account` with Rails-style `_method` values, and the visible user controls submit role changes and deletion to `/account/users/:id`. A browser check confirmed that changing the account name, toggling the room-creation restriction, selecting a JPEG logo, deleting it, and promoting a member all returned to `/account/edit` with updated controls and no detected browser errors.
+
+`bench/paired_account_users.py` compared the same actions with the pinned Campfire checkout on disposable databases. Both apps placed the administrator before the member with a divider inside `account_users`; promoting user 2 returned **302 to `/account/edit`** and saved role 1; an invalid role fell back to member; deletion returned **302 to `/account/edit`**, set status 1, removed the open-room membership, retained the direct-room membership, and returned **404** on a repeated delete. The surrounding account HTML and presentation still differ, and this check does not measure throughput.

@@ -390,6 +390,10 @@ def main():
             assert code == 200 and "Team Fire" in page
             roster = page.split("<turbo-frame id='account_users'>", 1)[1].split("</turbo-frame>", 1)[0]
             assert roster.index("<strong>Admin</strong>") < roster.index('<hr class="separator full-width">') < roster.index("<strong>Member Two</strong>")
+            assert "name='account[name]'" in page and "name='account[logo]'" in page
+            assert "name='account[settings][restrict_room_creation_to_administrators]'" in page
+            assert request(admin, base, "/account", {"_method": "patch", "account[name]": "Team Fire"}, method="POST")[0] == 200
+            assert request(admin, base, "/account", {"account[name]": "Wrong"}, method="POST")[0] == 405
             code, _, page = request(admin, base, "/account/custom_styles/edit")
             assert code == 200 and "Custom styles" in page
             code, _, _ = request(member, base, "/account/custom_styles", {"account[custom_styles]": "body{color:red}"})
@@ -420,29 +424,32 @@ def main():
                 assert res.status==200 and res.headers.get_content_type()=="image/png" and image[:8]==b"\x89PNG\r\n\x1a\n" and int.from_bytes(image[16:20],"big")==1
             code, _, _ = request(admin, base, "/account/logo/delete", {})
             assert code == 200
-            account_body=(b"--account-test\r\nContent-Disposition: form-data; name=\"account[name]\"\r\n\r\nTeam Fire\r\n"
+            account_body=(b"--account-test\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\npatch\r\n"
+                          b"--account-test\r\nContent-Disposition: form-data; name=\"account[name]\"\r\n\r\nTeam Fire\r\n"
                           b"--account-test\r\nContent-Disposition: form-data; name=\"account[settings][restrict_room_creation_to_administrators]\"\r\n\r\ntrue\r\n"
                           b"--account-test\r\nContent-Disposition: form-data; name=\"account[logo]\"; filename=\"logo.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--account-test--\r\n")
-            code, _, page = request(admin, base, "/account", data=account_body, method="PATCH", headers={"Content-Type":"multipart/form-data; boundary=account-test"})
-            assert code == 302
+            code, _, page = request(admin, base, "/account", data=account_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=account-test"})
+            assert code == 200
             assert "Team Fire" in request(admin,base,"/account/edit")[2]
             with sqlite3.connect(f"{tmp}/test.db") as db:
                 assert db.execute("SELECT restrict_room_creation FROM account_settings WHERE id=1").fetchone()[0] == 1
             with client().open(base+"/account/logo") as res:
                 image=res.read()
                 assert res.status==200 and int.from_bytes(image[16:20],"big")==1
-            assert request(admin,base,"/account/logo",method="DELETE")[0]==302
+            assert request(admin,base,"/account/logo",{"_method":"delete"},method="POST")[0]==200
             with client().open(base+"/account/logo") as res:
                 assert res.read()==stock
             assert request(admin,base,"/account/update",{"restrict_room_creation":"off"})[0]==200
+            assert request(member, base, "/account/users/1", {"user[role]": "member"}, method="PUT")[0] == 403
+            assert request(member, base, "/account/users/1", method="DELETE")[0] == 403
             code, _, _ = request(admin, base, "/account/users/1/role", {"role": "member"})
             assert code == 409
             code, _, _ = request(admin, base, "/account/users/2/role", {"role": "administrator"})
             assert code == 200
             code, _, _ = request(admin, base, "/account/users/2", {"user[role]": "member"}, method="PATCH")
-            assert code == 303
-            code, _, _ = request(admin, base, "/account/users/2", {"user[role]": "administrator"}, method="PATCH")
-            assert code == 303
+            assert code == 302
+            code, _, _ = request(admin, base, "/account/users/2", {"_method": "patch", "user[role]": "administrator"}, method="POST")
+            assert code == 200
             code, _, page = request(admin, base, "/account/join_code", {})
             assert code == 200 and f"/join/{join}" not in page
             code, _, _ = request(client(), base, f"/join/{join}")
@@ -736,7 +743,7 @@ def main():
                 assert check_db.execute("SELECT id,involvement FROM memberships WHERE room_id=? AND user_id=1", (converted_room,)).fetchone() == (original_membership, "everything")
                 check_db.execute("INSERT INTO searches(user_id,query,created_at) VALUES(2,'before deactivation','2026-01-01T00:00:00Z')")
                 check_db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,created_at,updated_at) VALUES(2,'https://example.com/deactivation','key','auth','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
-            code, _, _ = request(admin, base, "/account/users/2/deactivate", {})
+            code, _, _ = request(admin, base, "/account/users/2", {"_method": "delete"}, method="POST")
             assert code == 200
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT user_id FROM memberships WHERE room_id=? ORDER BY user_id", (retained_direct,)).fetchall() == [(1,), (2,)]

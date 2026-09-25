@@ -483,6 +483,14 @@ if (chat) {
   });
 }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker').catch(() => {});
+document.addEventListener('change',event=>{
+  const control=event.target;
+  if(control instanceof HTMLInputElement){
+    if(control.matches('form[data-auto-submit-file] input[type=file]')&&control.files?.length)control.form.requestSubmit();
+    if(control.matches('form[data-auto-submit-switch] input[type=checkbox]'))control.form.requestSubmit();
+  }
+  if(control instanceof HTMLSelectElement&&control.matches('form[data-auto-submit-role] select'))control.form.requestSubmit();
+});
 document.addEventListener('submit',async event=>{
   const form=event.target;
   if(!(form instanceof HTMLFormElement)||new URL(form.action).pathname!=='/session/logout'||!('serviceWorker' in navigator))return;

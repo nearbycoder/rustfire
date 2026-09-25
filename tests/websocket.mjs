@@ -217,7 +217,8 @@ try{
   await deactivationReady;
   const deactivatedClosed=new Promise(resolve=>deactivationSocket.once('close',resolve));
   const deactivate=await fetch(base+'/account/users/2',{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf},redirect:'manual'});
-  assert.equal(deactivate.status,303);
+  assert.equal(deactivate.status,302);
+  assert.equal(new URL(deactivate.headers.get('location'),base).pathname,'/account/edit');
   await Promise.race([deactivatedClosed,new Promise((_,reject)=>setTimeout(()=>reject(new Error('deactivated user socket remained open')),3000))]);
   for(let i=0;i<80&&pingCount===0;i++)await new Promise(r=>setTimeout(r,50));
   assert(pingCount>0,'ActionCable heartbeat delivered');

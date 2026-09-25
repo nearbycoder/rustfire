@@ -4655,11 +4655,25 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
             continue;
         }
         let controls = if is_admin(&u) && status == 0 {
-            format!(
-                "<form class='inline-form' method='post' action='/account/users/{id}/role'><select name='role'><option value='member' {}>Member</option><option value='administrator' {}>Administrator</option></select><button>Save</button></form><form class='inline-form' method='post' action='/account/users/{id}/deactivate'><button class='danger'>Deactivate</button></form>",
-                if role == 0 { "selected" } else { "" },
-                if role == 1 { "selected" } else { "" }
-            )
+            let role_control = if id == u.id {
+                "<span aria-label='Role: Administrator'>Administrator</span>".to_string()
+            } else {
+                format!(
+                    "<form class='inline-form' method='post' action='/account/users/{id}' data-auto-submit-role><input type='hidden' name='_method' value='patch'><select name='user[role]' aria-label='Role for {}'><option value='member' {}>Member</option><option value='administrator' {}>Administrator</option></select><button>Save</button></form>",
+                    esc(&n),
+                    if role == 0 { "selected" } else { "" },
+                    if role == 1 { "selected" } else { "" }
+                )
+            };
+            let deactivate_control = if id == u.id {
+                "<a href='/users/me/profile'>My settings</a>".to_string()
+            } else {
+                format!(
+                    "<form class='inline-form' method='post' action='/account/users/{id}'><input type='hidden' name='_method' value='delete'><button class='danger' aria-label='Delete {}'>Delete</button></form>",
+                    esc(&n)
+                )
+            };
+            format!("{role_control}{deactivate_control}")
         } else {
             String::new()
         };
@@ -4696,9 +4710,21 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let has_logo: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
     let account_controls = if is_admin(&u) {
+        let delete_logo = if has_logo {
+            "<form method='post' action='/account/logo'><input type='hidden' name='_method' value='delete'><button class='danger' aria-label='Delete logo'>Delete logo</button></form>"
+        } else {
+            ""
+        };
         format!(
-            "<form method='post' action='/account/update'><label>Account name<input name='name' value='{}' required></label><input type='hidden' name='restrict_room_creation' value='off'><label class='check'><input type='checkbox' name='restrict_room_creation' value='on' {}>Only administrators can create rooms</label><button class='button'>Save</button></form><p><a href='/account/custom_styles/edit'>Custom styles</a></p><form method='post' action='/account/logo' enctype='multipart/form-data'><label>Account logo<input type='file' name='logo' accept='image/png,image/jpeg,image/gif,image/webp,image/avif' required></label><button>Upload logo</button></form><form method='post' action='/account/logo/delete'><button>Remove logo</button></form><form method='post' action='/account/join_code'><button>Generate a new invite link</button></form>",
+            "<div class='account-logo-controls'><form method='post' action='/account' enctype='multipart/form-data' data-auto-submit-file><input type='hidden' name='_method' value='patch'><label>Upload logo<img src='/account/logo?size=small' alt='Account logo' width='96' height='96'><input type='file' name='account[logo]' accept='image/*'></label><button class='button'>Upload logo</button></form>{delete_logo}</div><form method='post' action='/account'><input type='hidden' name='_method' value='patch'><label>Account name<input name='account[name]' value='{}' required></label><button class='button'>Save changes</button></form><form method='post' action='/account' data-auto-submit-switch><input type='hidden' name='_method' value='put'><input type='hidden' name='account[settings][restrict_room_creation_to_administrators]' value='false'><label class='check'><input type='checkbox' name='account[settings][restrict_room_creation_to_administrators]' value='true' {}>Must be admin to create new rooms</label><button class='button'>Save setting</button></form><p><a href='/account/custom_styles/edit'>Custom styles</a></p><form method='post' action='/account/join_code'><button>Generate a new invite link</button></form>",
             esc(&name),
             if restricted { "checked" } else { "" }
         )
@@ -4726,6 +4752,7 @@ async fn account_update(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let tunneled_post = req.method() == Method::POST && req.uri().path() == "/account";
     let mut logo = None;
     let f = if headers
         .get(header::CONTENT_TYPE)
@@ -4759,6 +4786,7 @@ async fn account_update(
                 field_name.as_str(),
                 "name"
                     | "account[name]"
+                    | "_method"
                     | "restrict_room_creation"
                     | "account[settings][restrict_room_creation_to_administrators]"
             ) {
@@ -4775,6 +4803,9 @@ async fn account_update(
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         fields(&raw).0
     };
+    if tunneled_post && !matches!(f.get("_method").map(String::as_str), Some("patch" | "put")) {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
     let name = form_value(&f, "name", "account[name]");
     let restricted = form_value(
         &f,
@@ -5040,15 +5071,28 @@ fn remove_logo_files(stored: &str) {
         let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-{size}.png")));
     }
 }
-async fn logo_post(
-    State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
-    mut multipart: Multipart,
-) -> AppResult {
+async fn logo_post(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Request) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .starts_with("application/x-www-form-urlencoded")
+    {
+        let RawForm(raw) = RawForm::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        if fields(&raw).0.get("_method").map(String::as_str) == Some("delete") {
+            return logo_delete(State(s), headers).await;
+        }
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let mut multipart = Multipart::from_request(req, &s)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut upload = None;
     while let Some(field) = multipart
         .next_field()
@@ -5134,10 +5178,9 @@ async fn user_role_update(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let role = match form_value(&f, "role", "user[role]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)? {
-        "member" => 0,
+    let role = match form_value(&f, "role", "user[role]").ok_or(StatusCode::BAD_REQUEST)? {
         "administrator" => 1,
-        _ => return Err(StatusCode::UNPROCESSABLE_ENTITY),
+        _ => 0,
     };
     let db = pool(&s)?;
     let prior: Option<i64> = db
@@ -5166,7 +5209,19 @@ async fn user_role_update(
         params![role, now(), id],
     )
     .map_err(db_err)?;
-    Ok(Redirect::to("/account").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/edit")))
+}
+async fn user_admin_post(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<HashMap<String, String>>,
+) -> AppResult {
+    match f.get("_method").map(String::as_str) {
+        Some("patch" | "put") => user_role_update(State(s), headers, Path(id), Form(f)).await,
+        Some("delete") => user_deactivate(State(s), headers, Path(id)).await,
+        _ => Err(StatusCode::METHOD_NOT_ALLOWED),
+    }
 }
 async fn user_deactivate(
     State(s): State<Arc<AppState>>,
@@ -5228,7 +5283,7 @@ async fn user_deactivate(
     s.has_push_subscriptions
         .store(has_push_subscriptions, Ordering::Relaxed);
     let _ = s.revoked_users.send(id);
-    Ok(Redirect::to("/account").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn join_get(State(s): State<Arc<AppState>>, Path(code): Path<String>) -> AppResult {
     let db = pool(&s)?;
@@ -7534,7 +7589,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/searches/clear", post(search_clear).delete(search_clear))
         .route(
             "/account",
-            get(account_get).patch(account_update).put(account_update),
+            get(account_get)
+                .post(account_update)
+                .patch(account_update)
+                .put(account_update),
         )
         .route("/account/edit", get(account_get))
         .route("/account/update", post(account_update))
@@ -7553,7 +7611,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/users", get(account_get))
         .route(
             "/account/users/{id}",
-            patch(user_role_update)
+            post(user_admin_post)
+                .patch(user_role_update)
                 .put(user_role_update)
                 .delete(user_deactivate),
         )
