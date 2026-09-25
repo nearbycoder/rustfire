@@ -3079,7 +3079,7 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
     let user_gid = URL_SAFE_NO_PAD.encode(format!("gid://campfire/User/{}", u.id));
     let user_token = turbo_stream_token(stream_key, &format!("{user_gid}:rooms")).map_err(db_err)?;
     let mut html = format!(
-        "<aside class='sidebar'><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/assets/menu-5462dfd3.svg' alt=''></button><div class='sidebar-main'><div class='sidebar-directs'><a class='direct-new' href='/rooms/directs/new' aria-label='New ping'><span class='direct-new-icon'><img src='/static/assets/messages-add-d229e6c2.svg' alt=''></span><span>Ping</span></a><nav id='direct_rooms'>",
+        "<aside class='sidebar'><turbo-frame data-turbo-permanent=\"true\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-action=\"presence:present@window->rooms-list#read read-rooms:read->rooms-list#read turbo:frame-load->rooms-list#loaded refresh-room:visible@window->turbo-frame#reload\" id=\"user_sidebar\" target=\"_top\">\n  <turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{}\"></turbo-cable-stream-source>\n  <turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{}\"></turbo-cable-stream-source>\n\n  <div class=\"sidebar__container overflow-y overflow-hide-scrollbar\" data-controller=\"badge-dot\" data-badge-dot-unread-class=\"unread\" data-action=\"rooms-list:unread@window->badge-dot#update rooms-list:read@window->badge-dot#update turbo:submit-start->turbo-frame#unpermanize\"><turbo-frame id=\"direct_rooms_control\" target=\"_top\"><div class=\"directs gap overflow-x overflow-hide-scrollbar\"><a class=\"direct direct__new\" data-turbo-frame=\"_self\" href=\"/rooms/directs/new\"><span class=\"avatar avatar--icon\"><img aria-hidden=\"true\" class=\"colorize--black\" src=\"/assets/messages-add-d229e6c2.svg\" width=\"20\" height=\"20\" /></span><span class=\"direct__author flex max-width min-width border-radius pad-inline-half\"><span class=\"for-screen-reader\">New</span><span class=\"txt-small overflow-clip\">Ping</span></span></a><div id=\"direct_rooms\" contents data-controller=\"sorted-list\" data-action=\"rooms-list:unread@window->sorted-list#updateItem\">",
         esc(&shared_token), esc(&user_token)
     );
     for r in rooms.iter().filter(|r| r.kind == "Rooms::Direct") {
@@ -3092,7 +3092,7 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
             unread.contains(&r.id),
         )?);
     }
-    html.push_str("</nav><div id='direct-placeholders' class='direct-placeholders' aria-label='People you can ping'>");
+    html.push_str("</div><div contents>");
     let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
     for member in placeholders {
         let first_name = member.name.split_whitespace().next().unwrap_or(&member.name);
@@ -3105,15 +3105,16 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
             esc(u.csrf_token.as_deref().unwrap_or("")),
         ));
     }
-    html.push_str("</div></div><div class='sidebar-rooms'><nav id='shared_rooms'>");
+    html.push_str("</div></div></turbo-frame><div class='rooms position-relative flex flex-column gap'><div id='shared_rooms' contents data-controller='sorted-list'>");
     for r in rooms.iter().filter(|r| r.kind != "Rooms::Direct") {
         html.push_str(&sidebar_room_link(r, active, unread.contains(&r.id)));
     }
-    html.push_str("</nav>");
+    html.push_str("</div>");
     if is_admin(u) || !restricted {
-        html.push_str("<a class='sidebar-new-room' href='/rooms/opens/new' title='New room' aria-label='New room'><img src='/static/assets/add-f232d8a6.svg' alt=''></a>");
+        html.push_str("<a class=\"rooms__new-btn btn room align-center gap txt-reversed\" aria-label=\"New Chat Room\" href=\"/rooms/opens/new\"><img aria-hidden=\"true\" src=\"/assets/add-f232d8a6.svg\" width=\"20\" height=\"20\" style=\"view-transition-name: new-room\" /></a>");
     }
-    html.push_str(&format!("</div></div><div class='sidebar-tools'><a class='sidebar-user' href='/users/me/profile' aria-label='My settings'><img src='/users/{}/avatar' alt=''></a><a class='sidebar-settings' href='/account/edit' aria-label='Account settings'><img src='/static/assets/settings-aee56972.svg' alt=''></a></div></aside>", u.id));
+    let current_avatar = avatar_path(avatar_key, u.id, &u.updated_at)?;
+    html.push_str(&format!("</div><button class=\"btn sidebar__toggle\" data-action=\"toggle-class#toggle\"><img aria-hidden=\"true\" src=\"/assets/menu-5462dfd3.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Open menu</span></button></div><div class=\"flex align-end sidebar__tools gap justify-end\"><a class=\"btn avatar flex-item-no-shrink sidebar__tool\" href=\"/users/me/profile\"><img aria-hidden=\"true\" src=\"{}\" width=\"48\" height=\"48\" style=\"view-transition-name: avatar-{}\" /><span class=\"for-screen-reader\">My Settings</span></a><a class=\"btn align-center gap txt-reversed sidebar__tool\" href=\"/account/edit\"><img aria-hidden=\"true\" src=\"/assets/settings-aee56972.svg\" width=\"20\" height=\"20\" style=\"view-transition-name: account-settings\" /><span class=\"for-screen-reader\">Account Settings</span></a></div></turbo-frame></aside>", current_avatar, u.id));
     Ok(html)
 }
 fn message_list(

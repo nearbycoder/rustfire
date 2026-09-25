@@ -14,6 +14,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.parse
+from html.parser import HTMLParser
 
 from direct_lookup import ROOT, free_port, start_server, stop_server
 from paired_banned_content import REPOSITORY, RUBY, BUNDLE, REVISION, isolated_campfire, start_redis
@@ -101,6 +102,47 @@ def normalized_placeholders(groups):
     return [[re.sub(r'(name="authenticity_token" value=")[^"]+', r'\1<csrf>', fragment) for fragment in group] for group in groups]
 
 
+class SidebarTree(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.active = False
+        self.depth = 0
+        self.events = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if not self.active:
+            if tag != "turbo-frame" or values.get("id") != "user_sidebar":
+                return
+            self.active = True
+            self.depth = 1
+        elif tag not in ("img", "input", "link", "meta", "br", "hr", "source"):
+            self.depth += 1
+        if values.get("name") == "authenticity_token":
+            values["value"] = "<csrf>"
+        if "data-sorted-list-number" in values:
+            values["data-sorted-list-number"] = "<epoch-ms>"
+        self.events.append(("start", tag, tuple(sorted(values.items()))))
+
+    def handle_endtag(self, tag):
+        if self.active and tag not in ("img", "input", "link", "meta", "br", "hr", "source"):
+            self.events.append(("end", tag))
+            self.depth -= 1
+            if self.depth == 0:
+                self.active = False
+
+    def handle_data(self, value):
+        if self.active and value.strip():
+            self.events.append(("text", " ".join(value.split())))
+
+
+def sidebar_tree(page):
+    parser = SidebarTree()
+    parser.feed(page)
+    assert parser.events and parser.depth == 0, "User sidebar frame missing or unclosed"
+    return parser.events
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample-dir", type=pathlib.Path)
@@ -118,6 +160,7 @@ def main():
         env["SECRET_KEY_BASE"] = SECRET
         with sqlite3.connect(camp_db) as db:
             db.execute("UPDATE users SET name='User '||id,created_at='2026-01-01 00:00:00.000000',updated_at='2026-01-01 00:00:00.000000' WHERE id IN (1,2)")
+            db.execute("UPDATE rooms SET name='Campfire' WHERE id=1")
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
@@ -159,7 +202,9 @@ def main():
         assert [len(group) for group in rust_placeholder_html] == rust_placeholders
         assert [len(group) for group in camp_placeholder_html] == camp_placeholders
         assert normalized_placeholders(rust_placeholder_html) == normalized_placeholders(camp_placeholder_html), "Direct placeholder markup differs; use --sample-dir to inspect"
-        print("PASS paired direct links, Turbo events, and 80 shortcut forms; only room epoch milliseconds and form CSRF tokens normalized")
+        for index, (rust_sidebar, camp_sidebar) in enumerate(zip(rust_sidebars, camp_sidebars)):
+            assert sidebar_tree(rust_sidebar) == sidebar_tree(camp_sidebar), f"Sidebar frame differs after {index} direct rooms; use --sample-dir to inspect"
+        print("PASS paired direct links, Turbo events, 80 shortcut forms, and five sidebar frames; only room epoch milliseconds and form CSRF tokens normalized")
 
 
 if __name__ == "__main__":

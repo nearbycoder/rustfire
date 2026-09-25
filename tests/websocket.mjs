@@ -54,7 +54,7 @@ try{
   const heartbeatIdentifier=JSON.stringify({channel:'HeartbeatChannel'});
   sendCommand({command:'subscribe',identifier:heartbeatIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
-  const listSources=[...roomHtml.matchAll(/<turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='([^']+)'/g)].map(match=>match[1]);
+  const listSources=[...roomHtml.matchAll(/<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="([^"]+)"/g)].map(match=>match[1]);
   assert.equal(listSources.length,2);
   const globalListIdentifier=JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:listSources[0]});
   const userListIdentifier=JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:listSources[1]});

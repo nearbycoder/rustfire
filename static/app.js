@@ -354,7 +354,7 @@ if (chat) {
     socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});
   }
   connect();
-  document.addEventListener('click',event=>{if(event.target.closest('[data-toggle-sidebar]'))document.querySelector('.sidebar')?.classList.toggle('open')});
+  document.addEventListener('click',event=>{if(event.target.closest('[data-toggle-sidebar], .sidebar__toggle'))document.querySelector('.sidebar')?.classList.toggle('open')});
   const composer=document.getElementById('composer');
   async function restoreMessage(article){
     const response=await fetch(`/rooms/${roomId}/messages/${article.dataset.messageId}`,{headers:{'X-Rustfire-Fragment':'1'}});
