@@ -179,8 +179,14 @@ def main():
             assert code == 200 and len(json.loads(payload)) == 2
             code, _, page = request(admin, base, "/searches?q=hello")
             assert code == 200 and "hello from smoke" in page
+            code, _, page = request(admin, base, "/searches?q=smoking")
+            assert code == 200 and "hello from smoke" in page
             code, _, page = request(admin, base, "/searches", {"q": "hello"})
             assert code == 200 and "Recent searches" in page
+            for index in range(11):
+                assert request(admin, base, "/searches", {"q": f"history-{index}"})[0] == 200
+            with sqlite3.connect(f"{tmp}/test.db") as search_db:
+                assert search_db.execute("SELECT count(*) FROM searches WHERE user_id=1").fetchone() == (10,)
             code, _, page = request(admin, base, "/searches/clear", {})
             assert code == 200 and "href='/searches?q=hello'" not in page
             refresh_since = int(time.time() * 1000)

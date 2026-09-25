@@ -4836,8 +4836,8 @@ async fn search_get(
         .join(" ");
     if !terms.is_empty() {
         let db = pool(&s)?;
-        let mut stmt=db.prepare("SELECT m.id,m.room_id,u.name,m.body,m.created_at FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN users u ON u.id=m.creator_id JOIN memberships mem ON mem.room_id=m.room_id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.id DESC LIMIT 100").map_err(db_err)?;
-        let rows = stmt
+        let mut stmt=db.prepare("SELECT m.id,m.room_id,u.name,m.body,m.created_at FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN users u ON u.id=m.creator_id JOIN memberships mem ON mem.room_id=m.room_id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100").map_err(db_err)?;
+        let mut rows = stmt
             .query_map(params![u.id, terms], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -4850,13 +4850,14 @@ async fn search_get(
             .map_err(db_err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_err)?;
+        rows.reverse();
         for (id, rid, name, body, date) in rows {
             results.push_str(&format!("<a class='search-result' href='/rooms/{rid}/@{id}'><strong>{}</strong><time>{}</time><p>{}</p></a>",esc(&name),esc(&date),esc(&body)));
         }
     }
     let db = pool(&s)?;
     let mut recent_query = db
-        .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY created_at DESC LIMIT 10")
+        .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT 10")
         .map_err(db_err)?;
     let recent = recent_query
         .query_map([u.id], |r| r.get::<_, String>(0))
@@ -4894,7 +4895,11 @@ async fn search_post(
     if query.is_empty() {
         return Ok(Redirect::to("/searches").into_response());
     }
-    pool(&s)?.execute("INSERT INTO searches(user_id,query,created_at) VALUES(?1,?2,?3) ON CONFLICT(user_id,query) DO UPDATE SET created_at=excluded.created_at",params![u.id,query,now()]).map_err(db_err)?;
+    let mut db = pool(&s)?;
+    let tx = db.transaction().map_err(db_err)?;
+    tx.execute("INSERT INTO searches(user_id,query,created_at) VALUES(?1,?2,?3) ON CONFLICT(user_id,query) DO UPDATE SET created_at=excluded.created_at",params![u.id,query,now()]).map_err(db_err)?;
+    tx.execute("DELETE FROM searches WHERE user_id=?1 AND id NOT IN (SELECT id FROM searches WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT 10)", [u.id]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
     let encoded = form_urlencoded::Serializer::new(String::new())
         .append_pair("q", &query)
         .finish();
@@ -7926,7 +7931,9 @@ async fn service_worker() -> Response {
 }
 fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = db.get()?;
-    let fts_exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_search_index')",[],|r|r.get(0))?;
+    let fts_definition: Option<String> = conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='message_search_index'", [], |r| r.get(0)).optional()?;
+    let fts_exists = fts_definition.is_some();
+    let fts_needs_rebuild = fts_definition.is_some_and(|sql| !sql.contains("tokenize=porter"));
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_settings(id INTEGER PRIMARY KEY CHECK(id=1),restrict_room_creation INTEGER NOT NULL DEFAULT 0);
@@ -7961,7 +7968,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS searches(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,query TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(user_id,query));
         CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id,id);CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id,created_at,id);CREATE INDEX IF NOT EXISTS idx_messages_room_updated ON messages(room_id,updated_at,id);CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);CREATE INDEX IF NOT EXISTS idx_boosts_message ON boosts(message_id);
-        CREATE VIRTUAL TABLE IF NOT EXISTS message_search_index USING fts5(body);
+        CREATE VIRTUAL TABLE IF NOT EXISTS message_search_index USING fts5(body, tokenize=porter);
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
@@ -8093,7 +8100,19 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     }
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_created_ns ON messages(room_id,created_at_ns,id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_updated_ns ON messages(room_id,updated_at_ns,id)", [])?;
-    if !fts_exists {
+    if fts_needs_rebuild {
+        let transaction = conn.transaction()?;
+        transaction.execute_batch("DROP TRIGGER message_fts_insert;
+            DROP TRIGGER message_fts_update;
+            DROP TRIGGER message_fts_delete;
+            DROP TABLE message_search_index;
+            CREATE VIRTUAL TABLE message_search_index USING fts5(body, tokenize=porter);
+            CREATE TRIGGER message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
+            CREATE TRIGGER message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
+            CREATE TRIGGER message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;
+            INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages;")?;
+        transaction.commit()?;
+    } else if !fts_exists {
         conn.execute(
             "INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages",
             [],
@@ -8435,6 +8454,39 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn search_index_migrates_to_campfire_porter_tokenizer() {
+        let db = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .unwrap();
+        super::init_db(&db).unwrap();
+        {
+            let conn = db.get().unwrap();
+            conn.execute_batch("INSERT INTO users(id,name,created_at,updated_at) VALUES(1,'Test','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(1,'Test','Rooms::Open',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(1,1,1,'My hovercraft is full of eels','first','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                DROP TRIGGER message_fts_insert; DROP TRIGGER message_fts_update; DROP TRIGGER message_fts_delete;
+                DROP TABLE message_search_index;
+                CREATE VIRTUAL TABLE message_search_index USING fts5(body);
+                CREATE TRIGGER message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
+                CREATE TRIGGER message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
+                CREATE TRIGGER message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;
+                INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages;")
+                .unwrap();
+            let before: i64 = conn.query_row("SELECT count(*) FROM message_search_index WHERE body MATCH 'eel'", [], |r| r.get(0)).unwrap();
+            assert_eq!(before, 0);
+        }
+        super::init_db(&db).unwrap();
+        let conn = db.get().unwrap();
+        let matched: i64 = conn.query_row("SELECT count(*) FROM message_search_index WHERE body MATCH 'eel'", [], |r| r.get(0)).unwrap();
+        assert_eq!(matched, 1);
+        conn.execute("UPDATE messages SET body='My hovercraft is full of sharks' WHERE id=1", []).unwrap();
+        let former: i64 = conn.query_row("SELECT count(*) FROM message_search_index WHERE body MATCH 'eel'", [], |r| r.get(0)).unwrap();
+        let current: i64 = conn.query_row("SELECT count(*) FROM message_search_index WHERE body MATCH 'shark'", [], |r| r.get(0)).unwrap();
+        assert_eq!((former, current), (0, 1));
+    }
 
     #[test]
     fn emoji_only_matches_campfire_message_classes() {
