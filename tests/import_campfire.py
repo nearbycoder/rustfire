@@ -21,6 +21,29 @@ import urllib.request
 SOURCE = Path(os.environ.get("CAMPFIRE_TEST_DB", "/tmp/once-campfire-reference/storage/db/production.sqlite3"))
 
 
+def minimal_pdf():
+    parts = [b"%PDF-1.4\n"]
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 4 0 R /Resources << >> >>",
+        b"<< /Length 0 >>\nstream\n\nendstream",
+    ]
+    offsets = []
+    for index, value in enumerate(objects, 1):
+        offsets.append(sum(map(len, parts)))
+        parts.append(f"{index} 0 obj\n".encode() + value + b"\nendobj\n")
+    xref = sum(map(len, parts))
+    parts.append(b"xref\n0 5\n0000000000 65535 f \n" + b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets))
+    parts.append(f"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return b"".join(parts)
+
+
+def variation_data(url):
+    encoded = url.split("/")[6].split("--")[0]
+    return json.loads(base64.b64decode(encoded))["_rails"]["data"]
+
+
 def main():
     if not SOURCE.exists():
         raise SystemExit(f"pinned Campfire test database missing: {SOURCE}")
@@ -41,7 +64,7 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
-            for mid in (1, 2, 3, 4, 5):
+            for mid in (1, 2, 3, 4, 5, 6, 7):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(1,'Message',1,'body',?,?,?)", (source_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
@@ -58,7 +81,7 @@ def main():
             blob_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/10?expires_in","pur":"attachable"}}'
             blob_encoded = base64.urlsafe_b64encode(blob_payload).decode()
             blob_sgid = f"{blob_encoded}--{hmac.new(signing_key, blob_encoded.encode(), hashlib.sha1).hexdigest()}"
-            inline_body = f'<div>Before <action-text-attachment sgid="{blob_sgid}" content-type="text/plain" filename="inline.txt" filesize="20"></action-text-attachment> after</div>'
+            inline_body = f'<div>Before <action-text-attachment sgid="{blob_sgid}" content-type="text/plain" filename="inline.txt" filesize="1234"></action-text-attachment> after</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(3,'Message',4,'body',?,?,?)", (inline_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(4,?)", ("Before [inline.txt] after",))
             image_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/11?expires_in","pur":"attachable"}}'
@@ -67,10 +90,22 @@ def main():
             image_body = f'<div>Picture <action-text-attachment sgid="{image_sgid}" content-type="image/png" filename="pixel.png" filesize="68" width="1" height="1" previewable="true"></action-text-attachment> end</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(4,'Message',5,'body',?,?,?)", (image_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(5,?)", ("Picture [pixel.png] end",))
+            pdf_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/12?expires_in","pur":"attachable"}}'
+            pdf_encoded = base64.urlsafe_b64encode(pdf_payload).decode()
+            pdf_sgid = f"{pdf_encoded}--{hmac.new(signing_key, pdf_encoded.encode(), hashlib.sha1).hexdigest()}"
+            pdf_body = f'<div>Document <action-text-attachment sgid="{pdf_sgid}" content-type="application/pdf" filename="page.pdf"></action-text-attachment> end</div>'
+            fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(5,'Message',6,'body',?,?,?)", (pdf_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(6,?)", ("Document [page.pdf] end",))
+            video_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/13?expires_in","pur":"attachable"}}'
+            video_encoded = base64.urlsafe_b64encode(video_payload).decode()
+            video_sgid = f"{video_encoded}--{hmac.new(signing_key, video_encoded.encode(), hashlib.sha1).hexdigest()}"
+            video_body = f'<div>Clip <action-text-attachment sgid="{video_sgid}" content-type="video/mp4" filename="clip.mp4" width="16" height="16" previewable="true"></action-text-attachment> end</div>'
+            fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(6,'Message',7,'body',?,?,?)", (video_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(7,?)", ("Clip [clip.mp4] end",))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
-            file_bytes = b"imported file bytes\n"
+            file_bytes = b"x" * 1234
             key = "abcdef1234567890"
             path = source_files / key[:2] / key[2:4] / key
             path.parent.mkdir(parents=True)
@@ -96,6 +131,27 @@ def main():
                 VALUES(11,?,'pixel.png','image/png',?,'local',?,'2026-01-01 00:00:00')""", (image_key, json.dumps({"width": 1, "height": 1, "identified": True}), len(image_bytes)))
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                 VALUES(11,'embeds','ActionText::RichText',4,11,'2026-01-01 00:00:00')""")
+            pdf_bytes = minimal_pdf()
+            pdf_key = "ab12cdef1234567890"
+            pdf_file = source_files / pdf_key[:2] / pdf_key[2:4] / pdf_key
+            pdf_file.parent.mkdir(parents=True, exist_ok=True)
+            pdf_file.write_bytes(pdf_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(12,?,'page.pdf','application/pdf','{}','local',?,'2026-01-01 00:00:00')""", (pdf_key, len(pdf_bytes)))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(12,'embeds','ActionText::RichText',5,12,'2026-01-01 00:00:00')""")
+            video_key = "ab13cdef1234567890"
+            video_file = source_files / video_key[:2] / video_key[2:4] / video_key
+            video_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory() as video_temp:
+                generated = Path(video_temp) / "clip.mp4"
+                subprocess.run(("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=1", "-t", "1", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-y", str(generated)), capture_output=True, check=True)
+                video_bytes = generated.read_bytes()
+            video_file.write_bytes(video_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(13,?,'clip.mp4','video/mp4',?,'local',?,'2026-01-01 00:00:00')""", (video_key, json.dumps({"width": 16, "height": 16, "identified": True}), len(video_bytes)))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(13,'embeds','ActionText::RichText',6,13,'2026-01-01 00:00:00')""")
             for blob_id, record_type, record_id, name in ((8, "User", 1, "avatar"), (9, "Account", 1, "logo")):
                 media_key = f"ab{blob_id}cdef1234567890"
                 media_file = source_files / media_key[:2] / media_key[2:4] / media_key
@@ -118,7 +174,7 @@ def main():
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
-        assert result["messages"] == 5 and result["attachments"] == 1 and result["inline_embeds"] == 2, result
+        assert result["messages"] == 7 and result["attachments"] == 1 and result["inline_embeds"] == 4, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -131,18 +187,39 @@ def main():
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
             assert "@Rustfire Compare" in imported.execute("SELECT body_html FROM messages WHERE id=3").fetchone()[0]
             inline_html = imported.execute("SELECT body_html FROM messages WHERE id=4").fetchone()[0]
-            assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html, inline_html
+            assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html and "1.21 KB" in inline_html, inline_html
             inline_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=10").fetchone()[0]
             assert (target_uploads / inline_stored).read_bytes() == file_bytes
             image_html = imported.execute("SELECT body_html FROM messages WHERE id=5").fetchone()[0]
             assert "attachment--preview attachment--png" in image_html and 'width="1"' in image_html and 'height="1"' in image_html, image_html
             image_url = re.search(r'<img src="([^"]+)"', image_html)
             assert image_url and "/rails/active_storage/representations/redirect/" in image_url.group(1), image_html
+            assert variation_data(image_url.group(1)) == {"format": "png", "resize_to_limit": [1024, 768]}
             image_stored = imported.execute("SELECT stored_name,width,height FROM inline_blobs WHERE id=11").fetchone()
             assert image_stored[1:] == (1, 1) and (target_uploads / image_stored[0]).read_bytes() == image_bytes
             image_variant = target_uploads / "variants" / f"{image_stored[0]}-inline.png"
             assert image_variant.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
             image_variant.unlink()
+            pdf_html = imported.execute("SELECT body_html FROM messages WHERE id=6").fetchone()[0]
+            assert "attachment--preview attachment--pdf" in pdf_html, pdf_html
+            pdf_url = re.search(r'<img src="([^"]+)"', pdf_html)
+            assert pdf_url and "/rails/active_storage/representations/redirect/" in pdf_url.group(1), pdf_html
+            assert variation_data(pdf_url.group(1)) == {"resize_to_limit": [1024, 768]}
+            pdf_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=12").fetchone()[0]
+            assert (target_uploads / pdf_stored).read_bytes() == pdf_bytes
+            pdf_variant = target_uploads / "variants" / f"{pdf_stored}-inline-pdf.png"
+            assert pdf_variant.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            pdf_variant.unlink()
+            video_html = imported.execute("SELECT body_html FROM messages WHERE id=7").fetchone()[0]
+            assert "attachment--preview attachment--mp4" in video_html and 'width="16"' in video_html, video_html
+            video_url = re.search(r'<img src="([^"]+)"', video_html)
+            assert video_url and "/rails/active_storage/representations/redirect/" in video_url.group(1), video_html
+            assert variation_data(video_url.group(1)) == {"resize_to_limit": [1024, 768]}
+            video_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=13").fetchone()[0]
+            assert (target_uploads / video_stored).read_bytes() == video_bytes
+            video_variant = target_uploads / "variants" / f"{video_stored}-inline-video.jpeg"
+            assert video_variant.read_bytes().startswith(b"\xff\xd8")
+            video_variant.unlink()
             assert imported.execute("SELECT id FROM attachments WHERE message_id=2").fetchone() == (7,)
             stored = imported.execute("SELECT stored_name FROM attachments WHERE id=7").fetchone()[0]
             assert (target_uploads / stored).read_bytes() == file_bytes
@@ -197,11 +274,27 @@ def main():
                 assert response.status == 200 and response.headers["Content-Type"] == "image/png"
                 assert response.read().startswith(b"\x89PNG\r\n\x1a\n")
             assert image_variant.is_file()
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{pdf_url.group(1)}", timeout=10) as response:
+                assert response.status == 200 and response.headers["Content-Type"] == "image/png"
+                assert response.read().startswith(b"\x89PNG\r\n\x1a\n")
+            assert pdf_variant.is_file()
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{video_url.group(1)}", timeout=10) as response:
+                assert response.status == 200 and response.headers["Content-Type"] == "image/jpeg"
+                assert response.read().startswith(b"\xff\xd8")
+            assert video_variant.is_file()
+            delete_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5/delete", data=b"",
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/vnd.turbo-stream.html"})
+            with urllib.request.urlopen(delete_image, timeout=2) as response:
+                assert response.status == 200
+            with sqlite3.connect(target_db) as cleaned:
+                assert cleaned.execute("SELECT count(*) FROM inline_blobs WHERE id=11").fetchone() == (0,)
+                assert cleaned.execute("SELECT count(*) FROM inline_blobs WHERE id IN (10,12,13)").fetchone() == (3,)
+            assert not (target_uploads / image_stored[0]).exists() and not image_variant.exists()
         finally:
             server.terminate()
             server.wait(timeout=5)
         with sqlite3.connect(source_db) as fixture:
-            fixture.execute("UPDATE active_storage_blobs SET content_type='video/mp4' WHERE id=10")
+            fixture.execute("UPDATE active_storage_blobs SET content_type='video/x-unsupported' WHERE id=10")
         bad_target = root / "must-not-exist.sqlite3"
         bad_uploads = root / "must-not-exist-uploads"
         bad_command = command.copy()
@@ -214,7 +307,7 @@ def main():
             fixture.execute("UPDATE active_storage_blobs SET metadata=? WHERE id=11", (json.dumps({"width": 2, "height": 1, "identified": True}),))
         invalid_image = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
         assert invalid_image.returncode != 0 and not bad_target.exists() and not bad_uploads.exists()
-        print("PASS Campfire account, users, room, rich messages and inline files/images, preview URL, search text, boost, session, push key, avatar, and logo import; unsupported previews fail safely")
+        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, preview URLs, search text, boost, session, push key, avatar, and logo import; unsupported previews fail safely")
 
 
 if __name__ == "__main__":

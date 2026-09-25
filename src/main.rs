@@ -925,6 +925,44 @@ fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Pa
     }
     published
 }
+fn generate_inline_pdf_variant(input: &std::path::Path, output: &std::path::Path) -> bool {
+    let Some(parent) = output.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let prefix = parent.join(format!("pdf-{}", Uuid::new_v4()));
+    let frame = prefix.with_extension("png");
+    let rendered = std::process::Command::new("pdftoppm")
+        .args(["-f", "1", "-singlefile", "-cropbox", "-r", "72", "-png"])
+        .arg(input)
+        .arg(&prefix)
+        .output()
+        .is_ok_and(|result| result.status.success());
+    let published = rendered && generate_inline_image_variant(&frame, output);
+    let _ = std::fs::remove_file(frame);
+    published
+}
+fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Path) -> bool {
+    let Some(parent) = output.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let frame = parent.join(format!("video-{}.jpg", Uuid::new_v4()));
+    let rendered = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(input)
+        .args(["-y", "-vframes", "1", "-f", "image2"])
+        .arg(&frame)
+        .output()
+        .is_ok_and(|result| result.status.success());
+    let published = rendered && generate_inline_image_variant(&frame, output);
+    let _ = std::fs::remove_file(frame);
+    published
+}
 fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f64>, Option<f64>) {
     let dimensions = std::process::Command::new("ffprobe")
         .args([
@@ -1031,6 +1069,13 @@ fn image_variation_token_sized(
         .collect::<String>();
     Ok(format!("{encoded}--{digest}"))
 }
+fn inline_preview_variation_token(key: &[u8]) -> Result<String, StatusCode> {
+    let payload = json!({"_rails":{"data":{"resize_to_limit":[1024,768]},"pur":"variation"}}).to_string();
+    let encoded = STANDARD.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1()).map_err(db_err)?;
+    let digest = signature.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
 fn representation_path(
     s: &AppState,
     attachment: &Attachment,
@@ -1071,6 +1116,11 @@ fn inline_image_representation_path(
         image_variation_token_sized(key, format, 1024, 768)?,
         filename
     ))
+}
+fn inline_pdf_representation_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> {
+    let blob = blob_path(key, id, filename)?;
+    let (prefix, filename) = blob.rsplit_once('/').ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(format!("{}/{}/{}", prefix.replacen("/blobs/", "/representations/", 1), inline_preview_variation_token(key)?, filename))
 }
 fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
     let version = chrono::DateTime::parse_from_rfc3339(updated_at)
@@ -1222,11 +1272,14 @@ fn inline_file_size(size: i64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    if value >= 10.0 || value.fract() == 0.0 {
-        format!("{} {}", value.round() as i64, units[unit])
+    let precision = if value < 10.0 { 2 } else if value < 100.0 { 1 } else { 0 };
+    let rounded = format!("{value:.precision$}");
+    let rounded = if precision == 0 {
+        rounded.as_str()
     } else {
-        format!("{value:.1} {}", units[unit])
-    }
+        rounded.trim_end_matches('0').trim_end_matches('.')
+    };
+    format!("{rounded} {}", units[unit])
 }
 fn render_imported_inline_files(
     input: &str,
@@ -1276,6 +1329,16 @@ fn render_imported_inline_files(
             };
             let (preview_attribute, figure_class, preview_html) = if let Some(format) = image_format(&content_type) {
                 let path = inline_image_representation_path(blob_key, blob_id, &filename, format)?;
+                let dimensions = match (width, height) {
+                    (Some(width), Some(height)) if width > 0 && height > 0 => format!(" width=\"{width}\" height=\"{height}\""),
+                    _ => String::new(),
+                };
+                (format!("{dimensions} previewable=\"true\""), "preview", format!("<img src=\"{}\">", esc(&path)))
+            } else if content_type == "application/pdf" {
+                let path = inline_pdf_representation_path(blob_key, blob_id, &filename)?;
+                (" previewable=\"true\"".to_string(), "preview", format!("<img src=\"{}\">", esc(&path)))
+            } else if safe_inline_video(&content_type) {
+                let path = inline_pdf_representation_path(blob_key, blob_id, &filename)?;
                 let dimensions = match (width, height) {
                     (Some(width), Some(height)) if width > 0 && height > 0 => format!(" width=\"{width}\" height=\"{height}\""),
                     _ => String::new(),
@@ -4769,8 +4832,10 @@ async fn message_delete(
         )
         .optional()
         .map_err(db_err)?;
+    let inline_blobs = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     db.execute("DELETE FROM messages WHERE id=?1", [mid])
         .map_err(db_err)?;
+    purge_orphan_inline_blobs(&db, &inline_blobs)?;
     touch_room(&db, rid)?;
     if let Some(stored) = attachment {
         remove_attachment_files(&stored);
@@ -5192,8 +5257,10 @@ async fn room_delete(
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     drop(query);
+    let inline_blobs = inline_blob_ids(&db, "SELECT DISTINCT e.blob_id FROM inline_embeds e JOIN messages m ON m.id=e.message_id WHERE m.room_id=?1", rid)?;
     db.execute("DELETE FROM rooms WHERE id=?1", [rid])
         .map_err(db_err)?;
+    purge_orphan_inline_blobs(&db, &inline_blobs)?;
     for stored in attachments {
         remove_attachment_files(&stored);
     }
@@ -6858,6 +6925,7 @@ async fn user_ban(
             .map_err(db_err)?;
         }
     }
+    let inline_blobs = inline_blob_ids(&tx, "SELECT DISTINCT e.blob_id FROM inline_embeds e JOIN messages m ON m.id=e.message_id WHERE m.creator_id=?1", id)?;
     tx.execute("DELETE FROM messages WHERE creator_id=?1", [id])
         .map_err(db_err)?;
     tx.execute("DELETE FROM sessions WHERE user_id=?1", [id])
@@ -6870,6 +6938,7 @@ async fn user_ban(
     )
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
+    purge_orphan_inline_blobs(&db, &inline_blobs)?;
     let _ = s.revoked_users.send(id);
     for (mid, rid, client_message_id) in removed {
         s.events.send(Event {
@@ -7556,6 +7625,7 @@ async fn bot_message_delete(
     if creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
+    let inline_blobs = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let found = db
         .execute(
             "DELETE FROM messages WHERE id=?1 AND room_id=?2 AND creator_id=?3",
@@ -7565,6 +7635,7 @@ async fn bot_message_delete(
     if found == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
+    purge_orphan_inline_blobs(&db, &inline_blobs)?;
     touch_room(&db, rid)?;
     if let Some(stored) = attachment {
         remove_attachment_files(&stored);
@@ -7767,22 +7838,31 @@ async fn signed_representation_get(
     let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
     let (format, kind) = if let Some(format) = image_format(&content_type) {
         let inline = image_variation_token_sized(key, format, 1024, 768)?;
-        if memcmp::eq(variation.as_bytes(), inline.as_bytes()) {
+        if variation.len() == inline.len() && memcmp::eq(variation.as_bytes(), inline.as_bytes()) {
             (format, "inline")
         } else {
             (format, "thumb")
         }
+    } else if content_type == "application/pdf" {
+        ("png", "inline-pdf")
     } else if safe_inline_video(&content_type) {
-        ("webp", "poster")
+        let inline = inline_preview_variation_token(key)?;
+        if variation.len() == inline.len() && memcmp::eq(variation.as_bytes(), inline.as_bytes()) {
+            ("jpeg", "inline-video")
+        } else {
+            ("webp", "poster")
+        }
     } else {
         return Err(StatusCode::NOT_FOUND);
     };
-    let expected = if kind == "inline" {
+    let expected = if kind == "inline-pdf" || kind == "inline-video" {
+        inline_preview_variation_token(key)?
+    } else if kind == "inline" {
         image_variation_token_sized(key, format, 1024, 768)?
     } else {
         image_variation_token(key, format)?
     };
-    if !memcmp::eq(variation.as_bytes(), expected.as_bytes()) {
+    if variation.len() != expected.len() || !memcmp::eq(variation.as_bytes(), expected.as_bytes()) {
         return Err(StatusCode::NOT_FOUND);
     }
     let dir = std::path::PathBuf::from(
@@ -7799,6 +7879,18 @@ async fn signed_representation_get(
             if kind == "poster" {
                 let _ = tokio::task::spawn_blocking(move || {
                     analyze_video_and_poster(&input, &stored_copy)
+                })
+                .await;
+            } else if kind == "inline-pdf" {
+                let output_copy = output.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    generate_inline_pdf_variant(&input, &output_copy)
+                })
+                .await;
+            } else if kind == "inline-video" {
+                let output_copy = output.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    generate_inline_video_variant(&input, &output_copy)
                 })
                 .await;
             } else if kind == "inline" {
@@ -7819,7 +7911,11 @@ async fn signed_representation_get(
     if tokio::fs::metadata(&output).await.is_err() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let response_type = if kind == "poster" {
+    let response_type = if kind == "inline-pdf" {
+        "image/png"
+    } else if kind == "inline-video" {
+        "image/jpeg"
+    } else if kind == "poster" {
         "image/webp"
     } else {
         &content_type
@@ -7847,6 +7943,26 @@ fn remove_attachment_files(stored: &str) {
                 .join(format!("{stored}-inline.{format}")),
         );
     }
+    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-pdf.png")));
+    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-video.jpeg")));
+}
+fn inline_blob_ids(db: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<i64>, StatusCode> {
+    let mut query = db.prepare(sql).map_err(db_err)?;
+    query.query_map([id], |row| row.get::<_, i64>(0)).map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>().map_err(db_err)
+}
+fn purge_orphan_inline_blobs(db: &rusqlite::Connection, ids: &[i64]) -> Result<(), StatusCode> {
+    for id in ids {
+        let stored: Option<String> = db.query_row("SELECT stored_name FROM inline_blobs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM inline_embeds WHERE blob_id=?1)", [id], |row| row.get(0))
+            .optional().map_err(db_err)?;
+        let Some(stored) = stored else { continue; };
+        let deleted = db.execute("DELETE FROM inline_blobs WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM inline_embeds WHERE blob_id=?1)", [id])
+            .map_err(db_err)?;
+        if deleted > 0 {
+            remove_attachment_files(&stored);
+        }
+    }
+    Ok(())
 }
 async fn attachment_variant(
     State(s): State<Arc<AppState>>,
@@ -8450,6 +8566,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
         CREATE TABLE IF NOT EXISTS inline_embeds(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,blob_id INTEGER NOT NULL REFERENCES inline_blobs(id) ON DELETE CASCADE,PRIMARY KEY(message_id,blob_id));
+        CREATE INDEX IF NOT EXISTS idx_inline_embeds_blob ON inline_embeds(blob_id);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);

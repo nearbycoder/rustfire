@@ -297,6 +297,7 @@ def main():
                 with urllib.request.urlopen(base+video_poster.group(1)) as res:
                     assert res.status==200 and res.headers.get_content_type()=="image/webp"
                 assert request(admin,base,video_poster.group(1).replace("--","-x",1))[0]==404
+                assert request(admin,base,video_poster.group(1).replace("/clip.mp4","x/clip.mp4"))[0]==404
             avatar_body=(b"--avatar-test\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--avatar-test--\r\n")
             code, _, _ = request(member, base, "/users/me/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200

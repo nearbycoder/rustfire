@@ -65,6 +65,41 @@ def prepare_inline_image(uploads, stored, content_type, width, height):
         temporary.unlink(missing_ok=True)
 
 
+def prepare_inline_pdf(uploads, stored):
+    variant_dir = uploads / "variants"
+    variant_dir.mkdir(exist_ok=True)
+    prefix = variant_dir / f"pdf-{uuid.uuid4()}"
+    frame = prefix.with_suffix(".png")
+    output = variant_dir / f"{stored}-inline-pdf.png"
+    temporary = variant_dir / f"pdf-{uuid.uuid4()}.png"
+    try:
+        subprocess.run(("pdftoppm", "-f", "1", "-singlefile", "-cropbox", "-r", "72", "-png", str(uploads / stored), str(prefix)), capture_output=True, check=True)
+        subprocess.run(("vips", "thumbnail", str(frame), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
+        os.replace(temporary, output)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"cannot render inline PDF {stored}") from error
+    finally:
+        frame.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_inline_video(uploads, stored):
+    variant_dir = uploads / "variants"
+    variant_dir.mkdir(exist_ok=True)
+    frame = variant_dir / f"video-{uuid.uuid4()}.jpg"
+    temporary = variant_dir / f"video-{uuid.uuid4()}.jpeg"
+    output = variant_dir / f"{stored}-inline-video.jpeg"
+    try:
+        subprocess.run(("ffmpeg", "-v", "error", "-i", str(uploads / stored), "-y", "-vframes", "1", "-f", "image2", str(frame)), capture_output=True, check=True)
+        subprocess.run(("vips", "thumbnail", str(frame), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
+        os.replace(temporary, output)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"cannot render inline video {stored}") from error
+    finally:
+        frame.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+
+
 def import_data(source, target, source_files, uploads):
     if target.execute("SELECT EXISTS(SELECT 1 FROM users)").fetchone()[0]:
         raise ValueError("the Rustfire database already contains users")
@@ -161,7 +196,7 @@ def import_data(source, target, source_files, uploads):
         WHERE attachment.record_type='ActionText::RichText' AND attachment.name='embeds'""")
     counts["inline_embeds"] = 0
     for message_id, blob_id, key, filename, content_type, size, created, metadata in inline:
-        if (content_type.startswith("image/") and content_type not in ("image/png", "image/jpeg", "image/gif", "image/webp", "image/avif")) or content_type.startswith("video/") or content_type == "application/pdf":
+        if (content_type.startswith("image/") and content_type not in ("image/png", "image/jpeg", "image/gif", "image/webp", "image/avif")) or (content_type.startswith("video/") and content_type not in ("video/mp4", "video/webm", "video/quicktime", "video/ogg")):
             raise ValueError(f"inline media preview for blob {blob_id} ({content_type}) needs migration support")
         if not target.execute("SELECT EXISTS(SELECT 1 FROM inline_blobs WHERE id=?)", (blob_id,)).fetchone()[0]:
             details = json.loads(metadata or "{}")
@@ -171,6 +206,10 @@ def import_data(source, target, source_files, uploads):
             stored = store_blob(source_files, uploads, key, size)
             if content_type.startswith("image/"):
                 prepare_inline_image(uploads, stored, content_type, width, height)
+            elif content_type == "application/pdf":
+                prepare_inline_pdf(uploads, stored)
+            elif content_type.startswith("video/"):
+                prepare_inline_video(uploads, stored)
             target.execute("""INSERT INTO inline_blobs(id,filename,content_type,stored_name,byte_size,created_at,width,height)
                 VALUES(?,?,?,?,?,?,?,?)""", (blob_id, filename, content_type, stored, size, created, width, height))
         target.execute("INSERT INTO inline_embeds(message_id,blob_id) VALUES(?,?)", (message_id, blob_id))
