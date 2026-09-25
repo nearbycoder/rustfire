@@ -311,7 +311,7 @@ This is an exact-response comparison for one warm logo-read endpoint. It does no
 
 ## Account administration route and roster behavior
 
-Rustfire's visible account forms now submit Campfire's nested account fields to `/account` with Rails-style `_method` values, and the visible user controls submit role changes and deletion to `/account/users/:id`. A browser check confirmed that changing the account name, toggling the room-creation restriction, selecting a JPEG logo, deleting it, and promoting a member all returned to `/account/edit` with updated controls and no detected browser errors.
+Rustfire's visible account forms now submit Campfire's nested account fields to `/account.1` with Rails-style `_method` values; `/account` remains supported for direct requests. The visible user controls submit role changes and deletion to `/account/users/:id`. A browser check confirmed that changing the account name, toggling the room-creation restriction, selecting a JPEG logo, deleting it, and promoting a member all returned to `/account/edit` with updated controls and no detected browser errors.
 
 `bench/paired_account_users.py` compared the same actions with the pinned Campfire checkout on disposable databases. Both apps placed the administrator before the member with a divider inside `account_users`; promoting user 2 returned **302 to `/account/edit`** and saved role 1; an invalid role fell back to member; deletion returned **302 to `/account/edit`**, set status 1, removed the open-room membership, retained the direct-room membership, and returned **404** on a repeated delete. The surrounding account HTML and presentation still differ, and this check does not measure throughput.
 
@@ -332,3 +332,19 @@ With the same 1,100-user fixture and signed avatar URLs, `bench/paired_account_u
 | 32 | 1,589 | 88.9 | 29.94 ms | 650.26 ms |
 
 This is one short local read sweep, with the load generator sharing CPU and network stack with both servers. It supports a speed advantage for this aligned page response under these conditions. CPU and memory were not recorded, and it does not establish sustained capacity or a whole-app speed or scale advantage at full feature parity.
+
+### Settings controls and full-page read trial
+
+The account settings panel now presents the source's two logo upload forms, name form, room-creation switch, and invite controls. `bench/paired_account_users.py --users 51` found the same four form method/field contracts on both apps. On each page, the QR path decoded to the displayed join URL, the copy button carried that URL, and the regenerate control was present. The browser rendered all panel icons and opened the QR lightbox. This is semantic control parity; the surrounding HTML and styling are still different.
+
+On a 1,100-user fixture, the same paired script measured `GET /account/edit` with 22 Campfire workers and a release Rustfire build. Both pages rendered all 1,100 user rows and the matched roster markup. The Rustfire response was 1,931,512 bytes and Campfire's was 2,236,870 bytes. Each client used a persistent connection with two warmup reads; all measured responses returned 200 and included the expected roster and invite fields. The servers ran separately on the same host with the load generator sharing CPU and network resources. Each row is one short local trial.
+
+| Clients | Trial | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2 s | 163.8 | 4.3 | 8.2 ms | 293.0 ms |
+| 8 | 2 s | 781.7 | 26.3 | 12.9 ms | 366.2 ms |
+| 32 | 2 s | 887.0 | 42.2 | 53.3 ms | 1,374.5 ms |
+| 64 | 3 s | 1,152.2 | 42.5 | 76.7 ms | 2,603.9 ms |
+| 128 | 3 s | 1,150.4 | 46.7 | 173.6 ms | 3,797.8 ms |
+
+All rows had zero HTTP errors. At a 100 ms p95 threshold for this full-page read, Rustfire met it through 64 tested clients; Campfire exceeded it at the first tested client. This shows a larger short-run concurrency margin for this particular screen and fixture. Neither application was tested to a failure limit, and the screens do not yet have exact overall HTML/CSS parity. Sustained capacity and whole-app performance remain unproven.

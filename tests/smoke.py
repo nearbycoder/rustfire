@@ -186,8 +186,13 @@ def main():
             code, _, page = request(admin, base, "/rooms/1/settings")
             assert code == 200 and "Room settings" in page
             code, _, page = request(admin, base, "/account")
-            join = re.search(r"/join/([\w-]+)", page).group(1)
+            assert code == 200, (code, page[:500])
+            assert "<a href='/rooms/1' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg'" in page
+            join_match = re.search(r"/join/([\w-]+)", page)
+            assert join_match, page[:1200]
+            join = join_match.group(1)
             qr = re.search(r"/qr_code/[\w-]+", page).group(0)
+            assert base64.urlsafe_b64decode(qr.rsplit('/', 1)[1] + '===').decode() == f"{base}/join/{join}"
             code, _, svg = request(client(), base, qr)
             assert code == 200 and "<svg" in svg and "QR code" in svg and "<path" in svg
             assert request(client(), base, "/qr_code/not-base64!")[0] == 400
@@ -382,6 +387,9 @@ def main():
             assert request(member, base, "/rooms/directs/2/edit")[0] == 404
             code, _, _ = request(member, base, "/account/update", {"name": "Nope"})
             assert code == 403
+            code, _, member_account = request(member, base, "/account/edit")
+            assert code == 200 and "class='account-logo avatar txt-xx-large center'" in member_account
+            assert 'id="invite_url"' in member_account and 'action="/account.1"' not in member_account
             code, _, page = request(admin, base, "/account/update", {"name": "Team Fire"})
             assert code == 200 and "Team Fire" in page, (code, page[:300])
             code, _, page = request(admin, base, "/account", {"account[name]": "Team Fire"}, method="PATCH")
@@ -394,8 +402,14 @@ def main():
             assert code == 200 and 'action="replace" target="next_page_container"' in users_stream
             assert 'action="append" target="account_users"' not in users_stream
             assert 'name="authenticity_token"' in users_stream
-            assert "name='account[name]'" in page and "name='account[logo]'" in page
-            assert "name='account[settings][restrict_room_creation_to_administrators]'" in page
+            assert 'name="account[name]"' in page and page.count('name="account[logo]"') == 2
+            assert 'name="account[settings][restrict_room_creation_to_administrators]"' in page, page[page.index('Must be admin')-400:page.index('Must be admin')+800]
+            assert "class='panel account-settings txt-align-center flex flex-column gap'" in page
+            assert 'action="/account.1"' in page and 'id="invite_url"' in page
+            assert 'data-action="copy-to-clipboard#copy"' in page and 'data-action="lightbox#open"' in page
+            assert request(admin, base, "/account.1", {"_method": "patch", "account[name]": "Team Fire"}, method="POST")[0] == 200
+            assert request(admin, base, "/account.1", {"_method": "put", "account[settings][restrict_room_creation_to_administrators]": "true"}, method="POST")[0] == 200
+            assert request(admin, base, "/account.1", {"_method": "put", "account[settings][restrict_room_creation_to_administrators]": "false"}, method="POST")[0] == 200
             assert request(admin, base, "/account", {"_method": "patch", "account[name]": "Team Fire"}, method="POST")[0] == 200
             assert request(admin, base, "/account", {"account[name]": "Wrong"}, method="POST")[0] == 405
             code, _, page = request(admin, base, "/account/custom_styles/edit")

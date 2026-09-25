@@ -4683,10 +4683,12 @@ fn account_next_page_container(page: i64) -> String {
 async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
     let db = pool(&s)?;
-    let (name, code): (String, String) = db
-        .query_row("SELECT name,join_code FROM accounts LIMIT 1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let (name, code, updated_at): (String, String, String) = db
+        .query_row(
+            "SELECT name,join_code,updated_at FROM accounts LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .map_err(db_err)?;
     let mut administrators = String::new();
     let mut members = String::new();
@@ -4749,28 +4751,56 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let invite_url = public_url(&headers, &format!("/join/{code}"));
+    let qr = format!("/qr_code/{}", URL_SAFE.encode(invite_url.as_bytes()));
+    let invite = html_escape::encode_double_quoted_attribute(&invite_url);
+    let logo_version: String = updated_at
+        .chars()
+        .filter(char::is_ascii_digit)
+        .take(14)
+        .collect();
+    let logo_url = format!("/account/logo?v={logo_version}");
     let account_controls = if is_admin(&u) {
         let delete_logo = if has_logo {
-            "<form method='post' action='/account/logo'><input type='hidden' name='_method' value='delete'><button class='danger' aria-label='Delete logo'>Delete logo</button></form>"
+            format!(
+                "<form class='button_to' method='post' action='/account/logo'><input type='hidden' name='_method' value='delete'><button class='btn btn--negative txt-small avatar__delete-btn' type='submit'><img aria-hidden='true' src='/assets/minus-b31a1093.svg' width='20' height='20'><span class='for-screen-reader'>Delete logo</span></button></form>"
+            )
         } else {
-            ""
+            String::new()
         };
         format!(
-            "<div class='account-logo-controls'><form method='post' action='/account' enctype='multipart/form-data' data-auto-submit-file><input type='hidden' name='_method' value='patch'><label>Upload logo<img src='/account/logo?size=small' alt='Account logo' width='96' height='96'><input type='file' name='account[logo]' accept='image/*'></label><button class='button'>Upload logo</button></form>{delete_logo}</div><form method='post' action='/account'><input type='hidden' name='_method' value='patch'><label>Account name<input name='account[name]' value='{}' required></label><button class='button'>Save changes</button></form><form method='post' action='/account' data-auto-submit-switch><input type='hidden' name='_method' value='put'><input type='hidden' name='account[settings][restrict_room_creation_to_administrators]' value='false'><label class='check'><input type='checkbox' name='account[settings][restrict_room_creation_to_administrators]' value='true' {}>Must be admin to create new rooms</label><button class='button'>Save setting</button></form><p><a href='/account/custom_styles/edit'>Custom styles</a></p><form method='post' action='/account/join_code'><button>Generate a new invite link</button></form>",
+            r#"<div class="align-center center avatar__form gap" data-controller="upload-preview">
+<form class="txt--medium" data-controller="form" enctype="multipart/form-data" action="/account.1" method="post" data-auto-submit-file><input type="hidden" name="_method" value="patch"><label class="btn input--file"><img aria-hidden="true" src="/assets/camera-927323b8.svg" width="20" height="20"><input class="input" accept="image/*" data-action="upload-preview#previewImage change->form#submit" type="file" name="account[logo]"><span class="for-screen-reader">Upload logo</span></label></form>
+<form data-controller="form" enctype="multipart/form-data" action="/account.1" method="post" data-auto-submit-file><input type="hidden" name="_method" value="patch"><label class="btn avatar input--file account-logo txt-xx-large"><img role="presentation" data-upload-preview-target="image" src="{logo_url}" width="48" height="48"><input class="input" accept="image/*" data-action="upload-preview#previewImage change->form#submit" type="file" name="account[logo]" data-upload-preview-target="input"><span class="for-screen-reader">Upload logo</span></label></form>{delete_logo}</div>
+<form class="flex flex-column gap" data-controller="form" action="/account.1" method="post"><input type="hidden" name="_method" value="patch"><div class="flex align-center gap"><details class="position-relative" data-controller="popup"><summary class="btn" tabindex="-1"><img aria-hidden="true" src="/assets/globe-8c54d23b.svg" width="20" height="20"><span class="for-screen-reader">Translate</span></summary><div class="language-list-menu shadow"><dl class="language-list"><dt>🇺🇸</dt><dd class="margin-none">Name this account</dd><dt>🇪🇸</dt><dd class="margin-none">Nombre de esta cuenta</dd><dt>🇫🇷</dt><dd class="margin-none">Nommez ce compte</dd><dt>🇮🇳</dt><dd class="margin-none">इस खाते का नाम दें</dd><dt>🇩🇪</dt><dd class="margin-none">Benennen Sie dieses Konto</dd><dt>🇧🇷</dt><dd class="margin-none">Dê um nome a essa conta</dd><dt>🇯🇵</dt><dd class="margin-none">アカウントに名前を付ける</dd></dl></div></details><label class="flex align-center gap flex-item-grow"><input class="input txt-large" autocomplete="off" placeholder="Name this account" autofocus="autofocus" data-action="keydown.enter->form#submit" type="text" value="{}" name="account[name]" id="account_name"></label><button type="submit" class="btn btn--reversed center"><img aria-hidden="true" src="/assets/check-7897ff7e.svg" width="20" height="20"><span class="for-screen-reader">Save changes</span></button></div></form>
+<div class="margin-block-start pad-block pad-inline-double fill-shade border-radius"><form class="flex align-center gap center" data-controller="form" action="/account.1" method="post"><input type="hidden" name="_method" value="put"><div class="flex-item-grow flex align-center gap txt-align-start"><img class="colorize--black" aria-hidden="true" src="/assets/crown-00d190cb.svg" width="18" height="18"> Must be admin to create new rooms</div><input value="{}" type="hidden" name="account[settings][restrict_room_creation_to_administrators]" id="account_settings_restrict_room_creation_to_administrators"><label class="switch"><input type="checkbox" class="switch__input" {} data-action="change->form#submit"><span class="switch__btn round"></span><span class="for-screen-reader">Must be admin to create new rooms</span></label></form></div>"#,
             esc(&name),
+            if restricted { "false" } else { "true" },
             if restricted { "checked" } else { "" }
         )
     } else {
-        String::new()
+        format!(
+            "<figure class='account-logo avatar txt-xx-large center'><img src='{logo_url}' alt='Account logo' width='300' height='300'></figure><h1 class='flex-item-grow txt-x-large'>{}</h1>",
+            esc(&name)
+        )
     };
-    let invite = public_url(&headers, &format!("/join/{code}"));
-    let invite_qr = qr_link(&invite, "Show invite QR code");
+    let regenerate = if is_admin(&u) {
+        "<form class='button_to' method='post' action='/account/join_code'><button class='btn btn--regenerate' type='submit'><img aria-hidden='true' class='colorize--black' src='/assets/refresh-249f0509.svg' width='20' height='20'><span class='for-screen-reader'>Regenerate join link</span></button></form>"
+    } else {
+        ""
+    };
+    let invite_controls = format!(
+        r#"<div class="flex flex-column align-center gap"><label class="flex flex-column gap full-width" style="--row-gap: 0.5em"><strong id="invite_label" class="invite-label">Share to invite more people</strong><span class="flex align-center gap input input--actor fill-white"><img aria-hidden="true" class="colorize--black" src="/assets/person-add-1432b76b.svg" width="20" height="20"><input type="text" class="input" id="invite_url" value="{invite}" aria-labelledby="invite_label" readonly></span></label><div class="flex align-center gap"><a class="btn" data-lightbox-target="image" data-action="lightbox#open" data-lightbox-url-value="{qr}" href="{qr}"><span class="for-screen-reader">Show join link QR code</span><img aria-hidden="true" class="colorize--black" src="/assets/qr-code-dac3b273.svg" width="20" height="20"></a><button class="btn" data-controller="copy-to-clipboard" data-action="copy-to-clipboard#copy" data-copy-to-clipboard-success-class="btn--success" data-copy-to-clipboard-content-value="{invite}"><span class="for-screen-reader">Copy join link</span><img aria-hidden="true" class="colorize--black" src="/assets/copy-paste-4c379063.svg" width="20" height="20"></button><button class="btn" hidden="hidden" data-controller="web-share" data-action="web-share#share" data-web-share-url-value="{invite}" data-web-share-text-value="Hit this link to join me in Campfire and start chatting." data-web-share-title-value="Link to join Campfire"><span class="for-screen-reader">Share join link</span><img aria-hidden="true" class="colorize--black" src="/assets/share-bf28da4f.svg" width="20" height="20"></button>{regenerate}</div></div>"#
+    );
+    let back_room = cookie(&headers, "last_room")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| room_for(&s, u.id, *id).is_ok())
+        .or_else(|| room_for(&s, u.id, 1).ok().map(|_| 1));
+    let back_href = back_room.map_or("/".to_string(), |id| format!("/rooms/{id}"));
     Ok(render(
-        "Account",
+        "Account settings",
         &format!(
-            "<section class='form-card'><h1>{}</h1>{account_controls}<h2>People</h2>{list}<p><a href='/join/{code}'>Invite link</a> · {invite_qr}</p><label>Share this link<input readonly value='{}'></label><p><a href='/account/bots'>Bots</a></p></section>",
-            esc(&name),
-            esc(&invite)
+            "<nav class='account-settings-nav'><a href='{back_href}' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a><div><a href='/account/bots' class='btn' aria-label='Set up chat bots'><img aria-hidden='true' src='/assets/bot-8a69692e.svg' width='20' height='20'></a><a href='/account/custom_styles/edit' class='btn' aria-label='Custom styles'><img aria-hidden='true' src='/assets/art-ed709d32.svg' width='20' height='20'></a></div></nav><section class='panel account-settings txt-align-center flex flex-column gap' style='view-transition-name: account-settings'>{account_controls}<div class='margin-block pad-inline pad-block-start fill-shade border-radius'>{invite_controls}<hr class='margin-block separator full-width' style='--border-style: solid'>{list}</div></section><footer class='account-settings-footer'>Campfire™ version Rustfire</footer>"
         ),
         Some(&u),
     ))
@@ -4854,7 +4884,8 @@ async fn account_update(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let tunneled_post = req.method() == Method::POST && req.uri().path() == "/account";
+    let tunneled_post =
+        req.method() == Method::POST && matches!(req.uri().path(), "/account" | "/account.1");
     let mut logo = None;
     let f = if headers
         .get(header::CONTENT_TYPE)
@@ -7693,6 +7724,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/account",
             get(account_get)
                 .post(account_update)
+                .patch(account_update)
+                .put(account_update),
+        )
+        .route(
+            "/account.1",
+            post(account_update)
                 .patch(account_update)
                 .put(account_update),
         )

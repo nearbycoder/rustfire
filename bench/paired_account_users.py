@@ -4,6 +4,7 @@ Run after ``cargo build --release`` with the pinned Ruby bundle and Redis.
 """
 
 import argparse
+import base64
 import concurrent.futures
 import hashlib
 import html
@@ -81,6 +82,83 @@ def markup_events(body):
     return parser.events
 
 
+def settings_summary(page):
+    panel = page.split('view-transition-name: account-settings', 1)[1].split('<turbo-frame id=', 1)[0]
+    forms = re.findall(r'<form\b([^>]*)>(.*?)</form>', panel, re.S)
+    account_forms = []
+    for attributes, content in forms:
+        action = re.search(r'action=[\'"]([^\'"]+)', attributes)
+        if action and action.group(1) == '/account.1':
+            method = re.search(r'name=[\'"]_method[\'"] value=[\'"]([^\'"]+)', content)
+            account_forms.append((method.group(1) if method else None,
+                                  tuple(re.findall(r'name=[\'"](account\[[^\'"]+)', content))))
+    invite = re.search(r'id=[\'"]invite_url[\'"][^>]*value=[\'"]([^\'"]+)', panel)
+    qr = re.search(r'href=[\'"](/qr_code/[^\'"]+)', panel)
+    copy = re.search(r'data-copy-to-clipboard-content-value=[\'"]([^\'"]+)', panel)
+    assert invite and qr and copy, 'Invite controls are missing'
+    invite_url = html.unescape(invite.group(1))
+    decoded_qr = base64.urlsafe_b64decode(qr.group(1).rsplit('/', 1)[1] + '===').decode()
+    return {
+        'account_forms': tuple(account_forms),
+        'invite_matches_qr': decoded_qr == invite_url,
+        'invite_matches_copy': html.unescape(copy.group(1)) == invite_url,
+        'invite_path': urllib.parse.urlsplit(invite_url).path.startswith('/join/'),
+        'regenerate': 'action="/account/join_code"' in panel or "action='/account/join_code'" in panel,
+        'room_switch': 'class="switch__input"' in panel or "class='switch__input'" in panel,
+    }
+
+
+def measure_settings_page(port, cookie, clients, seconds):
+    ready = threading.Barrier(clients + 1, timeout=30)
+    start = threading.Event()
+    clock = {}
+
+    def worker():
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
+        samples, errors, sizes = [], 0, set()
+        try:
+            for _ in range(2):
+                connection.request('GET', '/account/edit', headers={'Cookie': cookie})
+                response = connection.getresponse()
+                body = response.read()
+                if response.status != 200 or not settings_summary(body.decode())['invite_matches_qr']:
+                    raise AssertionError('Settings page warmup failed')
+            ready.wait()
+            start.wait()
+            while time.perf_counter() < clock['deadline']:
+                begun = time.perf_counter()
+                try:
+                    connection.request('GET', '/account/edit', headers={'Cookie': cookie})
+                    response = connection.getresponse()
+                    body = response.read()
+                    if response.status == 200 and b'id="invite_url"' in body and b'id="account_users"' in body:
+                        samples.append((time.perf_counter() - begun) * 1000)
+                        sizes.add(len(body))
+                    else:
+                        errors += 1
+                except (OSError, ValueError):
+                    errors += 1
+                    connection.close()
+                    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
+        finally:
+            connection.close()
+        return samples, errors, sizes, time.perf_counter()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as executor:
+        futures = [executor.submit(worker) for _ in range(clients)]
+        ready.wait()
+        clock['begun'] = time.perf_counter()
+        clock['deadline'] = clock['begun'] + seconds
+        start.set()
+        workers = [future.result() for future in futures]
+    samples = [sample for worker_samples, _, _, _ in workers for sample in worker_samples]
+    errors = sum(worker_errors for _, worker_errors, _, _ in workers)
+    sizes = set().union(*(worker_sizes for _, _, worker_sizes, _ in workers))
+    elapsed = max(ended for _, _, _, ended in workers) - clock['begun']
+    assert samples and errors == 0, (len(samples), errors)
+    return len(samples) / elapsed, statistics.median(samples), p95(samples), len(samples), errors, sorted(sizes)
+
+
 def measure_page(port, cookie, clients, seconds, expected_summary, expected_markup):
     ready = threading.Barrier(clients + 1, timeout=30)
     start = threading.Event()
@@ -143,6 +221,7 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     status, _, body = request(port, "GET", "/account/edit", cookie, csrf)
     assert status == 200
     page = body.decode()
+    result['settings_controls'] = settings_summary(page)
     frame = re.search(r"<turbo-frame\b[^>]*\bid=['\"]account_users['\"][^>]*>(.*?)</turbo-frame>", page, re.S)
     assert frame, "Account user frame is absent"
     frame = frame.group(1)
@@ -164,6 +243,7 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
             result[f"page_{number}_markup"] = markup_events(payload)
         for count in clients:
             performance[count] = measure_page(port, cookie, count, seconds, result["page_2"], result["page_2_markup"])
+            performance[f'settings_{count}'] = measure_settings_page(port, cookie, count, seconds)
 
     for key, role in (("promote", "administrator"), ("invalid_role", "invalid")):
         body = urllib.parse.urlencode({"user[role]": role}).encode()
@@ -245,6 +325,9 @@ def main():
             rust_rate, rust_median, rust_p95, rust_success, rust_errors, rust_sizes = rust_performance[count]
             camp_rate, camp_median, camp_p95, camp_success, camp_errors, camp_sizes = camp_performance[count]
             print(f"clients={count} seconds={args.seconds:g} campfire_workers={args.campfire_workers} rustfire_rps={rust_rate:.1f} rustfire_median_ms={rust_median:.3f} rustfire_p95_ms={rust_p95:.3f} rustfire_successes={rust_success} rustfire_errors={rust_errors} rustfire_bytes={rust_sizes} campfire_rps={camp_rate:.1f} campfire_median_ms={camp_median:.3f} campfire_p95_ms={camp_p95:.3f} campfire_successes={camp_success} campfire_errors={camp_errors} campfire_bytes={camp_sizes}")
+            rust_rate, rust_median, rust_p95, rust_success, rust_errors, rust_sizes = rust_performance[f'settings_{count}']
+            camp_rate, camp_median, camp_p95, camp_success, camp_errors, camp_sizes = camp_performance[f'settings_{count}']
+            print(f"account_edit clients={count} seconds={args.seconds:g} campfire_workers={args.campfire_workers} rustfire_rps={rust_rate:.1f} rustfire_median_ms={rust_median:.3f} rustfire_p95_ms={rust_p95:.3f} rustfire_successes={rust_success} rustfire_errors={rust_errors} rustfire_bytes={rust_sizes} campfire_rps={camp_rate:.1f} campfire_median_ms={camp_median:.3f} campfire_p95_ms={camp_p95:.3f} campfire_successes={camp_success} campfire_errors={camp_errors} campfire_bytes={camp_sizes}")
 
 
 if __name__ == "__main__":

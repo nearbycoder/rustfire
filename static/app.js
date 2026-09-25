@@ -15,6 +15,20 @@ document.addEventListener('click',async event=>{
     copy.classList.add(successClass);
   }catch{}
 });
+document.querySelectorAll('.account-settings [data-controller~="web-share"]').forEach(button=>{button.hidden=typeof navigator.share!=='function';});
+document.addEventListener('click',async event=>{
+  const settings=event.target.closest('.account-settings');
+  if(!settings)return;
+  const qr=event.target.closest('[data-action~="lightbox#open"]');
+  if(qr){
+    event.preventDefault();
+    let dialog=document.querySelector('.image-lightbox');
+    if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="Join link QR code">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',e=>{if(e.target===dialog)dialog.close()});document.body.append(dialog)}
+    dialog.querySelector('img').src=qr.href;dialog.showModal();return;
+  }
+  const share=event.target.closest('[data-action~="web-share#share"]');
+  if(share){event.preventDefault();try{await navigator.share({url:share.dataset.webShareUrlValue,title:share.dataset.webShareTitleValue,text:share.dataset.webShareTextValue})}catch(error){if(error.name!=='AbortError')alert('Could not share join link')};}
+});
 document.querySelectorAll('[data-controller~="upload-preview"]').forEach(control=>{
   const input=control.querySelector('[data-upload-preview-target="input"]');
   const image=control.querySelector('[data-upload-preview-target="image"]');
@@ -523,7 +537,7 @@ document.addEventListener('change',event=>{
   const control=event.target;
   if(control instanceof HTMLInputElement){
     if(control.matches('form[data-auto-submit-file] input[type=file]')&&control.files?.length)control.form.requestSubmit();
-    if(control.matches('form[data-auto-submit-switch] input[type=checkbox]'))control.form.requestSubmit();
+    if(control.matches('form[data-auto-submit-switch] input[type=checkbox],.account-settings input[data-action="change->form#submit"]'))control.form.requestSubmit();
     if(control.matches('#account_users input[data-action="form#submit"][name="user[role]"]'))control.form.requestSubmit();
   }
 });
