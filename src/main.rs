@@ -2861,6 +2861,35 @@ async fn room_show_at(
 ) -> AppResult {
     room_show_with_target(s, headers, rid, Some(mid)).await
 }
+fn room_invitation(
+    headers: &HeaderMap,
+    join_code: &str,
+    logo_version: &str,
+    admin: bool,
+) -> String {
+    let invite_url = public_url(headers, &format!("/join/{join_code}"));
+    let invite = html_escape::encode_double_quoted_attribute(&invite_url);
+    let qr = format!("/qr_code/{}", URL_SAFE.encode(invite_url.as_bytes()));
+    let translate = profile_translation_button(
+        "Welcome to Rustfire. To invite some people to chat with you, share the join link below.",
+        [
+            "Bienvenido a Rustfire. Para invitar a algunas personas a chatear contigo, comparte el enlace de unión que se encuentra a continuación.",
+            "Bienvenue sur Rustfire. Pour inviter des personnes à discuter avec vous, partagez le lien pour rejoindre ci-dessous.",
+            "Rustfire में आपका स्वागत है। अधिक लोगों को चैट के लिए आमंत्रित करने के लिए, नीचे जुड़ने का लिंक साझा करें।",
+            "Willkommen bei Rustfire. Um einige Personen zum Chatten einzuladen, teilen Sie den unten stehenden Beitrittslink.",
+            "Boas vindas ao Rustfire. Para convidar pessoas para conversarem com você, compartilhe o link de convite abaixo.",
+            "Rustfireへようこそ。他の人をチャットに招待するには、下記の参加リンクを共有してください。",
+        ],
+    );
+    let regenerate = if admin {
+        "<form class='button_to' method='post' action='/account/join_code'><button class='btn btn--regenerate' type='submit'><img aria-hidden='true' src='/assets/refresh-249f0509.svg' width='20' height='20'><span class='for-screen-reader'>Regenerate join link</span></button></form>"
+    } else {
+        ""
+    };
+    format!(
+        "<div id='system_welcome' class='message message--formatted txt-align-center center'><div class='message__body center'><div class='message__body-content position-relative'><figure class='account-logo avatar center margin-block-end txt-large'><img alt='Account logo' src='/account/logo?v={logo_version}' width='300' height='300'></figure><div class='flex align-center gap welcome-intro'><div class='system-welcome--translation'>{translate}</div><p><strong>Welcome to Rustfire</strong><br>To invite people to chat, share the join link below.</p></div><div class='flex flex-column align-center gap welcome-invite'><label class='flex flex-column gap full-width' style='--row-gap: 0.5em'><strong id='invite_label' class='invite-label'>Share to invite more people</strong><span class='flex align-center gap input input--actor fill-white'><img aria-hidden='true' class='colorize--black' src='/assets/person-add-1432b76b.svg' width='20' height='20'><input type='text' class='input' id='invite_url' value='{invite}' aria-labelledby='invite_label' readonly></span></label><div class='flex align-center gap welcome-actions'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{qr}' href='{qr}'><span class='for-screen-reader'>Show join link QR code</span><img aria-hidden='true' class='colorize--black' src='/assets/qr-code-dac3b273.svg' width='20' height='20'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{invite}'><span class='for-screen-reader'>Copy join link</span><img aria-hidden='true' class='colorize--black' src='/assets/copy-paste-4c379063.svg' width='20' height='20'></button><button class='btn' hidden data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{invite}' data-web-share-text-value='Hit this link to join me in Rustfire and start chatting.' data-web-share-title-value='Link to join Rustfire'><span class='for-screen-reader'>Share join link</span><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'></button>{regenerate}</div></div></div></div></div>"
+    )
+}
 async fn room_show_with_target(
     s: Arc<AppState>,
     headers: HeaderMap,
@@ -2893,6 +2922,22 @@ async fn room_show_with_target(
             )
             .map_err(db_err)?;
         exists.then_some(mid)
+    } else {
+        None
+    };
+    let invitation: Option<(String, String)> = if db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM rooms WHERE id=?1 AND id=(SELECT id FROM rooms ORDER BY created_at,id LIMIT 1) AND (SELECT COUNT(*) FROM messages WHERE room_id=?1)<=40)",
+            [rid],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(db_err)?
+    {
+        db.query_row("SELECT join_code,updated_at FROM accounts LIMIT 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(db_err)?
     } else {
         None
     };
@@ -2937,10 +2982,23 @@ async fn room_show_with_target(
         "<turbo-cable-stream-source channel='RoomMessagesChannel' signed-stream-name='{}'></turbo-cable-stream-source>",
         esc(&stream_token)
     ));
+    if let Some((join_code, updated_at)) = invitation {
+        let version: String = updated_at
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(14)
+            .collect();
+        content.push_str(&room_invitation(
+            &headers,
+            &join_code,
+            &version,
+            is_admin(&u),
+        ));
+    }
     for m in messages {
         content.push_str(&message_html(&s, &m, Some(&headers)));
     }
-    content.push_str(&format!("</div><div class='typing-indicator' id='typing-indicator' aria-live='polite' hidden></div><form class='composer' id='composer' method='post' enctype='multipart/form-data' action='/rooms/{rid}/messages'><a class='search-round' href='/searches' aria-label='Search'><img src='/static/icons/search.svg' alt=''></a><input type='hidden' id='message-body' name='message[body]'><input type='hidden' name='message[format]' value='html'><trix-editor input='message-body' aria-label='Write a message' aria-controls='mention-suggestions' placeholder='Write a message…'></trix-editor><div class='mention-suggestions' id='mention-suggestions' role='listbox' aria-label='Mention a person' hidden></div><label class='file-btn' title='Attach file'>📎<input type='file' name='message[attachment]'></label><button type='button' id='rich-toggle' class='rich-toggle' aria-label='Rich text toolbar' aria-expanded='false'>A</button><input type='hidden' name='message[client_message_id]' value='{}'><button class='button' aria-label='Send message'>↑</button></form></section></div>",Uuid::new_v4()));
+    content.push_str(&format!("</div><div class='typing-indicator' id='typing-indicator' aria-live='polite' hidden></div><form class='composer' id='composer' method='post' enctype='multipart/form-data' action='/rooms/{rid}/messages'><a class='search-round' href='/searches' aria-label='Search'><img src='/static/icons/search.svg' alt=''></a><input type='hidden' id='message-body' name='message[body]'><input type='hidden' name='message[format]' value='html'><trix-editor input='message-body' aria-label='Write a message' aria-controls='mention-suggestions' placeholder='Write a message…'></trix-editor><div class='mention-suggestions' id='mention-suggestions' role='listbox' aria-label='Mention a person' hidden></div><label class='file-btn' title='Attach file'><img src='/assets/attachment-8bcccab0.svg' alt='' width='22' height='22'><input type='file' name='message[attachment]'></label><button type='button' id='rich-toggle' class='rich-toggle' aria-label='Rich text toolbar' aria-expanded='false'>A</button><input type='hidden' name='message[client_message_id]' value='{}'><button class='button' aria-label='Send message'><img src='/assets/arrow-up-f96b3895.svg' alt='' width='20' height='20'></button></form></section></div>",Uuid::new_v4()));
     let mut response = render(&room.name, &content, Some(&u));
     response.headers_mut().append(
         header::SET_COOKIE,

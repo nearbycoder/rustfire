@@ -21,7 +21,7 @@ let profileInstallPrompt;
 window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();profileInstallPrompt=event;document.querySelectorAll('.profile-settings [data-controller~="pwa-install"]').forEach(node=>node.classList.add('pwa--can-install'));});
 document.addEventListener('click',event=>{const button=event.target.closest('[data-action~="pwa-install#promptInstall"]');if(button&&profileInstallPrompt){event.preventDefault();profileInstallPrompt.prompt();profileInstallPrompt=undefined;}});
 document.addEventListener('click',async event=>{
-  const settings=event.target.closest('.account-settings');
+  const settings=event.target.closest('.account-settings, #system_welcome');
   if(!settings)return;
   const qr=event.target.closest('[data-action~="lightbox#open"]');
   if(qr){

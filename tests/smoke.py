@@ -93,6 +93,7 @@ def main():
             assert code == 200 and "/rooms/1" in url, (code, url)
             code, _, page = request(admin, base, "/rooms/1")
             assert code == 200 and "Campfire" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
+            assert "id='system_welcome'" in page and "Welcome to Rustfire" in page and "id='invite_url'" in page
             assert request(admin, base, "/rooms/1/messages")[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"http://127.0.0.1/secret"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"file:///etc/passwd"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204

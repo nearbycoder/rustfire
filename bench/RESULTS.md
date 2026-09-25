@@ -366,3 +366,9 @@ For the same two-membership fixture at a 1280 px dark-mode viewport, Campfire's 
 | 32 | 16,410 | 682 | 3.79 ms | 74.71 ms |
 
 The screen's forms and sampled mutations match, but its full response bytes differ substantially, including source JavaScript imports and document markup. These numbers show a large speed margin for this narrower read workload under the tested conditions; they do not establish a whole-app advantage or a maximum sustainable client count.
+
+## Original room invitation and mobile composer
+
+Rustfire now renders the source's welcome invitation in the original room while it has at most 40 messages. The card contains the account logo, translated welcome text, current join URL, QR link, copy value, share control, and administrator regenerate form. `bench/paired_room_invitation.py` verified both apps displayed the card with 0, 1, and 40 messages, removed it at 41, and omitted it from a second room. It also decoded each QR path to its displayed join URL and matched the copy value. A browser opened Rustfire's QR dialog and posted a message through the mobile composer; the welcome card remained visible after that post.
+
+At 1280 × 633 px in dark mode, Campfire's welcome body measured x=318.81, y=88.98, width=373.58, height=243.78 px; Rustfire's measured x=318.59, y=89, width=374, height=243 px. At 390 × 844 px, both bodies started at x≈12.8, y≈155 with width≈364.4 px. The mobile composer form measured x≈12.8, y=778, width≈364.4, height=42 px in both apps after the layout adjustment. Rustfire uses the upstream attachment and send SVG assets. The visible sidebar and notification bell still differ, as do broader room markup and interaction details; this geometry check does not establish full visual or behavioral parity.
