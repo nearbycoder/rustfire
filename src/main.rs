@@ -5505,7 +5505,7 @@ async fn room_kind_show(
     if r.kind == "Rooms::Direct" {
         return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+    Ok(found_redirect(&format!("/rooms/{rid}")))
 }
 async fn room_kind_edit(
     State(s): State<Arc<AppState>>,

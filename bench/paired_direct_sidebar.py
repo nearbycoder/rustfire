@@ -56,6 +56,19 @@ def delete_room_form(port, path, cookie, csrf):
         return error.code, urllib.parse.urlparse(error.headers.get("Location", "")).path
 
 
+def get_without_redirect(port, path, cookie):
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, file, code, message, headers, new_url):
+            return None
+
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers={"Cookie": cookie})
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
+            return response.status, urllib.parse.urlparse(response.headers.get("Location", "")).path, response.read().decode()
+    except urllib.error.HTTPError as error:
+        return error.code, urllib.parse.urlparse(error.headers.get("Location", "")).path, error.read().decode()
+
+
 def create_room_from_form(port, kind, cookie, csrf, name, user_ids=()):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, request, file, code, message, headers, new_url):
@@ -119,6 +132,7 @@ def run(port, cookie, csrf, capture_dir, database):
         assert process.stdout.readline().strip() == "CREATES_READY", "Direct-room prepends were not captured"
         streams = [(capture_dir / f"{room_id}.html").read_text() for room_id in (2, 3, 4, 5)]
         edit_pages = [request(port, f"/rooms/directs/{room_id}/edit", cookie)[2] for room_id in (2, 3, 4, 5)]
+        direct_show = get_without_redirect(port, "/rooms/directs/3", cookie)
         delete_result = delete_room_form(port, "/rooms/directs/2", cookie, csrf)
         output, error = process.communicate(timeout=35)
         assert process.returncode == 0, (output, error)
@@ -131,6 +145,7 @@ def run(port, cookie, csrf, capture_dir, database):
         created_state = created_room_state(database)
         room_edit_paths = ("/rooms/opens/6/edit", "/rooms/closeds/6/edit", "/rooms/closeds/7/edit", "/rooms/opens/7/edit")
         room_edit_pages = [request(port, path, cookie)[2] for path in room_edit_paths]
+        kind_shows = [get_without_redirect(port, path, cookie) for path in ("/rooms/opens/6", "/rooms/closeds/7")]
         updates = subprocess.Popen(
             ["node", "bench/capture_room_updates.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", cookie, "--count", "2"],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -154,7 +169,7 @@ def run(port, cookie, csrf, capture_dir, database):
         shared_delete = delete_room_form(port, "/rooms/6", cookie, csrf)
         with sqlite3.connect(database) as db:
             shared_delete_state = (db.execute("SELECT COUNT(*) FROM rooms WHERE id=6").fetchone()[0], db.execute("SELECT COUNT(*) FROM memberships WHERE room_id=6").fetchone()[0])
-        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, delete_result, delete_stream, deleted_sidebar, new_room_pages, created_rooms, created_state, room_edit_pages, update_events, updated_rooms, updated_state, shared_delete, shared_delete_state
+        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, direct_show, delete_result, delete_stream, deleted_sidebar, new_room_pages, created_rooms, created_state, room_edit_pages, kind_shows, update_events, updated_rooms, updated_state, shared_delete, shared_delete_state
     finally:
         if process.poll() is None:
             process.kill()
@@ -275,7 +290,7 @@ def main():
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
-            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_delete, rust_delete_stream, rust_deleted_sidebar, rust_new_room_pages, rust_created_rooms, rust_created_state, rust_room_edit_pages, rust_update_events, rust_updated_rooms, rust_updated_state, rust_shared_delete, rust_shared_delete_state = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams", rust_db)
+            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_direct_show, rust_delete, rust_delete_stream, rust_deleted_sidebar, rust_new_room_pages, rust_created_rooms, rust_created_state, rust_room_edit_pages, rust_kind_shows, rust_update_events, rust_updated_rooms, rust_updated_state, rust_shared_delete, rust_shared_delete_state = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams", rust_db)
         finally:
             stop_server(rust)
 
@@ -286,7 +301,7 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_delete, camp_delete_stream, camp_deleted_sidebar, camp_new_room_pages, camp_created_rooms, camp_created_state, camp_room_edit_pages, camp_update_events, camp_updated_rooms, camp_updated_state, camp_shared_delete, camp_shared_delete_state = run(camp_port, cookie, csrf, temp / "camp-streams", camp_db)
+            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_direct_show, camp_delete, camp_delete_stream, camp_deleted_sidebar, camp_new_room_pages, camp_created_rooms, camp_created_state, camp_room_edit_pages, camp_kind_shows, camp_update_events, camp_updated_rooms, camp_updated_state, camp_shared_delete, camp_shared_delete_state = run(camp_port, cookie, csrf, temp / "camp-streams", camp_db)
         finally:
             if camp is not None:
                 stop_server(camp)
@@ -310,6 +325,11 @@ def main():
             for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
                 (args.sample_dir / f"rustfire-edit-ping-{room_id}.html").write_text(rust_edit)
                 (args.sample_dir / f"campfire-edit-ping-{room_id}.html").write_text(camp_edit)
+            (args.sample_dir / "rustfire-direct-show.html").write_text(rust_direct_show[2])
+            (args.sample_dir / "campfire-direct-show.html").write_text(camp_direct_show[2])
+            for label, rust_show, camp_show in zip(("open", "closed"), rust_kind_shows, camp_kind_shows):
+                (args.sample_dir / f"rustfire-{label}-show.html").write_text(rust_show[2])
+                (args.sample_dir / f"campfire-{label}-show.html").write_text(camp_show[2])
             (args.sample_dir / "rustfire-delete-ping.html").write_text(rust_delete_stream)
             (args.sample_dir / "campfire-delete-ping.html").write_text(camp_delete_stream)
             (args.sample_dir / "rustfire-deleted-sidebar.html").write_text(rust_deleted_sidebar)
@@ -338,6 +358,9 @@ def main():
         assert frame_tree(rust_new_ping, "direct_rooms_control") == frame_tree(camp_new_ping, "direct_rooms_control"), "New-ping frame differs; use --sample-dir to inspect"
         for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
             assert panel_tree(rust_edit) == panel_tree(camp_edit), f"Direct settings panel differs for room {room_id}; use --sample-dir to inspect"
+        # The pinned source returns its generic 500 page for this otherwise valid direct-room URL.
+        assert (rust_direct_show[0], rust_direct_show[1]) == (303, "/rooms/3"), rust_direct_show[:2]
+        assert (camp_direct_show[0], camp_direct_show[1]) == (500, ""), camp_direct_show[:2]
         assert rust_delete == camp_delete == (302, "/"), (rust_delete, camp_delete)
         assert rust_delete_stream == camp_delete_stream, (rust_delete_stream, camp_delete_stream)
         assert frame_tree(rust_deleted_sidebar, "user_sidebar") == frame_tree(camp_deleted_sidebar, "user_sidebar"), "Sidebar differs after direct-room deletion; use --sample-dir to inspect"
@@ -348,6 +371,7 @@ def main():
             assert panel_tree(rust_page) == panel_tree(camp_page), f"New {kind} room panel differs; use --sample-dir to inspect"
         for label, rust_page, camp_page in zip(("open-6", "closed-6", "closed-7", "open-7"), rust_room_edit_pages, camp_room_edit_pages):
             assert panel_tree(rust_page) == panel_tree(camp_page), f"Edit room panels differ for {label}; use --sample-dir to inspect"
+        assert [(status, location) for status, location, _ in rust_kind_shows] == [(status, location) for status, location, _ in camp_kind_shows], ([(status, location) for status, location, _ in rust_kind_shows], [(status, location) for status, location, _ in camp_kind_shows])
         assert rust_created_rooms == camp_created_rooms == [(302, "/rooms/6"), (302, "/rooms/7")], (rust_created_rooms, camp_created_rooms)
         expected_created = [("New public room", "Rooms::Open", list(range(1, 52))), ("New private room", "Rooms::Closed", [1, 42])]
         assert rust_created_state == camp_created_state == expected_created
