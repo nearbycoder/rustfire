@@ -1,7 +1,7 @@
 """Probe signed RoomMessagesChannel fanout on disposable Rustfire and Campfire fixtures.
 
 Requires the pinned Campfire checkout, its installed bundle, and Redis on localhost:6379.
-Both runs use the same number of sockets and messages. Message HTML still differs.
+Both runs use the same number of sockets and messages. Message values still differ.
 """
 
 import argparse
@@ -92,9 +92,11 @@ class MessageTagSequence(HTMLParser):
     def __init__(self):
         super().__init__()
         self.tags = []
+        self.attribute_keys = []
 
     def handle_starttag(self, tag, attrs):
         self.tags.append(("start", tag))
+        self.attribute_keys.append((tag, tuple(sorted(key for key, _ in attrs))))
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
@@ -104,10 +106,10 @@ class MessageTagSequence(HTMLParser):
             self.tags.append(("end", tag))
 
 
-def message_tag_sequence(sample_file):
+def message_structure(sample_file):
     parser = MessageTagSequence()
     parser.feed(sample_file.read_text())
-    return parser.tags
+    return parser.tags, parser.attribute_keys
 
 
 def main():
@@ -188,8 +190,12 @@ def main():
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
-            if message_tag_sequence(output_dir / "rustfire.html") != message_tag_sequence(output_dir / "campfire.html"):
+            rust_tags, rust_attributes = message_structure(output_dir / "rustfire.html")
+            camp_tags, camp_attributes = message_structure(output_dir / "campfire.html")
+            if rust_tags != camp_tags:
                 raise RuntimeError("Message stream tag structure differs from Campfire")
+            if rust_attributes != camp_attributes:
+                raise RuntimeError("Message stream attribute keys differ from Campfire")
         print(f"{args.operation}_identity_match=true")
 
 

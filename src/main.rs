@@ -2199,10 +2199,6 @@ fn message_presentation_html(m: &ChatMessage) -> String {
 fn message_html(s: &AppState, m: &ChatMessage) -> String {
     let created =
         message_timestamp_ns(&m.created_at).map(chrono::DateTime::<Utc>::from_timestamp_nanos);
-    let timestamp = created
-        .as_ref()
-        .map(|date| date.format("%b %-d, %Y · %-I:%M %p").to_string())
-        .unwrap_or_else(|| m.created_at.clone());
     let datetime = created
         .as_ref()
         .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
@@ -2217,17 +2213,17 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
         .unwrap_or_else(|_| format!("/users/{}/avatar", m.creator_id));
     let presentation = message_presentation_html(m);
     let client_id = esc(&m.client_message_id);
-    let quick_boosts=[("👍","Thumbs up"),("👏","Clapping"),("👋","Waving hand"),("💪","Muscle"),("❤️","Red heart"),("😂","Face with tears of joy"),("🎉","Party popper"),("🔥","Fire")].iter().map(|(emoji,label)|format!("<form data-turbo-frame='boosting_message_{client_id}' data-action='popup#close' action='/messages/{}/boosts' accept-charset='UTF-8' method='post'><input type='hidden' name='boost[content]' id='boost_content' value='{emoji}'><button type='submit' title='{label}' class='btn message__action-btn' data-boost='{}' data-emoji='{emoji}' aria-label='{label}'><figure class='margin-none boost-character'>{emoji}</figure><span class='for-screen-reader'>{label}</span></button></form>",m.id,m.id)).collect::<String>();
+    let quick_boosts=[("👍","Thumbs up"),("👏","Clapping"),("👋","Waving hand"),("💪","Muscle"),("❤️","Red heart"),("😂","Face with tears of joy"),("🎉","Party popper"),("🔥","Fire")].iter().map(|(emoji,label)|format!("<form data-turbo-frame='boosting_message_{client_id}' data-action='popup#close' action='/messages/{}/boosts' accept-charset='UTF-8' method='post'><input type='hidden' name='boost[content]' id='boost_content' value='{emoji}'><button name='button' type='submit' title='{label}' class='btn message__action-btn' data-emoji='{emoji}'><figure class='margin-none boost-character'>{emoji}</figure><span class='for-screen-reader'>{label}</span></button></form>",m.id)).collect::<String>();
     let content_action = if m.attachment.is_some() {
         format!(
-            "<a class='btn message__action-btn center full-width' href='/attachments/{}' title='Download' aria-label='Download' download><img src='/static/icons/download.svg' width='20' height='20' alt=''></a>",
+            "<a class='btn message__action-btn center full-width' href='/attachments/{}' title='Download' aria-label='Download' download><img class='colorize--black' aria-hidden='true' src='/static/icons/download.svg' width='20' height='20'></a>",
             m.attachment.as_ref().unwrap().id
         )
     } else {
-        "<button type='button' class='btn message__action-btn center full-width' data-reply data-action='reply#reply' title='Reply' aria-label='Reply'><img src='/static/icons/reply.svg' width='20' height='20' alt=''></button>".to_string()
+        "<button class='btn message__action-btn center full-width' data-action='reply#reply' title='Reply' aria-label='Reply'><img class='colorize--black' aria-hidden='true' src='/static/icons/reply.svg' width='20' height='20'></button>".to_string()
     };
     let actions = format!(
-        "<details class='message-options position-relative' data-controller='popup' data-action='keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn message__action-btn message__options-btn' aria-label='Message options' title='Message options'><img class='colorize--black' aria-hidden='true' src='/static/icons/menu-dots-horizontal.svg' width='20' height='20'><span class='for-screen-reader'>Message options</span></summary><div class='message-options-menu message__actions-menu border shadow' data-popup-target='menu'><div class='quick-boosts'>{quick_boosts}<a class='btn message__action-btn message__boost-btn custom-boost-link' href='/messages/{message_id}/boosts/new' data-turbo-frame='new_boost_message_{client_id}' data-custom-boost><img class='colorize--black' aria-hidden='true' src='/static/icons/boost.svg' width='20' height='20'><span class='for-screen-reader'>New boost</span></a></div><div class='message-options-links message__actions-grid'>{content_action}<button type='button' class='btn message__action-btn center full-width' data-copy-link='/rooms/{room_id}/@{message_id}' title='Copy link' aria-label='Copy link'><img src='/static/icons/link.svg' width='20' height='20' alt=''></button><a class='btn message__action-btn center full-width message__edit-btn' href='/rooms/{room_id}/messages/{message_id}/edit' data-turbo-frame='edit_message_{client_id}' data-edit-message title='Edit' aria-label='Edit'><img src='/static/icons/pencil.svg' width='20' height='20' alt=''></a></div></div></details>",
+        "<details class='position-relative' data-controller='popup' data-action='keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn message__action-btn message__options-btn'><img class='colorize--black' aria-hidden='true' src='/static/icons/menu-dots-horizontal.svg' width='20' height='20'><span class='for-screen-reader'>Message options</span></summary><div class='message__actions-menu border shadow' data-popup-target='menu'><div class='quick-boosts'>{quick_boosts}<a class='btn message__action-btn message__boost-btn' href='/messages/{message_id}/boosts/new' data-turbo-frame='new_boost_message_{client_id}' data-action='soft-keyboard#open popup#close'><img class='colorize--black' aria-hidden='true' src='/static/icons/boost.svg' width='20' height='20'><span class='for-screen-reader'>New boost</span></a></div><div class='flex flex-wrap border-top margin-block-start-half pad-block-start-half message__actions-grid'>{content_action}<button class='btn message__action-btn center full-width' title='Copy link' aria-label='Copy link' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='/rooms/{room_id}/@{message_id}'><img class='colorize--black' aria-hidden='true' src='/static/icons/link.svg' width='20' height='20'></button><a class='btn message__action-btn center full-width message__edit-btn' href='/rooms/{room_id}/messages/{message_id}/edit' data-turbo-frame='edit_message_{client_id}' title='Edit' aria-label='Edit'><img class='colorize--black' aria-hidden='true' src='/static/icons/pencil.svg' width='20' height='20'></a></div></div></details>",
         message_id = m.id,
         room_id = m.room_id
     );
@@ -2248,24 +2244,18 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
         .collect::<String>();
     let creator_name = esc(&m.creator_name);
     let datetime = esc(&datetime);
-    let timestamp = esc(&timestamp);
-    let date_label = created
-        .as_ref()
-        .map(|date| date.format("%b %-d, %Y").to_string())
-        .unwrap_or_else(|| m.created_at.clone());
-    let date_label = esc(&date_label);
     let boost_area = format!(
-        "<turbo-frame id='boosting_message_{client_id}'><div class='boosts flex flex-wrap align-center gap full-width' data-controller='turbo-streaming' data-action='turbo:submit-start-&gt;turbo-streaming#unsubscribe'><div class='boost-list flex-inline flex-wrap gap' id='boosts_message_{client_id}' data-turbo-streaming-target='container'>{boosts}</div><turbo-frame id='new_boost_message_{client_id}'><div class='message__boost-inline' data-controller='soft-keyboard'><a class='boost__action txt-small btn' href='/messages/{}/boosts/new' data-custom-boost><img aria-hidden='true' src='/static/icons/boost.svg' width='20' height='20'><span class='for-screen-reader'>Add a boost</span></a></div></turbo-frame></div></turbo-frame>",
+        "<turbo-frame id='boosting_message_{client_id}'><div class='boosts flex flex-wrap align-center gap full-width' style='--column-gap: 0.4ch; --row-gap: 0' data-controller='turbo-streaming' data-action='turbo:submit-start-&gt;turbo-streaming#unsubscribe'><div class='flex-inline flex-wrap gap' id='boosts_message_{client_id}' data-turbo-streaming-target='container'>{boosts}</div><turbo-frame id='new_boost_message_{client_id}'><div class='flex-inline message__boost-inline' data-controller='soft-keyboard'><a class='boost__action txt-small btn' href='/messages/{}/boosts/new' action='soft-keyboard#open'><img aria-hidden='true' src='/static/icons/boost.svg' width='20' height='20'><span class='for-screen-reader'>Add a boost</span></a></div></turbo-frame></div></turbo-frame>",
         m.id
     );
     let metadata = format!(
-        "<div class='message-meta message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-datetime data-local-time-target='time'>{timestamp}</time></a><span class='message__room'><a href='/rooms/{room_id}/@{message_id}' target='_top' data-reply-target='link'>{room_name}</a></span></h3><div class='message-actions message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
+        "<div class='message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-time-target='time'></time></a><span class='message__room'><a href='/rooms/{room_id}/@{message_id}' target='_top' data-reply-target='link'>{room_name}</a></span></h3><div class='message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
         room_id = m.room_id,
         message_id = m.id,
         room_name = esc(&m.room_name),
     );
     format!(
-        "<div id='message_{client_id}' class='message' data-stream-message data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-creator-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-datetime data-local-time-target='date'>{date_label}</time></h2><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message-main message__body'><div class='message__body-content'>{metadata}{presentation}{boost_area}</div></div></turbo-frame></div>",
+        "<div id='message_{client_id}' class='message ' data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-time-target='date'></time></h2><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message__body'><div class='message__body-content'>{metadata}{presentation}{boost_area}</div></div></turbo-frame></div>",
         message_id = m.id,
         creator_id = m.creator_id,
     )

@@ -60,10 +60,13 @@ try{
   const streamMessageId=(await streamPost.json()).id;
   const streamEvents=[await nextFrame(),await nextFrame()];
   assert(streamEvents.some(frame=>frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='signed stream test'));
-  assert(streamEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="append" target="messages_rooms_open_1">')&&frame.message.includes(`id='message_${streamClientId}' class='message'`)&&frame.message.includes(`data-message-id='${streamMessageId}'`)&&frame.message.includes("<h2 class='message__day-separator'><time")&&frame.message.includes("data-local-time-target='date'")&&frame.message.includes("src='/users/eyJ")&&frame.message.includes(`<turbo-frame id='edit_message_${streamClientId}'>`)&&frame.message.includes(`<turbo-frame id='boosting_message_${streamClientId}'>`)&&frame.message.includes(`<turbo-frame id='new_boost_message_${streamClientId}'>`)&&frame.message.includes(`data-turbo-frame='boosting_message_${streamClientId}'`)&&frame.message.includes(`href='/messages/${streamMessageId}/boosts/new'`)&&frame.message.includes('signed stream test')));
+  assert(streamEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="append" target="messages_rooms_open_1">')&&frame.message.includes(`id='message_${streamClientId}' class='message '`)&&frame.message.includes(`data-message-id='${streamMessageId}'`)&&frame.message.includes("<h2 class='message__day-separator'><time")&&frame.message.includes("data-local-time-target='date'")&&frame.message.includes("src='/users/eyJ")&&frame.message.includes(`<turbo-frame id='edit_message_${streamClientId}'>`)&&frame.message.includes(`<turbo-frame id='boosting_message_${streamClientId}'>`)&&frame.message.includes(`<turbo-frame id='new_boost_message_${streamClientId}'>`)&&frame.message.includes(`data-turbo-frame='boosting_message_${streamClientId}'`)&&frame.message.includes(`href='/messages/${streamMessageId}/boosts/new'`)&&frame.message.includes('signed stream test')));
   const messageStream=streamEvents.find(frame=>frame.identifier===signedIdentifier).message;
-  assert.match(messageStream,/<div class='message-meta message__meta'><h3 class='message__heading'>[\s\S]*?<\/h3><div class='message-actions message__actions'/);
+  assert.match(messageStream,/<div class='message__meta'><h3 class='message__heading'>[\s\S]*?<\/h3><div class='message__actions'/);
   assert(!messageStream.includes('custom-boost-form'));
+  assert(!messageStream.includes('data-stream-message'));
+  assert(!messageStream.includes('data-creator-id'));
+  assert(!messageStream.includes('data-local-datetime'));
   const streamEdit=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream edited'})});
   assert.equal(streamEdit.status,200);
   const editEvents=[await nextFrame(),await nextFrame()];

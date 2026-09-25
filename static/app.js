@@ -1,7 +1,7 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
-const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-datetime]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
+const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
 const pingForm=document.getElementById('ping-form');
 if(pingForm){
@@ -60,7 +60,7 @@ if (chat) {
   const messages = chat.querySelector('.messages');
   const messageById=id=>messages.querySelector(`.message[data-message-id="${Number(id)}"]`);
   const decorateOwn=()=>{
-    messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.creatorId===document.body.dataset.userId));
+    messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.userId===document.body.dataset.userId));
     messages.querySelectorAll('.boost-item').forEach(node=>{
       const mine=node.dataset.boosterId===document.body.dataset.userId;
       node.classList.toggle('mine',mine);
@@ -73,7 +73,7 @@ if (chat) {
     for(const message of messages.querySelectorAll('.message')){
       const time=Number(message.dataset.messageTimestamp);
       const priorTime=previous?Number(previous.dataset.messageTimestamp):NaN;
-      message.classList.toggle('threaded',!!previous&&message.dataset.creatorId===previous.dataset.creatorId&&Number.isFinite(time)&&Number.isFinite(priorTime)&&Math.abs(time-priorTime)<=300000);
+      message.classList.toggle('threaded',!!previous&&message.dataset.userId===previous.dataset.userId&&Number.isFinite(time)&&Number.isFinite(priorTime)&&Math.abs(time-priorTime)<=300000);
       if(Number.isFinite(time)){
         const date=new Date(time);
         const day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
@@ -162,7 +162,7 @@ if (chat) {
         const page=await refreshed.json();
         for(const entry of page.updated||[]){
           const existing=messageById(entry.id);
-          if(existing&&!existing.querySelector('.inline-edit'))(existing.closest('[data-stream-message]')||existing).outerHTML=entry.html;
+          if(existing&&!existing.querySelector('.inline-edit'))existing.outerHTML=entry.html;
         }
         lastRefreshAt=page.checked_at;
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
@@ -244,7 +244,7 @@ if (chat) {
         if(target===messages&&historyMode){updateReturnButton();continue;}
         for(const node of [...fragment.children])if(node.id&&document.getElementById(node.id))node.remove();
         if(!fragment.childNodes.length)continue;
-        const scrollToLatest=target===messages&&(nearBottom()||[...fragment.querySelectorAll('.message')].some(node=>node.dataset.creatorId===document.body.dataset.userId));
+        const scrollToLatest=target===messages&&(nearBottom()||[...fragment.querySelectorAll('.message')].some(node=>node.dataset.userId===document.body.dataset.userId));
         const addedMessages=[...fragment.querySelectorAll('.message[data-message-id]')];
         target.append(fragment);
         if(target===messages){
@@ -276,7 +276,7 @@ if (chat) {
   async function restoreMessage(article){
     const response=await fetch(`/rooms/${roomId}/messages/${article.dataset.messageId}`,{headers:{'X-Rustfire-Fragment':'1'}});
     if(!response.ok)throw Error('Could not load message');
-    (article.closest('[data-stream-message]')||article).outerHTML=await response.text();
+    article.outerHTML=await response.text();
     formatLocalTimes(messages);decorateOwn();formatMessageGroups();
   }
   const typingInput=composer.querySelector('trix-editor');
@@ -337,12 +337,12 @@ if (chat) {
     if(content&&(event.key==='Enter'||event.key===' ')){event.preventDefault();revealBoost(content);}
   });
   messages.addEventListener('click',event=>{
-    const summary=event.target.closest('.message-options summary');
+    const summary=event.target.closest('.message__actions details summary');
     if(!summary)return;
     requestAnimationFrame(()=>{
       const details=summary.parentElement;
       if(!details.open){details.classList.remove('opens-up');return;}
-      const menu=details.querySelector('.message-options-menu');
+      const menu=details.querySelector('.message__actions-menu');
       details.classList.toggle('opens-up',menu.getBoundingClientRect().bottom>messages.getBoundingClientRect().bottom-8);
     });
   });
@@ -357,7 +357,7 @@ if (chat) {
     }
     const boostReveal=e.target.closest('[data-boost-reveal]');
     if(boostReveal){revealBoost(boostReveal);return;}
-    const edit=e.target.closest('[data-edit-message]');
+    const edit=e.target.closest('.message__edit-btn');
     if(edit){
       e.preventDefault();const article=edit.closest('.message');
       const response=await fetch(edit.href,{headers:{'X-Rustfire-Inline':'1'}});
@@ -372,7 +372,7 @@ if (chat) {
     if(remove){
       if(!confirm('Delete this message?'))return;
       const response=await fetch(remove.dataset.deleteMessage,{method:'POST',headers:{'X-CSRF-Token':csrfToken}});
-      if(response.ok){const article=remove.closest('.message');(article.closest('[data-stream-message]')||article).remove();formatMessageGroups()}else alert('Could not delete message');return;
+      if(response.ok){const article=remove.closest('.message');article.remove();formatMessageGroups()}else alert('Could not delete message');return;
     }
     const cancelBoost=e.target.closest('[data-cancel-custom-boost]');
     if(cancelBoost){
@@ -380,7 +380,7 @@ if (chat) {
       if(frame?.dataset.originalHtml){frame.innerHTML=frame.dataset.originalHtml;delete frame.dataset.originalHtml;}
       return;
     }
-    const customBoost=e.target.closest('[data-custom-boost]');
+    const customBoost=e.target.closest('a[href$="/boosts/new"]');
     if(customBoost){
       e.preventDefault();
       const frameId=customBoost.dataset.turboFrame||customBoost.closest('turbo-frame')?.id;
@@ -400,7 +400,7 @@ if (chat) {
     const lightbox=e.target.closest('[data-lightbox]');
     if(lightbox){e.preventDefault();let dialog=document.querySelector('.image-lightbox');if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});document.body.append(dialog)}dialog.querySelector('img').src=lightbox.href;dialog.showModal();return;}
     const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }
-    const reply=e.target.closest('[data-reply]');
+    const reply=e.target.closest('[data-action~="reply#reply"]');
     if(reply){
       const article=reply.closest('.message');const body=article.querySelector('[id^="presentation_message_"]').cloneNode(true);
       const preview=body.querySelector('.og-embed a')?.href;
@@ -408,17 +408,12 @@ if (chat) {
       body.querySelectorAll('.mention').forEach(node=>node.replaceWith(document.createTextNode(node.textContent.trim())));
       const quoted=body.querySelector('.trix-content')?.innerHTML||body.innerHTML||preview||'';
       const block=document.createElement('blockquote');block.innerHTML=quoted;
-      const cite=document.createElement('cite');cite.textContent=article.querySelector('.message-meta strong')?.textContent+' ';
-      const link=document.createElement('a');link.href=article.querySelector('.message-meta a')?.href||'#';link.textContent='#';cite.append(link);
+      const cite=document.createElement('cite');cite.textContent=article.querySelector('.message__meta strong')?.textContent+' ';
+      const link=document.createElement('a');link.href=article.querySelector('.message__meta a')?.href||'#';link.textContent='#';cite.append(link);
       typingInput.editor.loadHTML(block.outerHTML+cite.outerHTML+'<br>');typingInput.focus();reply.closest('details').open=false;return;
     }
-    const copy=e.target.closest('[data-copy-link]');
-    if(copy){try{await navigator.clipboard.writeText(new URL(copy.dataset.copyLink,location.origin).href);copy.setAttribute('aria-label','Copied');copy.title='Copied';setTimeout(()=>{copy.setAttribute('aria-label','Copy link');copy.title='Copy link';},1500);}catch{}return;}
-    const button=e.target.closest('[data-boost]'); if(!button) return;
-    e.preventDefault();
-    const res=await fetch(`/messages/${button.dataset.boost}/boosts`,{method:'POST',body:new URLSearchParams({content:button.dataset.emoji||'👍'}),headers:{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrfToken}});
-    if(!res.ok) alert('Could not boost message');
-    else button.closest('details').open=false;
+    const copy=e.target.closest('[data-action~="copy-to-clipboard#copy"]');
+    if(copy){try{await navigator.clipboard.writeText(new URL(copy.dataset.copyToClipboardContentValue,location.origin).href);copy.setAttribute('aria-label','Copied');copy.title='Copied';setTimeout(()=>{copy.setAttribute('aria-label','Copy link');copy.title='Copy link';},1500);}catch{}return;}
   });
   messages.addEventListener('submit', async e => {
     const editForm=e.target.closest('.inline-edit form');
@@ -427,6 +422,14 @@ if (chat) {
       const response=await fetch(editForm.action,{method:'POST',body:new URLSearchParams(new FormData(editForm)),headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
       if(response.ok){try{await restoreMessage(article)}catch{alert('Message saved, but could not reload it')}}
       else alert('Could not save message');
+      return;
+    }
+    const quickBoost=e.target.closest('.quick-boosts form');
+    if(quickBoost){
+      e.preventDefault();
+      const response=await fetch(quickBoost.action,{method:'POST',body:new URLSearchParams(new FormData(quickBoost)),headers:{'X-CSRF-Token':csrfToken}});
+      if(response.ok)quickBoost.closest('details').open=false;
+      else alert('Could not boost message');
       return;
     }
     const form=e.target.closest('.custom-boost-form');if(!form)return;
