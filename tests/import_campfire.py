@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sqlite3
 import subprocess
@@ -40,7 +41,7 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
-            for mid in (1, 2, 3, 4):
+            for mid in (1, 2, 3, 4, 5):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(1,'Message',1,'body',?,?,?)", (source_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
@@ -60,6 +61,12 @@ def main():
             inline_body = f'<div>Before <action-text-attachment sgid="{blob_sgid}" content-type="text/plain" filename="inline.txt" filesize="20"></action-text-attachment> after</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(3,'Message',4,'body',?,?,?)", (inline_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(4,?)", ("Before [inline.txt] after",))
+            image_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/11?expires_in","pur":"attachable"}}'
+            image_encoded = base64.urlsafe_b64encode(image_payload).decode()
+            image_sgid = f"{image_encoded}--{hmac.new(signing_key, image_encoded.encode(), hashlib.sha1).hexdigest()}"
+            image_body = f'<div>Picture <action-text-attachment sgid="{image_sgid}" content-type="image/png" filename="pixel.png" filesize="68" width="1" height="1" previewable="true"></action-text-attachment> end</div>'
+            fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(4,'Message',5,'body',?,?,?)", (image_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(5,?)", ("Picture [pixel.png] end",))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
@@ -80,6 +87,15 @@ def main():
                 VALUES(10,?,'inline.txt','text/plain','{}','local',?,'2026-01-01 00:00:00')""", (inline_key, len(file_bytes)))
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                 VALUES(10,'embeds','ActionText::RichText',3,10,'2026-01-01 00:00:00')""")
+            image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=")
+            image_key = "ab11cdef1234567890"
+            image_file = source_files / image_key[:2] / image_key[2:4] / image_key
+            image_file.parent.mkdir(parents=True, exist_ok=True)
+            image_file.write_bytes(image_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(11,?,'pixel.png','image/png',?,'local',?,'2026-01-01 00:00:00')""", (image_key, json.dumps({"width": 1, "height": 1, "identified": True}), len(image_bytes)))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(11,'embeds','ActionText::RichText',4,11,'2026-01-01 00:00:00')""")
             for blob_id, record_type, record_id, name in ((8, "User", 1, "avatar"), (9, "Account", 1, "logo")):
                 media_key = f"ab{blob_id}cdef1234567890"
                 media_file = source_files / media_key[:2] / media_key[2:4] / media_key
@@ -102,7 +118,7 @@ def main():
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
-        assert result["messages"] == 4 and result["attachments"] == 1 and result["inline_embeds"] == 1, result
+        assert result["messages"] == 5 and result["attachments"] == 1 and result["inline_embeds"] == 2, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -118,6 +134,15 @@ def main():
             assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html, inline_html
             inline_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=10").fetchone()[0]
             assert (target_uploads / inline_stored).read_bytes() == file_bytes
+            image_html = imported.execute("SELECT body_html FROM messages WHERE id=5").fetchone()[0]
+            assert "attachment--preview attachment--png" in image_html and 'width="1"' in image_html and 'height="1"' in image_html, image_html
+            image_url = re.search(r'<img src="([^"]+)"', image_html)
+            assert image_url and "/rails/active_storage/representations/redirect/" in image_url.group(1), image_html
+            image_stored = imported.execute("SELECT stored_name,width,height FROM inline_blobs WHERE id=11").fetchone()
+            assert image_stored[1:] == (1, 1) and (target_uploads / image_stored[0]).read_bytes() == image_bytes
+            image_variant = target_uploads / "variants" / f"{image_stored[0]}-inline.png"
+            assert image_variant.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            image_variant.unlink()
             assert imported.execute("SELECT id FROM attachments WHERE message_id=2").fetchone() == (7,)
             stored = imported.execute("SELECT stored_name FROM attachments WHERE id=7").fetchone()[0]
             assert (target_uploads / stored).read_bytes() == file_bytes
@@ -168,11 +193,15 @@ def main():
             blob_request = urllib.request.Request(f"http://127.0.0.1:{port}/rails/active_storage/blobs/redirect/{blob_token}/inline.txt")
             with urllib.request.urlopen(blob_request, timeout=2) as response:
                 assert response.read() == file_bytes
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{image_url.group(1)}", timeout=10) as response:
+                assert response.status == 200 and response.headers["Content-Type"] == "image/png"
+                assert response.read().startswith(b"\x89PNG\r\n\x1a\n")
+            assert image_variant.is_file()
         finally:
             server.terminate()
             server.wait(timeout=5)
         with sqlite3.connect(source_db) as fixture:
-            fixture.execute("UPDATE active_storage_blobs SET content_type='image/png' WHERE id=10")
+            fixture.execute("UPDATE active_storage_blobs SET content_type='video/mp4' WHERE id=10")
         bad_target = root / "must-not-exist.sqlite3"
         bad_uploads = root / "must-not-exist-uploads"
         bad_command = command.copy()
@@ -180,7 +209,12 @@ def main():
         bad_command[bad_command.index("--target-uploads") + 1] = str(bad_uploads)
         failure = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
         assert failure.returncode != 0 and not bad_target.exists() and not bad_uploads.exists()
-        print("PASS Campfire account, users, room, rich messages and inline files, search text, boost, session, push key, avatar, and logo import; inline previews fail safely")
+        with sqlite3.connect(source_db) as fixture:
+            fixture.execute("UPDATE active_storage_blobs SET content_type='text/plain' WHERE id=10")
+            fixture.execute("UPDATE active_storage_blobs SET metadata=? WHERE id=11", (json.dumps({"width": 2, "height": 1, "identified": True}),))
+        invalid_image = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
+        assert invalid_image.returncode != 0 and not bad_target.exists() and not bad_uploads.exists()
+        print("PASS Campfire account, users, room, rich messages and inline files/images, preview URL, search text, boost, session, push key, avatar, and logo import; unsupported previews fail safely")
 
 
 if __name__ == "__main__":

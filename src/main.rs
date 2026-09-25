@@ -535,7 +535,7 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
         .add_tags(&["action-text-attachment", "figure", "figcaption"])
-        .add_tag_attributes("action-text-attachment", &["sgid", "content-type", "filename", "filesize", "caption"])
+        .add_tag_attributes("action-text-attachment", &["sgid", "content-type", "filename", "filesize", "caption", "width", "height", "previewable"])
         .add_tag_attributes("span", &["class"])
         .add_tag_attributes("div", &["class"])
         .add_tag_attributes("figure", &["class"])
@@ -903,6 +903,28 @@ fn analyze_image_and_thumbnail(
     }
     dimensions
 }
+fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Path) -> bool {
+    let Some(parent) = output.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let extension = output.extension().and_then(|extension| extension.to_str()).unwrap_or("png");
+    let temporary = parent.join(format!("inline-{}.{}", Uuid::new_v4(), extension));
+    let converted = std::process::Command::new("vips")
+        .arg("thumbnail")
+        .arg(input)
+        .arg(&temporary)
+        .args(["1024", "--height", "768", "--size", "down"])
+        .output()
+        .is_ok_and(|result| result.status.success());
+    let published = converted && std::fs::rename(&temporary, output).is_ok();
+    if !published {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    published
+}
 fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f64>, Option<f64>) {
     let dimensions = std::process::Command::new("ffprobe")
         .args([
@@ -989,8 +1011,16 @@ fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f6
     dimensions
 }
 fn image_variation_token(key: &[u8], format: &str) -> Result<String, StatusCode> {
+    image_variation_token_sized(key, format, 1200, 800)
+}
+fn image_variation_token_sized(
+    key: &[u8],
+    format: &str,
+    width: i64,
+    height: i64,
+) -> Result<String, StatusCode> {
     let payload =
-        json!({"_rails":{"data":{"format":format,"resize_to_limit":[1200,800]},"pur":"variation"}})
+        json!({"_rails":{"data":{"format":format,"resize_to_limit":[width,height]},"pur":"variation"}})
             .to_string();
     let encoded = STANDARD.encode(payload);
     let signature =
@@ -1024,6 +1054,23 @@ fn representation_path(
 fn image_representation_path(s: &AppState, attachment: &Attachment) -> Result<String, StatusCode> {
     let format = image_format(&attachment.content_type).ok_or(StatusCode::NOT_FOUND)?;
     representation_path(s, attachment, format)
+}
+fn inline_image_representation_path(
+    key: &[u8],
+    id: i64,
+    filename: &str,
+    format: &str,
+) -> Result<String, StatusCode> {
+    let blob = blob_path(key, id, filename)?;
+    let (prefix, filename) = blob
+        .rsplit_once('/')
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(format!(
+        "{}/{}/{}",
+        prefix.replacen("/blobs/", "/representations/", 1),
+        image_variation_token_sized(key, format, 1024, 768)?,
+        filename
+    ))
 }
 fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
     let version = chrono::DateTime::parse_from_rfc3339(updated_at)
@@ -1187,6 +1234,7 @@ fn render_imported_inline_files(
     message_id: i64,
     signing_key: &[u8],
     imported_key: Option<&[u8]>,
+    blob_key: &[u8],
 ) -> Result<String, StatusCode> {
     let mut expected = db.prepare("SELECT blob_id FROM inline_embeds WHERE message_id=?1")
         .map_err(db_err)?
@@ -1212,10 +1260,10 @@ fn render_imported_inline_files(
             .and_then(|sgid| campfire_blob_id_from_sgid(signing_key, sgid)
                 .or_else(|| imported_key.and_then(|key| campfire_blob_id_from_sgid(key, sgid))));
         if let Some(blob_id) = blob_id.filter(|id| expected.contains(id)) {
-            let (filename, content_type, size): (String, String, i64) = db.query_row(
-                "SELECT filename,content_type,byte_size FROM inline_blobs WHERE id=?1",
+            let (filename, content_type, size, width, height): (String, String, i64, Option<i64>, Option<i64>) = db.query_row(
+                "SELECT filename,content_type,byte_size,width,height FROM inline_blobs WHERE id=?1",
                 [blob_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             ).map_err(db_err)?;
             let extension = filename.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
             let sgid = attachment.unwrap().value().attr("sgid").unwrap();
@@ -1226,7 +1274,17 @@ fn render_imported_inline_files(
             } else {
                 format!("<span class=\"attachment__name\">{}</span><span class=\"attachment__size\">{}</span>", esc(&filename), inline_file_size(size))
             };
-            rendered.push_str(&format!("<action-text-attachment sgid=\"{}\" content-type=\"{}\" filename=\"{}\" filesize=\"{size}\"{caption_attribute}><figure class=\"attachment attachment--file attachment--{}\"><figcaption class=\"attachment__caption\">{caption_html}</figcaption></figure></action-text-attachment>", esc(sgid), esc(&content_type), esc(&filename), esc(extension)));
+            let (preview_attribute, figure_class, preview_html) = if let Some(format) = image_format(&content_type) {
+                let path = inline_image_representation_path(blob_key, blob_id, &filename, format)?;
+                let dimensions = match (width, height) {
+                    (Some(width), Some(height)) if width > 0 && height > 0 => format!(" width=\"{width}\" height=\"{height}\""),
+                    _ => String::new(),
+                };
+                (format!("{dimensions} previewable=\"true\""), "preview", format!("<img src=\"{}\">", esc(&path)))
+            } else {
+                (String::new(), "file", String::new())
+            };
+            rendered.push_str(&format!("<action-text-attachment sgid=\"{}\" content-type=\"{}\" filename=\"{}\" filesize=\"{size}\"{caption_attribute}{preview_attribute}><figure class=\"attachment attachment--{figure_class} attachment--{}\">{preview_html}<figcaption class=\"attachment__caption\">{caption_html}</figcaption></figure></action-text-attachment>", esc(sgid), esc(&content_type), esc(&filename), esc(extension)));
             expected.retain(|id| *id != blob_id);
         } else {
             rendered.push_str(found.as_str());
@@ -7708,13 +7766,22 @@ async fn signed_representation_get(
     let id = blob_id_from_token(key, &token).ok_or(StatusCode::NOT_FOUND)?;
     let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
     let (format, kind) = if let Some(format) = image_format(&content_type) {
-        (format, "thumb")
+        let inline = image_variation_token_sized(key, format, 1024, 768)?;
+        if memcmp::eq(variation.as_bytes(), inline.as_bytes()) {
+            (format, "inline")
+        } else {
+            (format, "thumb")
+        }
     } else if safe_inline_video(&content_type) {
         ("webp", "poster")
     } else {
         return Err(StatusCode::NOT_FOUND);
     };
-    let expected = image_variation_token(key, format)?;
+    let expected = if kind == "inline" {
+        image_variation_token_sized(key, format, 1024, 768)?
+    } else {
+        image_variation_token(key, format)?
+    };
     if !memcmp::eq(variation.as_bytes(), expected.as_bytes()) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -7732,6 +7799,12 @@ async fn signed_representation_get(
             if kind == "poster" {
                 let _ = tokio::task::spawn_blocking(move || {
                     analyze_video_and_poster(&input, &stored_copy)
+                })
+                .await;
+            } else if kind == "inline" {
+                let output_copy = output.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    generate_inline_image_variant(&input, &output_copy)
                 })
                 .await;
             } else {
@@ -7768,6 +7841,10 @@ fn remove_attachment_files(stored: &str) {
         let _ = std::fs::remove_file(
             dir.join("variants")
                 .join(format!("{stored}-thumb.{format}")),
+        );
+        let _ = std::fs::remove_file(
+            dir.join("variants")
+                .join(format!("{stored}-inline.{format}")),
         );
     }
 }
@@ -8371,7 +8448,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
-        CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
         CREATE TABLE IF NOT EXISTS inline_embeds(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,blob_id INTEGER NOT NULL REFERENCES inline_blobs(id) ON DELETE CASCADE,PRIMARY KEY(message_id,blob_id));
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
@@ -8409,6 +8486,19 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         if !exists {
             conn.execute(
                 &format!("ALTER TABLE attachments ADD COLUMN {column} REAL"),
+                [],
+            )?;
+        }
+    }
+    for column in ["width", "height"] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('inline_blobs') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE inline_blobs ADD COLUMN {column} INTEGER"),
                 [],
             )?;
         }
@@ -8567,6 +8657,7 @@ fn render_imported_rich_text(
     db: &Db,
     signing_key: &[u8],
     imported_key: Option<&[u8]>,
+    blob_key: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = db.get()?;
     let mut last_id = 0_i64;
@@ -8582,7 +8673,7 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source) in &batch {
-            let inline = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key)
+            let inline = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key, blob_key)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
@@ -8655,7 +8746,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     let imported_cookie_signing_key = campfire_secret.as_deref().map(rails_cookie_key).transpose()?;
     if command.as_deref() == Some("--render-imported-rich-text") {
-        render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref())?;
+        render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref(), imported_blob_signing_key.as_deref().unwrap_or(&blob_signing_key))?;
         return Ok(());
     }
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;

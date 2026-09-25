@@ -45,11 +45,11 @@ python tools/import_campfire.py \
   --target-uploads /path/to/rustfire/data/uploads
 ```
 
-The offline importer preserves account settings and styles, user IDs and passwords, session records, bans, rooms, memberships, message IDs and timestamps, original plain-text search content, boosts, searches, bot webhooks, push subscriptions, file attachments, inline files, avatars, and the account logo. It copies local Active Storage bytes into the new upload directory, then renders imported rich text with Rustfire's sanitizer. It builds the target in a temporary directory and publishes it only after validation. The source remains read-only. Keep the original secret key base configured when running Rustfire afterward so existing signed mentions, blobs, and session cookies can be verified. Test the imported copy before replacing a production service.
+The offline importer preserves account settings and styles, user IDs and passwords, session records, bans, rooms, memberships, message IDs and timestamps, original plain-text search content, boosts, searches, bot webhooks, push subscriptions, file attachments, inline files and images, avatars, and the account logo. It copies local Active Storage bytes into the new upload directory, prepares inline image variants, then renders imported rich text with Rustfire's sanitizer. It builds the target in a temporary directory and publishes it only after validation. The source remains read-only. Keep the original secret key base configured when running Rustfire afterward so existing signed mentions, blobs, and session cookies can be verified. Test the imported copy before replacing a production service.
 
 If Campfire has push subscriptions, also set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to its original VAPID keys before import. The importer verifies the pair and creates Rustfire's key file so those subscriptions retain the same application server key.
 
-The importer currently stops if Campfire has inline image, video, or PDF previews, an unknown attachment type, or a message without its plain-text search-index row. It requires local Active Storage files and a stopped source app for a consistent snapshot. These cases, plus full rich-text rendering and media edge cases, remain migration parity work.
+The importer currently stops if Campfire has inline video or PDF previews, an unsupported or undecodable inline image, an unknown attachment type, or a message without its plain-text search-index row. It requires local Active Storage files and a stopped source app for a consistent snapshot. These cases, plus full rich-text rendering and media edge cases, remain migration parity work.
 
 ## Implemented
 
@@ -70,7 +70,7 @@ The importer currently stops if Campfire has inline image, video, or PDF preview
 - Rails-format signed avatar URLs in autocomplete, including Campfire's timestamp version; signed routes verify their purpose and signature. Missing human avatars render the upstream initials and color pattern, missing bot avatars use the upstream asset, and uploaded avatars serve cached 512-pixel WebP variants.
 - Boosts with signed booster avatars and names, owner-only reveal/delete controls, individually addressable markup, and append/remove live events. Paired boost append samples match Campfire's parsed element, attribute, and text content when given the same boost.
 - Profile name/email/password/bio and avatar editing with source-style nested forms, notification controls, and stateless four-hour Rails-format device-transfer links; account name, room-creation setting, and logo forms using the source account routes and panel controls, 512/192-pixel PNG logo variants, custom CSS, an account roster grouped by administrators and members with the source's Turbo Stream page sequence and parsed user-row markup on matched fixtures, administrator role changes, deactivation and bans, and live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
-- Offline import of a stopped Campfire SQLite installation's core records, local media, and inline non-preview files, including its VAPID key and signed browser sessions, with a disposable source-database and boot verification probe
+- Offline import of a stopped Campfire SQLite installation's core records, local media, inline files and images, including its VAPID key and signed browser sessions, with a disposable source-database and boot verification probe
 - Session and room access control
 - CSRF checks for authenticated writes and public setup, sign-in, join, and device sign-in forms; same-origin WebSocket handshakes; sign-in limited to 10 attempts per IP over three minutes
 - Room-scoped WebSocket fanout and message catch-up after reconnect, so sockets do not process events for unrelated rooms and missed messages can be recovered; timestamp-based room refresh also replaces edited messages missed while disconnected
@@ -81,7 +81,7 @@ The importer currently stops if Campfire has inline image, video, or PDF preview
 ## Remaining parity work
 
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior
-- Remaining ActionText rich-text behavior, inline media previews, media format and metadata edge cases, and exact link preview rendering
+- Remaining ActionText rich-text behavior, inline video and PDF previews, image gallery presentation, media format and metadata edge cases, and exact link preview rendering
 - Exact ActionText mention HTML and webhook triggering, full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior and cross-browser push delivery validation
 - Remaining webhook response edge cases and JSON API compatibility

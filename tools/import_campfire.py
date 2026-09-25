@@ -44,6 +44,27 @@ def store_blob(source_files, uploads, key, byte_size):
     return stored
 
 
+def prepare_inline_image(uploads, stored, content_type, width, height):
+    formats = {"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif"}
+    variant_dir = uploads / "variants"
+    variant_dir.mkdir(exist_ok=True)
+    output = variant_dir / f"{stored}-inline.{formats[content_type]}"
+    temporary = variant_dir / f"inline-{uuid.uuid4()}.{formats[content_type]}"
+    try:
+        dimensions = []
+        for field in ("width", "height"):
+            result = subprocess.run(("vipsheader", "-f", field, str(uploads / stored)), capture_output=True, text=True, check=True)
+            dimensions.append(int(result.stdout.strip()))
+        if dimensions != [width, height]:
+            raise ValueError(f"inline image {stored} dimensions do not match Active Storage metadata")
+        subprocess.run(("vips", "thumbnail", str(uploads / stored), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
+        os.replace(temporary, output)
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        raise ValueError(f"cannot render inline image {stored} ({content_type})") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def import_data(source, target, source_files, uploads):
     if target.execute("SELECT EXISTS(SELECT 1 FROM users)").fetchone()[0]:
         raise ValueError("the Rustfire database already contains users")
@@ -134,18 +155,24 @@ def import_data(source, target, source_files, uploads):
         counts["attachments"] += 1
 
     inline = rows(source, """SELECT rich.record_id,blob.id,blob.key,blob.filename,
-        COALESCE(blob.content_type,'application/octet-stream'),blob.byte_size,blob.created_at
+        COALESCE(blob.content_type,'application/octet-stream'),blob.byte_size,blob.created_at,blob.metadata
         FROM active_storage_attachments attachment JOIN active_storage_blobs blob ON blob.id=attachment.blob_id
         JOIN action_text_rich_texts rich ON rich.id=attachment.record_id AND rich.record_type='Message' AND rich.name='body'
         WHERE attachment.record_type='ActionText::RichText' AND attachment.name='embeds'""")
     counts["inline_embeds"] = 0
-    for message_id, blob_id, key, filename, content_type, size, created in inline:
-        if content_type.startswith(("image/", "video/")) or content_type == "application/pdf":
+    for message_id, blob_id, key, filename, content_type, size, created, metadata in inline:
+        if (content_type.startswith("image/") and content_type not in ("image/png", "image/jpeg", "image/gif", "image/webp", "image/avif")) or content_type.startswith("video/") or content_type == "application/pdf":
             raise ValueError(f"inline media preview for blob {blob_id} ({content_type}) needs migration support")
         if not target.execute("SELECT EXISTS(SELECT 1 FROM inline_blobs WHERE id=?)", (blob_id,)).fetchone()[0]:
+            details = json.loads(metadata or "{}")
+            width, height = details.get("width"), details.get("height")
+            if content_type.startswith("image/") and (not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0):
+                raise ValueError(f"inline image blob {blob_id} is missing dimensions")
             stored = store_blob(source_files, uploads, key, size)
-            target.execute("""INSERT INTO inline_blobs(id,filename,content_type,stored_name,byte_size,created_at)
-                VALUES(?,?,?,?,?,?)""", (blob_id, filename, content_type, stored, size, created))
+            if content_type.startswith("image/"):
+                prepare_inline_image(uploads, stored, content_type, width, height)
+            target.execute("""INSERT INTO inline_blobs(id,filename,content_type,stored_name,byte_size,created_at,width,height)
+                VALUES(?,?,?,?,?,?,?,?)""", (blob_id, filename, content_type, stored, size, created, width, height))
         target.execute("INSERT INTO inline_embeds(message_id,blob_id) VALUES(?,?)", (message_id, blob_id))
         counts["inline_embeds"] += 1
     unmatched = source.execute("""SELECT count(*) FROM active_storage_attachments attachment
