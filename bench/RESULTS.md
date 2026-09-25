@@ -350,3 +350,19 @@ On a 1,100-user fixture, the same paired script measured `GET /account/edit` wit
 All rows had zero HTTP errors. At a 100 ms p95 threshold for this full-page HTML read, Rustfire met it through 64 tested clients; Campfire exceeded it at the first tested client. This shows a larger short-run concurrency margin for this particular screen and fixture. The timed build preceded the account-specific stylesheet adjustment below, so the listed response sizes apply to that build. Static assets, image loads, browser rendering, and writes were outside the timed path. Neither application was tested to a failure limit; sustained capacity and whole-app performance remain unproven.
 
 At a 1280 px wide dark-mode browser viewport, the pinned Campfire panel measured x=417.53 px, y=50 px, width=444.92 px. The adjusted Rustfire panel measured x=417.5 px, y=50 px, width=445 px. The invite text field started at x=500.47 px, y=435.88 px in Campfire and x=500.5 px, y=435.38 px in Rustfire. This is a geometry check of the visible top of the page; font, icon treatment, roster presentation, other themes and viewport sizes, and the outer document still need visual parity work. The account stylesheet loads before user custom CSS.
+
+## Profile forms and device transfer
+
+Rustfire's profile now displays the source's nested name, email, password, bio, and avatar forms; per-room notification buttons; PWA install notice; and QR, copy, and share controls for a four-hour device sign-in link. The transfer page submits automatically, as it does in Campfire. Profile GETs now generate a Rails-format signed link without adding a database row. With the source secret configured, a Campfire link signed in the disposable source fixture authenticated on Rustfire, and a Rustfire link authenticated on Campfire. A browser followed Rustfire's link through the automatic POST to the room without a page error. The paired probe also compared profile name, email, bio, and involvement writes and their database values.
+
+For the same two-membership fixture at a 1280 px dark-mode viewport, Campfire's profile panel was 444.92 × 1061.25 px at x=417.53, y=50; Rustfire's was 445 × 1061.39 px at x=417.5, y=50. Campfire's first notification row started at y=730.66 and transfer input at y=963.47; Rustfire's started at y=731 and y=964. The fixture's user names and avatars differed, and the rest of the HTML and browser behavior have not been established as identical.
+
+`bench/paired_profile.py --requests 320` then measured short warm `GET /users/me/profile` runs on one host with four Puma workers, one release Rustfire process, and persistent connections. The fixture had one open-room membership in each app. Both returned 200 throughout; the source HTML response was 35,622 bytes and Rustfire's was 13,807 bytes. The load generator shared the server host. This is one run, with two warmup requests per client and no CPU or memory measurement.
+
+| Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,950 | 175 | 0.13 ms | 14.29 ms |
+| 8 | 14,673 | 365 | 1.09 ms | 36.91 ms |
+| 32 | 16,410 | 682 | 3.79 ms | 74.71 ms |
+
+The screen's forms and sampled mutations match, but its full response bytes differ substantially, including source JavaScript imports and document markup. These numbers show a large speed margin for this narrower read workload under the tested conditions; they do not establish a whole-app advantage or a maximum sustainable client count.

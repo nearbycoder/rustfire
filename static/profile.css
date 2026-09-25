@@ -1,0 +1,81 @@
+.profile-nav > form { pointer-events: auto; margin: 0; }
+.profile-settings { gap: 24px; }
+.profile-settings .notifications-help { width: 100%; margin: 0; }
+.profile-settings .notifications-help > summary.btn {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  height: 58px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 10px;
+  border-radius: 10px;
+  text-align: left;
+  list-style: none;
+  background: #eee;
+}
+.profile-settings .notifications-help > summary.btn strong { flex: 1; margin-left: 10px; }
+.profile-settings .notifications-help > summary.btn img { flex: none; }
+.profile-settings .notifications-help > summary.btn::-webkit-details-marker { display: none; }
+.profile-settings .notifications-help p { margin: 12px 0; }
+.profile-settings .pwa__installer { display: none; }
+.profile-settings .pwa--can-install .pwa__installer { display: block; }
+.profile-settings .pwa__installer .btn { width: auto; padding: 0 14px; }
+.profile-settings .avatar__form .avatar {
+  width: 100px;
+  height: 100px;
+  min-width: 100px;
+  min-height: 100px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+}
+.profile-settings .avatar__form .avatar img {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.profile-settings .avatar__form { height: 102px; min-height: 102px; margin-bottom: -9px; }
+.profile-settings form { margin: 0; }
+.profile-settings .profile-fields { display: flex; flex-direction: column; gap: 14.5px; }
+.profile-settings .profile-fields > .flex { align-items: center; gap: 7px; }
+.profile-settings .profile-fields > .flex:has(textarea) { align-items: flex-start; }
+.profile-settings .profile-fields label.input--actor { flex: 1; min-width: 0; padding: 9px 15px; gap: 8px; }
+.profile-settings .profile-fields label.input--actor > input,
+.profile-settings .profile-fields label.input--actor > textarea {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  outline: 0;
+  font-size: 24px;
+  line-height: 31px;
+}
+.profile-settings .profile-fields label.input--actor > img { flex: none; }
+.profile-settings .profile-fields label:has(textarea) { align-items: flex-start; }
+.profile-settings .profile-fields textarea { min-height: 94px; }
+.profile-settings .profile-fields > button { align-self: center; }
+.profile-settings > .margin-block { margin-top: 26px; padding: 16px 8.9px; }
+.profile-settings > .margin-block > menu { padding: 16px 8.9px; gap: 16px; }
+.profile-settings > .margin-block > menu > hr { margin: 8px 0; }
+.profile-settings .membership-item { display: flex; align-items: center; gap: 8.9px; list-style: none; }
+.profile-settings .membership-item > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
+.profile-settings .membership-item > hr { flex: 1; margin: 8px 0; border: 0; border-top: 1px dashed var(--line); }
+.profile-settings .membership-item .btn { width: 34px; height: 34px; min-width: 34px; min-height: 34px; }
+.profile-settings .membership-item form { margin: 0; }
+.profile-settings .profile-transfer { margin-top: 8px; border: 0; padding: 16px 0; text-align: center; }
+.profile-settings .profile-transfer legend { margin: 0 auto; padding: 0 2px; display: flex; gap: 8.9px; }
+.profile-settings .profile-transfer > div { display: flex; flex-direction: column; gap: 16px; }
+.profile-settings .profile-transfer input { width: 100%; height: 40.4px; padding: 8px 12.8px; }
+.profile-settings .profile-transfer .center { justify-content: center; }
+@media (prefers-color-scheme: dark) {
+  .profile-settings .notifications-help > summary.btn { background: #242424; }
+  .profile-settings .notifications-help > summary.btn img { filter: invert(1); }
+  .profile-settings .profile-fields .colorize--black,
+  .profile-settings .profile-transfer .colorize--black,
+  .profile-settings .membership-item img { filter: invert(1); }
+  .profile-settings .membership-item .fill-shade { background: transparent; }
+}

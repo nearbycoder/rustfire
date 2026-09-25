@@ -26,7 +26,7 @@ Configuration:
 - `RUSTFIRE_DISABLE_WEBHOOKS` — set to `true` to suppress outbound bot webhook delivery
 - `RUSTFIRE_DISABLE_PUSH` — set to `true` to suppress outbound Web Push delivery
 - `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid.
-- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to issue and verify Rails mention, avatar, and blob IDs with Campfire's verifier keys. Keep it configured while imported messages or attachments use those IDs. Rustfire also accepts IDs signed with its own persistent keys.
+- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to issue and verify Rails mention, avatar, blob, and device-transfer IDs with Campfire's verifier keys. Keep it configured while imported messages or attachments use those IDs. Rustfire also accepts IDs signed with its own persistent keys.
 - `RUSTFIRE_TRUSTED_PROXY_IPS` — comma-separated IPs of reverse proxies that append `X-Forwarded-For`; empty by default. Session IPs and bans use the direct peer unless it is listed here.
 
 The server creates its SQLite schema at startup and enables WAL mode. Run behind a TLS proxy for network use. Back up the database and upload directory together.
@@ -48,7 +48,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Mention autocomplete with Campfire's response fields and Rails-format signed mention IDs, verified Trix mention attachments, and bot webhook dispatch for selected bot mentions in regular rooms (plain `@name` text does not trigger a bot); older Rustfire IDs remain readable, and original Campfire IDs can be verified when its secret key base is configured
 - Rails-format signed avatar URLs in autocomplete, including Campfire's timestamp version; signed routes verify their purpose and signature. Missing human avatars render the upstream initials and color pattern, missing bot avatars use the upstream asset, and uploaded avatars serve cached 512-pixel WebP variants.
 - Boosts with signed booster avatars and names, owner-only reveal/delete controls, individually addressable markup, and append/remove live events. Paired boost append samples match Campfire's parsed element, attribute, and text content when given the same boost.
-- Profile name/email/password/bio and avatar editing, account name, room-creation setting, and logo forms using the source account routes and panel controls, 512/192-pixel PNG logo variants, custom CSS, an account roster grouped by administrators and members with the source's Turbo Stream page sequence and parsed user-row markup on matched fixtures, administrator role changes, deactivation and bans, four-hour session transfer links, and live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
+- Profile name/email/password/bio and avatar editing with source-style nested forms, notification controls, and stateless four-hour Rails-format device-transfer links; account name, room-creation setting, and logo forms using the source account routes and panel controls, 512/192-pixel PNG logo variants, custom CSS, an account roster grouped by administrators and members with the source's Turbo Stream page sequence and parsed user-row markup on matched fixtures, administrator role changes, deactivation and bans, and live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
 - Session and room access control
 - CSRF checks for authenticated writes and public setup, sign-in, join, and device sign-in forms; same-origin WebSocket handshakes; sign-in limited to 10 attempts per IP over three minutes
 - Room-scoped WebSocket fanout and message catch-up after reconnect, so sockets do not process events for unrelated rooms and missed messages can be recovered; timestamp-based room refresh also replaces edited messages missed while disconnected
@@ -63,7 +63,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Exact ActionText mention HTML and webhook triggering, full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior and cross-browser push delivery validation
 - Full webhook response/MIME behavior and JSON API compatibility
-- Remaining account/user administration and exact behavior for bans and session transfer
+- Remaining account/user administration and exact behavior for bans and profile/session-transfer edge cases
 - Remaining small interaction features
 - Content Security Policy and broader security review
 - Full upstream route and test compatibility

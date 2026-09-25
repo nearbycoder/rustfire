@@ -627,6 +627,49 @@ fn avatar_id_from_token(key: &[u8], token: &str) -> Option<i64> {
     }
     metadata.get("data")?.as_i64().filter(|id| *id > 0)
 }
+fn transfer_token(
+    key: &[u8],
+    id: i64,
+    expires_at: chrono::DateTime<Utc>,
+) -> Result<String, openssl::error::ErrorStack> {
+    let exp = expires_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let payload = json!({"_rails":{"data":id,"exp":exp,"pur":"user/transfer"}}).to_string();
+    let encoded = URL_SAFE_NO_PAD.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())?;
+    let digest = signature
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
+fn transfer_id_from_token(key: &[u8], token: &str) -> Option<i64> {
+    if token.len() > 2048 {
+        return None;
+    }
+    let (encoded, signature) = token.split_once("--")?;
+    if signature.len() != 64 {
+        return None;
+    }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())
+        .ok()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let rails = payload.get("_rails")?;
+    if rails.get("pur")?.as_str()? != "user/transfer" {
+        return None;
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(rails.get("exp")?.as_str()?).ok()?;
+    if expires_at <= Utc::now() {
+        return None;
+    }
+    rails.get("data")?.as_i64().filter(|id| *id > 0)
+}
 fn blob_token(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
     let payload = json!({"_rails":{"data":id,"pur":"blob_id"}}).to_string();
     let encoded = STANDARD.encode(payload);
@@ -1172,6 +1215,11 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
     } else {
         ""
     };
+    let profile_stylesheet = if body.contains("profile-settings") {
+        "<link rel='stylesheet' href='/static/profile.css'>"
+    } else {
+        ""
+    };
     let nav = if let Some(u) = current {
         format!(
             "<div class='top-user'><span>{}</span><a href='/users/me/profile'>Settings</a><form method='post' action='/session/logout'><button>Sign out</button></form></div>",
@@ -1182,7 +1230,7 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
     };
     let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
     let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}<link rel='stylesheet' href='/account/custom_styles.css'><script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}<link rel='stylesheet' href='/account/custom_styles.css'><script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
         esc(token),
         VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
         esc(title),
@@ -1246,10 +1294,6 @@ fn public_url(headers: &HeaderMap, path: &str) -> String {
         "https"
     };
     format!("{scheme}://{host}{path}")
-}
-fn qr_link(url: &str, label: &str) -> String {
-    let id = URL_SAFE_NO_PAD.encode(url);
-    format!("<a href='/qr_code/{id}'>{}</a>", esc(label))
 }
 fn valid_webhook_url(url: &str) -> bool {
     if url.is_empty() {
@@ -1835,26 +1879,18 @@ async fn reject_banned_ip(
     }
 }
 fn transfer_link(state: &AppState, uid: i64) -> Result<String, StatusCode> {
-    let db = pool(state)?;
-    db.execute(
-        "DELETE FROM session_transfers WHERE expires_at<=?1",
-        [now()],
-    )
-    .map_err(db_err)?;
-    let token = Uuid::new_v4().to_string();
-    let expiry = (Utc::now() + Duration::hours(4)).to_rfc3339();
-    db.execute(
-        "INSERT INTO session_transfers(token,user_id,expires_at) VALUES(?1,?2,?3)",
-        params![token, uid, expiry],
-    )
-    .map_err(db_err)?;
+    let key = state
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&state.avatar_signing_key);
+    let token = transfer_token(key, uid, Utc::now() + Duration::hours(4)).map_err(db_err)?;
     Ok(format!("/session/transfers/{token}"))
 }
 async fn transfer_show(Path(token): Path<String>) -> AppResult {
     Ok(render_unauth(
         "Sign in on this device",
         &format!(
-            "<section class='form-card'><h1>Sign in on this device</h1><p>Use this private link to sign in.</p><form method='post' action='/session/transfers/{}'><button class='button'>Sign in</button></form></section>",
+            "<form data-controller='auto-submit' method='post' action='/session/transfers/{}'><input type='hidden' name='_method' value='put'></form>",
             esc(&token)
         ),
     ))
@@ -1865,11 +1901,24 @@ async fn transfer_update(
     headers: HeaderMap,
     Path(token): Path<String>,
 ) -> AppResult {
+    let signed_uid = transfer_id_from_token(&s.avatar_signing_key, &token).or_else(|| {
+        s.imported_avatar_signing_key
+            .as_deref()
+            .and_then(|key| transfer_id_from_token(key, &token))
+    });
     let db = pool(&s)?;
-    let uid: Option<i64> = db.query_row(
-        "SELECT t.user_id FROM session_transfers t JOIN users u ON u.id=t.user_id WHERE t.token=?1 AND t.expires_at>?2 AND u.status=0",
-        params![token, now()], |r| r.get(0),
-    ).optional().map_err(db_err)?;
+    let uid: Option<i64> = if let Some(id) = signed_uid {
+        db.query_row("SELECT id FROM users WHERE id=?1 AND status=0", [id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(db_err)?
+    } else {
+        db.query_row(
+            "SELECT t.user_id FROM session_transfers t JOIN users u ON u.id=t.user_id WHERE t.token=?1 AND t.expires_at>?2 AND u.status=0",
+            params![token, now()], |r| r.get(0),
+        ).optional().map_err(db_err)?
+    };
     let uid = uid.ok_or(StatusCode::BAD_REQUEST)?;
     drop(db);
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
@@ -2075,6 +2124,35 @@ async fn login_post(
         Html("<p>Incorrect email or password. <a href='/session/new'>Try again</a>.</p>"),
     )
         .into_response())
+}
+async fn session_post(
+    State(s): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    RawForm(raw): RawForm,
+) -> AppResult {
+    let values = fields(&raw).0;
+    if values.get("_method").map(String::as_str) == Some("delete") {
+        return logout(State(s), headers, raw).await;
+    }
+    let email_address = values
+        .get("email_address")
+        .cloned()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let password = values
+        .get("password")
+        .cloned()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    login_post(
+        State(s),
+        ConnectInfo(addr),
+        headers,
+        Form(Login {
+            email_address,
+            password,
+        }),
+    )
+    .await
 }
 async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> AppResult {
     if let Some(t) = cookie(&headers, "session_token") {
@@ -3164,19 +3242,21 @@ async fn push_test_notification(
     }
     Ok(Redirect::to("/users/me/push_subscriptions").into_response())
 }
-#[derive(Deserialize)]
-struct InvolvementForm {
-    involvement: String,
-}
 async fn involvement_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(rid): Path<i64>,
-    Form(f): Form<InvolvementForm>,
+    Query(query): Query<HashMap<String, String>>,
+    RawForm(raw): RawForm,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let room = room_for(&s, u.id, rid)?;
-    if !["everything", "mentions", "nothing", "invisible"].contains(&f.involvement.as_str()) {
+    let submitted = fields(&raw).0;
+    let involvement = submitted
+        .get("involvement")
+        .or_else(|| query.get("involvement"))
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    if !["everything", "mentions", "nothing", "invisible"].contains(&involvement.as_str()) {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let mut db = pool(&s)?;
@@ -3190,14 +3270,17 @@ async fn involvement_post(
         .map_err(db_err)?;
     tx.execute(
         "UPDATE memberships SET involvement=?1 WHERE room_id=?2 AND user_id=?3",
-        params![f.involvement, rid, u.id],
+        params![involvement, rid, u.id],
     )
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
-    if room.kind != "Rooms::Direct" && (previous == "invisible") != (f.involvement == "invisible") {
+    if room.kind != "Rooms::Direct" && (previous == "invisible") != (involvement == "invisible") {
         notify_room_lists(&s, [u.id]);
     }
-    Ok(Redirect::to(&format!("/rooms/{rid}/involvement")).into_response())
+    Ok(found_redirect(&public_url(
+        &headers,
+        &format!("/rooms/{rid}/involvement"),
+    )))
 }
 #[derive(Deserialize)]
 struct Paging {
@@ -5474,10 +5557,77 @@ async fn join_post(
     db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) SELECT id,?1,'mentions',?2 FROM rooms WHERE type='Rooms::Open'",params![uid,t]).map_err(db_err)?;
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
+fn profile_translation_button(english: &str, translations: [&str; 6]) -> String {
+    let mut entries = String::new();
+    for (flag, phrase) in ["🇺🇸", "🇪🇸", "🇫🇷", "🇮🇳", "🇩🇪", "🇧🇷", "🇯🇵"]
+        .into_iter()
+        .zip(std::iter::once(english).chain(translations))
+    {
+        entries.push_str(&format!(
+            "<dt>{flag}</dt><dd class='margin-none'>{}</dd>",
+            esc(phrase)
+        ));
+    }
+    format!(
+        "<details class='position-relative' data-controller='popup'><summary class='btn' tabindex='-1'><img aria-hidden='true' src='/assets/globe-8c54d23b.svg' width='20' height='20'><span class='for-screen-reader'>Translate</span></summary><div class='language-list-menu shadow'><dl class='language-list'>{entries}</dl></div></details>"
+    )
+}
+fn profile_membership_item(id: i64, name: &str, kind: &str, involvement: &str) -> String {
+    let (next, label, icon) = if kind == "Rooms::Direct" {
+        match involvement {
+            "everything" => (
+                "nothing",
+                "Notifying about all messages",
+                "notification-bell-everything-cde41b14.svg",
+            ),
+            _ => (
+                "everything",
+                "Notifications are off",
+                "notification-bell-nothing-d8096c76.svg",
+            ),
+        }
+    } else {
+        match involvement {
+            "everything" => (
+                "nothing",
+                "Notifying about all messages",
+                "notification-bell-everything-cde41b14.svg",
+            ),
+            "nothing" => (
+                "invisible",
+                "Notifications are off",
+                "notification-bell-nothing-d8096c76.svg",
+            ),
+            "invisible" => (
+                "mentions",
+                "Notifications are off and room invisible in sidebar",
+                "notification-bell-invisible-8b495073.svg",
+            ),
+            _ => (
+                "everything",
+                "Notifying about @ mentions",
+                "notification-bell-mentions-945d1b91.svg",
+            ),
+        }
+    };
+    let frame = if kind == "Rooms::Direct" {
+        format!("involvement_rooms_direct_{id}")
+    } else if kind == "Rooms::Closed" {
+        format!("involvement_rooms_closed_{id}")
+    } else {
+        format!("involvement_rooms_open_{id}")
+    };
+    let label_id = frame.replacen("involvement_", "involvement_label_", 1);
+    format!(
+        "<li class='flex align-center gap margin-none min-width membership-item'><a href='/rooms/{id}' class='overflow-ellipsis fill-shade txt-primary txt-undecorated'><strong>{}</strong></a><hr class='separator' aria-hidden='true'><span class='txt-small'><turbo-frame id='{frame}'><form class='button_to' method='post' action='/rooms/{id}/involvement?involvement={next}'><input type='hidden' name='_method' value='put'><button type='submit' role='checkbox' aria-checked='true' aria-labelledby='{label_id}' tabindex='0' class='btn {involvement}'><img aria-hidden='true' src='/assets/{icon}' width='20' height='20'><span class='for-screen-reader' id='{label_id}'>{label}</span></button></form></turbo-frame></span></li>",
+        esc(name)
+    )
+}
 async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
     let transfer = public_url(&headers, &transfer_link(&s, u.id)?);
-    let transfer_qr = qr_link(&transfer, "Show private sign-in QR code");
+    let transfer_qr = format!("/qr_code/{}", URL_SAFE.encode(transfer.as_bytes()));
+    let transfer = html_escape::encode_double_quoted_attribute(&transfer);
     let db = pool(&s)?;
     let bio: String = db
         .query_row(
@@ -5486,15 +5636,121 @@ async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResul
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
+    let avatar_url = avatar_path(avatar_key, u.id, &u.updated_at)?;
+    let delete_avatar = if db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM avatars WHERE user_id=?1)",
+            [u.id],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(db_err)?
+    {
+        format!(
+            "<form class='button_to' method='post' action='{}'><input type='hidden' name='_method' value='delete'><button class='btn btn--negative txt-small avatar__delete-btn' type='submit'><img aria-hidden='true' src='/assets/minus-b31a1093.svg' width='20' height='20'><span class='for-screen-reader'>Delete avatar</span></button></form>",
+            avatar_url.split('?').next().unwrap_or(&avatar_url)
+        )
+    } else {
+        String::new()
+    };
+    let mut shared_memberships = String::new();
+    let mut direct_memberships = String::new();
+    let mut q = db.prepare("SELECT r.id,COALESCE(r.name,''),r.type,m.involvement FROM memberships m JOIN rooms r ON r.id=m.room_id WHERE m.user_id=?1 ORDER BY lower(r.name)").map_err(db_err)?;
+    for row in q
+        .query_map([u.id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(db_err)?
+    {
+        let (rid, name, kind, involvement) = row.map_err(db_err)?;
+        let display = if kind == "Rooms::Direct" {
+            db.query_row("SELECT group_concat(name, ', ') FROM (SELECT u.name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.room_id=?1 AND u.id!=?2 ORDER BY u.id)", params![rid,u.id], |r| r.get::<_,Option<String>>(0)).map_err(db_err)?.unwrap_or_else(||u.name.clone())
+        } else {
+            name
+        };
+        let item = profile_membership_item(rid, &display, &kind, &involvement);
+        if kind == "Rooms::Direct" {
+            direct_memberships.push_str(&item);
+        } else {
+            shared_memberships.push_str(&item);
+        }
+    }
+    let membership_divider = if !shared_memberships.is_empty() && !direct_memberships.is_empty() {
+        "<hr class='separator full-width' style='--border-style: solid'>"
+    } else {
+        ""
+    };
+    let name_translation = profile_translation_button(
+        "Enter your name",
+        [
+            "Introduce tu nombre",
+            "Entrez votre nom",
+            "अपना नाम दर्ज करें",
+            "Geben Sie Ihren Namen ein",
+            "Insira seu nome",
+            "お名前を入力してください",
+        ],
+    );
+    let email_translation = profile_translation_button(
+        "Enter your email address",
+        [
+            "Introduce tu correo electrónico",
+            "Entrez votre adresse courriel",
+            "अपना ईमेल पता दर्ज करें",
+            "Geben Sie Ihre E-Mail-Adresse ein",
+            "Insira seu endereço de email",
+            "メールアドレスを入力してください",
+        ],
+    );
+    let password_translation = profile_translation_button(
+        "Change password",
+        [
+            "Cambiar contraseña",
+            "Changer le mot de passe",
+            "पासवर्ड बदलें",
+            "Passwort ändern",
+            "Alterar senha",
+            "パスワードを変更",
+        ],
+    );
+    let bio_translation = profile_translation_button(
+        "Enter a few words about yourself.",
+        [
+            "Ingresa algunas palabras sobre ti mismo.",
+            "Saisissez quelques mots à propos de vous-même.",
+            "अपने बारे में कुछ शब्द लिखें.",
+            "Geben Sie ein paar Worte über sich selbst ein.",
+            "Insira alguma palavras sobre você.",
+            "ご自分について簡単に記入してください。",
+        ],
+    );
+    let name = html_escape::encode_double_quoted_attribute(&u.name);
+    let email = html_escape::encode_double_quoted_attribute(&u.email);
+    let back_room = cookie(&headers, "last_room")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| room_for(&s, u.id, *id).is_ok())
+        .or_else(|| room_for(&s, u.id, 1).ok().map(|_| 1));
+    let back_href = back_room.map_or("/".to_string(), |id| format!("/rooms/{id}"));
     Ok(render(
-        "Profile",
+        &u.name,
         &format!(
-            "<section class='form-card'><h1>My profile</h1><img class='profile-avatar' src='/users/{}/avatar' alt='Your avatar'><form method='post' action='/users/me/avatar' enctype='multipart/form-data'><label>Avatar<input type='file' name='avatar' accept='image/png,image/jpeg,image/gif,image/webp,image/avif' required></label><button>Update avatar</button></form><form method='post' action='/users/me/avatar/delete'><button>Remove avatar</button></form><form method='post' action='/users/me/profile'><label>Name<input name='name' value='{}' required></label><label>Email<input type='email' name='email_address' value='{}'></label><label>New password<input type='password' name='password' minlength='8' autocomplete='new-password'></label><label>Bio<textarea name='bio' maxlength='200'>{}</textarea></label><button class='button'>Save</button></form><label>Private sign-in link (expires in four hours)<input readonly value='{}'></label><p>{transfer_qr}</p><p><a href='/users/me/push_subscriptions'>Push notification subscriptions</a></p></section>",
+            r#"<nav class='account-settings-nav profile-nav'><a href='{back_href}' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a><form method='post' action='/session' data-controller='sessions'><input type='hidden' name='_method' value='delete'><input type='hidden' name='push_subscription_endpoint'><button class='btn' data-action='sessions#logout:prevent'><img aria-hidden='true' src='/assets/logout-a6131db1.svg' width='20' height='20'><span class='for-screen-reader'>Log out</span></button></form></nav>
+<section class='panel account-settings profile-settings flex flex-column gap' style='view-transition-name: avatar-{}'>
+<details class='notifications-help pwa__instructions hide-in-pwa' data-controller='pwa-install'><summary class='btn'><img aria-hidden='true' src='/assets/external/install-f762b3be.svg' width='20' height='20'><strong>Install Rustfire as a web app.</strong><img aria-hidden='true' src='/assets/disclosure-26d63471.svg' width='10' height='10' class='disclosure'></summary><p>Some platforms require you to install Rustfire as a web app to receive push notifications.</p><div class='margin-block-start txt-align-center pwa__installer'><hr class='separator margin-block'><button type='button' class='btn btn--reversed center' data-action='pwa-install#promptInstall'><img aria-hidden='true' src='/assets/external/install-f762b3be.svg' width='20' height='20'> Install now</button></div></details>
+<div class='align-center center avatar__form gap' data-controller='upload-preview'><form class='txt-medium' data-controller='form' enctype='multipart/form-data' action='/users/me/profile' method='post' data-auto-submit-file><input type='hidden' name='_method' value='patch'><label class='btn input--file'><img aria-hidden='true' src='/assets/camera-927323b8.svg' width='20' height='20'><input id='file' class='input' accept='image/*' data-upload-preview-target='input' data-action='upload-preview#previewImage change->form#submit' type='file' name='user[avatar]'><span class='for-screen-reader'>Upload avatar</span></label></form><form data-controller='form' enctype='multipart/form-data' action='/users/me/profile' method='post' data-auto-submit-file><input type='hidden' name='_method' value='patch'><label class='btn avatar input--file txt-xx-large'><img aria-hidden='true' data-upload-preview-target='image' src='{avatar_url}' width='300' height='300'><input id='file' class='input' accept='image/*' data-upload-preview-target='input' data-action='upload-preview#previewImage change->form#submit' type='file' name='user[avatar]'><span class='for-screen-reader'>Avatar</span></label></form>{delete_avatar}</div>
+<form data-controller='form' action='/users/me/profile' method='post'><input type='hidden' name='_method' value='patch'><div class='flex flex-column gap profile-fields'><div class='flex align-center gap'>{name_translation}<label class='flex align-center gap flex-item-grow input input--actor'><input class='input txt-large' autocomplete='name' placeholder='Enter your name' autofocus='autofocus' required data-1p-ignore='true' type='text' value='{name}' name='user[name]'><img aria-hidden='true' src='/assets/person-da193438.svg' width='24' height='24' class='colorize--black'></label></div><div class='flex align-center gap'>{email_translation}<label class='flex align-center gap flex-item-grow input input--actor'><input class='input txt-large' autocomplete='username' placeholder='Enter your email address' type='email' value='{email}' name='user[email_address]'><img aria-hidden='true' src='/assets/email-6c595bc5.svg' width='24' height='24' class='colorize--black'></label></div><div class='flex align-center gap'>{password_translation}<label class='flex align-center gap flex-item-grow input input--actor'><input class='input txt-large' autocomplete='new-password' placeholder='Change password' maxlength='72' type='password' name='user[password]'><img aria-hidden='true' src='/assets/password-0896da4e.svg' width='24' height='24' class='colorize--black'></label></div><div class='flex align-start gap'>{bio_translation}<label class='flex gap input input--actor'><textarea class='input txt-large' placeholder='A few words about yourself…' maxlength='200' rows='3' name='user[bio]'>{}</textarea><img aria-hidden='true' src='/assets/bio-567a6005.svg' width='24' height='24' class='colorize--black'></label></div><button class='btn btn--reversed center txt-large' type='submit'><img aria-hidden='true' src='/assets/check-7897ff7e.svg' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></div></form>
+<div class='margin-block pad-inline pad-block fill-shade border-radius'><menu class='flex flex-column gap margin-none pad'>{shared_memberships}{membership_divider}{direct_memberships}</menu></div>
+<fieldset class='profile-transfer'><legend class='gap'><img aria-hidden='true' src='/assets/laptop-cf35e6d4.svg' width='36' height='36' class='colorize--black'><img aria-hidden='true' src='/assets/transfer-3ec4f61b.svg' width='36' height='36' class='colorize--black'><img aria-hidden='true' src='/assets/mobile-phone-d0d2301d.svg' width='36' height='36' class='colorize--black'></legend><div class='flex flex-column gap'><label for='session_transfer_url' class='for-screen-reader'>Use this link to login automatically on another device</label><input type='text' class='input' value='{transfer}' id='session_transfer_url' readonly><div class='flex align-center center gap'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{transfer_qr}' href='{transfer_qr}'><span class='for-screen-reader'>Show auto-login QR code</span><img aria-hidden='true' src='/assets/qr-code-dac3b273.svg' width='20' height='20' class='colorize--black'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{transfer}'><span class='for-screen-reader'>Copy auto-login link</span><img aria-hidden='true' src='/assets/copy-paste-4c379063.svg' width='20' height='20' class='colorize--black'></button><button class='btn' hidden data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{transfer}' data-web-share-title-value='Your sign-in link' data-web-share-text-value='This is your own private sign-in URL, DO NOT SHARE IT. Use it to sign-in on another device or if you get locked out.'><span class='for-screen-reader'>Share auto-login link</span><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20' class='colorize--black'></button></div></div></fieldset></section>"#,
             u.id,
-            esc(&u.name),
-            esc(&u.email),
-            esc(&bio),
-            esc(&transfer)
+            esc(&bio)
         ),
         Some(&u),
     ))
@@ -5502,9 +5758,64 @@ async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResul
 async fn profile_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Form(f): Form<HashMap<String, String>>,
+    req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let mut avatar = None;
+    let f = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .starts_with("multipart/form-data")
+    {
+        let mut multipart = Multipart::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut values = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
+            let field_name = field.name().unwrap_or("").to_string();
+            if matches!(field_name.as_str(), "user[avatar]" | "avatar") {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                if !safe_inline_image(&content_type) {
+                    return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                }
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
+                    return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                }
+                avatar = Some((bytes.to_vec(), content_type));
+            } else if matches!(
+                field_name.as_str(),
+                "name"
+                    | "user[name]"
+                    | "email_address"
+                    | "user[email_address]"
+                    | "password"
+                    | "user[password]"
+                    | "bio"
+                    | "user[bio]"
+                    | "_method"
+            ) {
+                values.insert(
+                    field_name,
+                    field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?,
+                );
+            }
+        }
+        values
+    } else {
+        let RawForm(raw) = RawForm::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        fields(&raw).0
+    };
     let name = form_value(&f, "name", "user[name]").unwrap_or(&u.name);
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -5534,7 +5845,10 @@ async fn profile_post(
             params![name.trim(),email,bio,password,now(),u.id],
         )
         .map_err(|_|StatusCode::CONFLICT)?;
-    Ok(Redirect::to("/users/me/profile").into_response())
+    if let Some((bytes, content_type)) = avatar {
+        save_avatar(&s, u.id, bytes, content_type)?;
+    }
+    Ok(found_redirect(&public_url(&headers, "/users/me/profile")))
 }
 async fn avatar_get(
     State(s): State<Arc<AppState>>,
@@ -5757,7 +6071,17 @@ async fn avatar_delete(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Ap
     if let Some(old) = old {
         remove_avatar_files(&old);
     }
-    Ok(Redirect::to("/users/me/profile").into_response())
+    Ok(found_redirect(&public_url(&headers, "/users/me/profile")))
+}
+async fn avatar_delete_post(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawForm(raw): RawForm,
+) -> AppResult {
+    if fields(&raw).0.get("_method").map(String::as_str) != Some("delete") {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    avatar_delete(State(s), headers).await
 }
 async fn user_show(
     State(s): State<Arc<AppState>>,
@@ -7653,7 +7977,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/qr_code/{id}", get(qr_code_show))
         .route("/first_run", get(first_run_get).post(first_run_post))
         .route("/session/new", get(login_get))
-        .route("/session", post(login_post).delete(logout))
+        .route("/session", post(session_post).delete(logout))
         .route("/session/logout", post(logout))
         .route(
             "/session/transfers/{token}",
@@ -7789,7 +8113,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(push_test_notification),
         )
         .route("/users/me/avatar/delete", post(avatar_delete))
-        .route("/users/{id}/avatar", get(avatar_get))
+        .route(
+            "/users/{id}/avatar",
+            get(avatar_get)
+                .post(avatar_delete_post)
+                .delete(avatar_delete),
+        )
         .route("/users/me/sidebar", get(sidebar_get))
         .route("/users/{id}", get(user_show))
         .route("/users/{id}/ban", post(user_ban).delete(user_unban))
@@ -8008,6 +8337,32 @@ mod tests {
         assert_eq!(
             super::avatar_path(&key, 1, "2026-09-25 01:00:54.533364").unwrap(),
             format!("/users/{token}/avatar?v=20260925010054")
+        );
+    }
+
+    #[test]
+    fn transfer_links_are_signed_and_expire() {
+        let key = super::rails_avatar_key("test-secret-key-base").unwrap();
+        let future = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let token = super::transfer_token(&key, 42, future).unwrap();
+        assert_eq!(super::transfer_id_from_token(&key, &token), Some(42));
+        assert_eq!(super::transfer_id_from_token(&[8u8; 32], &token), None);
+        assert_eq!(
+            super::transfer_id_from_token(&key, &format!("{token}A")),
+            None
+        );
+        let expired = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            super::transfer_id_from_token(&key, &super::transfer_token(&key, 42, expired).unwrap()),
+            None
+        );
+        assert_eq!(
+            super::transfer_id_from_token(&key, &super::avatar_token(&key, 42).unwrap()),
+            None
         );
     }
 

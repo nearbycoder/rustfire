@@ -204,9 +204,16 @@ def main():
             code, _, page = request(member, base, "/users/me/profile", {"name": "Member Two", "email_address": "member2@example.com", "password": "newpassword123", "bio": "I like fires"})
             assert code == 200 and "I like fires" in page
             code, _, page = request(member, base, "/users/me/profile", {"user[name]": "Member Two", "user[bio]": "Nested profile"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             code, _, page = request(member, base, "/users/me/profile")
             assert code == 200 and "Nested profile" in page
+            assert page.count("name='user[avatar]'") == 2 and "name='user[name]'" in page
+            assert "name='user[email_address]'" in page and "name='user[password]'" in page and "name='user[bio]'" in page
+            assert "class='profile-transfer'" in page and "involvement_rooms_open_1" in page
+            assert request(member, base, "/rooms/1/involvement?involvement=everything", {"_method":"put"}, method="POST")[0] == 200
+            with sqlite3.connect(f"{tmp}/test.db") as profile_db:
+                assert profile_db.execute("SELECT involvement FROM memberships WHERE room_id=1 AND user_id=2").fetchone() == ("everything",)
+            assert request(member, base, "/rooms/1/involvement?involvement=mentions", {"_method":"put"}, method="POST")[0] == 200
             assert re.search(r"meta name='vapid-public-key' content='[A-Za-z0-9_-]+'", page)
             assert request(member, base, "/users/me/push_subscriptions")[0] == 200
             assert request(admin, base, "/users/me/push_subscriptions")[0] == 200
@@ -275,6 +282,12 @@ def main():
             assert avatar_variant.is_file()
             code, _, _ = request(member, base, "/users/me/avatar/delete", {})
             assert code == 200 and not avatar_variant.exists()
+            profile_avatar_body=(b"--profile-avatar\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\npatch\r\n--profile-avatar\r\nContent-Disposition: form-data; name=\"user[avatar]\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--profile-avatar--\r\n")
+            code, _, profile_page = request(member, base, "/users/me/profile", data=profile_avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=profile-avatar"})
+            assert code == 200 and "Delete avatar" in profile_page
+            avatar_delete_path = re.search(r"action='(/users/[^']+/avatar)'", profile_page)
+            assert avatar_delete_path
+            assert request(member, base, avatar_delete_path.group(1), {"_method":"delete"}, method="POST")[0] == 200
             second_session = client()
             assert request(second_session, base, "/session/new")[0] == 200
             code, _, _ = request(second_session, base, "/session", {"email_address": "member2@example.com", "password": "newpassword123"})
@@ -694,14 +707,19 @@ def main():
             assert "data-sound='/static/sounds/bell.mp3'" in request(admin, base, f"/rooms/1/messages/{json.loads(payload)['id']}")[2]
             with admin.open(base + "/static/sounds/bell.mp3") as res:
                 assert res.status == 200 and res.headers.get_content_type() == "audio/mpeg" and len(res.read()) > 100
+            with sqlite3.connect(f"{tmp}/test.db") as transfer_db:
+                transfer_rows = transfer_db.execute("SELECT COUNT(*) FROM session_transfers").fetchone()[0]
             code, _, page = request(member, base, "/users/me/profile")
             assert code == 200, (code, page)
+            assert request(member, base, "/users/me/profile")[0] == 200
+            with sqlite3.connect(f"{tmp}/test.db") as transfer_db:
+                assert transfer_db.execute("SELECT COUNT(*) FROM session_transfers").fetchone()[0] == transfer_rows
             transfer_match = re.search(r"/session/transfers/[\w-]+", html.unescape(page))
             assert transfer_match, page[-1200:]
             transfer = transfer_match.group(0)
             moved = client()
             code, _, page = request(moved, base, transfer)
-            assert code == 200 and "Sign in on this device" in page
+            assert code == 200 and "data-controller='auto-submit'" in page and "name='_method' value='put'" in page
             transfer_csrf = CSRF[moved]
             code, _, _ = request(moved, base, transfer, {}, method="PUT")
             assert code == 303, code

@@ -1,5 +1,6 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
+document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
@@ -16,6 +17,9 @@ document.addEventListener('click',async event=>{
   }catch{}
 });
 document.querySelectorAll('.account-settings [data-controller~="web-share"]').forEach(button=>{button.hidden=typeof navigator.canShare!=='function';});
+let profileInstallPrompt;
+window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();profileInstallPrompt=event;document.querySelectorAll('.profile-settings [data-controller~="pwa-install"]').forEach(node=>node.classList.add('pwa--can-install'));});
+document.addEventListener('click',event=>{const button=event.target.closest('[data-action~="pwa-install#promptInstall"]');if(button&&profileInstallPrompt){event.preventDefault();profileInstallPrompt.prompt();profileInstallPrompt=undefined;}});
 document.addEventListener('click',async event=>{
   const settings=event.target.closest('.account-settings');
   if(!settings)return;
