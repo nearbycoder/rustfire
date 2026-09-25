@@ -109,23 +109,23 @@ The selected-room lookup is much faster in Rustfire at these fixture sizes. This
 
 ## Paired user autocomplete trial
 
-`bench/paired_autocomplete.py` used pinned Campfire and the Rustfire release build with disposable fixtures containing the same active users. One authenticated keep-alive client queried names containing `User 3`; both apps returned the same 20 user names and IDs, with `name`, `value`, `avatar_url`, and `sgid` fields. Each server ran separately on the same host. Two warmup requests preceded 30 measured requests. Campfire used one Puma worker with five threads and Rustfire one process.
+`bench/paired_autocomplete.py` used pinned Campfire and the Rustfire release build with disposable fixtures containing the same active users. One authenticated keep-alive client queried names containing `User 3`; both apps returned the same 20 user names and IDs, with `name`, `value`, `avatar_url`, and `sgid` fields. The servers shared a signing secret, and the probe verified equal mention IDs and equal avatar URL paths and timestamp versions. URL origins differ because the servers use different ports. Each server ran separately on the same host. Two warmup requests preceded 30 measured requests. Campfire used one Puma worker with five threads and Rustfire one process.
 
 | Active users | Rustfire median / p95 | Campfire median / p95 | Rustfire / Campfire JSON bytes |
 |---:|---:|---:|---:|
-| 1,000 | 0.172 / 0.300 ms | 7.354 / 22.440 ms | 4,769 / 7,526 |
-| 10,000 | 0.788 / 1.147 ms | 7.005 / 18.341 ms | 4,884 / 7,642 |
+| 1,000 | 0.518 / 1.198 ms | 6.053 / 16.962 ms | 7,526 / 7,526 |
+| 10,000 | 0.982 / 1.348 ms | 10.252 / 19.013 ms | 7,642 / 7,642 |
 
-The result lists are the same, but response bodies differ: both apps now use the Rails signed-global-ID envelope, while Rustfire signs with its own persistent key by default and uses shorter avatar URLs. Campfire's avatar URLs are signed and versioned. The latest table follows that signed-ID format change; short-run variation also affects latency. This is a **single-client endpoint comparison**, not a feature-equivalent full-app speedup or a user-capacity result. The probe and servers shared the host; a separate short concurrent sweep follows.
+The JSON response sizes are now equal, and the returned fields match after normalizing the different URL origins. A later run of the same fixture also fetched one linked initials SVG from each app and confirmed equal initials and background color. The images' exact bytes and uploaded-avatar behavior were not part of the timed probe. Short-run variation affects latency. This is a **single-client endpoint comparison**, not a feature-equivalent full-app speedup or a user-capacity result. The probe and servers shared the host; a separate short concurrent sweep follows.
 
 ### Paired concurrent autocomplete probe
 
-The same 10,000-user fixture was probed again with `--iterations 10 --clients 1 8 32 --seconds 3`. Each thread kept one HTTP connection, performed two warmup requests, then checked every measured response against its warmup body. Rustfire and one-worker, five-thread Campfire ran serially on the same host. Both returned the same 20 names and IDs, and all measured requests succeeded. A second run gave similar rates; the table shows that rerun.
+The same 10,000-user fixture was probed with `--iterations 30 --clients 1 8 32 --seconds 3`. Each thread kept one HTTP connection, performed two warmup requests, then checked every measured response against its warmup body. Rustfire and one-worker, five-thread Campfire ran serially on the same host. Both returned the same verified fields, and all measured requests succeeded.
 
 | Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 | Errors |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1,713.5 | 222.8 | 0.792 ms | 8.700 ms | 0 / 0 |
-| 8 | 3,618.5 | 263.0 | 3.147 ms | 31.938 ms | 0 / 0 |
-| 32 | 2,203.9 | 179.6 | 16.410 ms | 209.514 ms | 0 / 0 |
+| 1 | 1,596.8 | 229.0 | 0.747 ms | 6.814 ms | 0 / 0 |
+| 8 | 3,966.1 | 253.7 | 3.136 ms | 33.588 ms | 0 / 0 |
+| 32 | 2,164.2 | 170.0 | 16.756 ms | 220.856 ms | 0 / 0 |
 
-Both rates fell at 32 clients under this configuration. These are three-second endpoint trials with a Python client on the server host, not sustained capacity measurements. Campfire was limited to one Puma worker, and the JSON responses still differ in avatar URL size and signing key. This does not establish a full-app speed or scale advantage.
+Both rates fell at 32 clients under this configuration. These are three-second endpoint trials with a Python client on the server host, not sustained capacity measurements. Campfire was limited to one Puma worker. The generated avatar images, related requests, and full-app work are outside this trial, so it does not establish a full-app speed or scale advantage.

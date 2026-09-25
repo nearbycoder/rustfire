@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
+import xml.etree.ElementTree as ET
 
 from direct_lookup import free_port, p95, start_server, stop_server
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
@@ -35,6 +37,7 @@ def measure(port, path, cookie, iterations):
     samples = []
     lengths = set()
     selected = None
+    selected_rows = None
     try:
         for iteration in range(iterations + 2):
             started = time.perf_counter()
@@ -50,6 +53,7 @@ def measure(port, path, cookie, iterations):
             identities = [(user["value"], user["name"]) for user in users]
             if selected is None:
                 selected = identities
+                selected_rows = users
             elif identities != selected:
                 raise AssertionError("Autocomplete results changed during trial")
             if iteration >= 2:
@@ -57,7 +61,7 @@ def measure(port, path, cookie, iterations):
                 lengths.add(len(body))
     finally:
         connection.close()
-    return statistics.median(samples), p95(samples), lengths, selected
+    return statistics.median(samples), p95(samples), lengths, selected, selected_rows
 
 
 def measure_concurrent(port, path, cookie, clients, duration, expected):
@@ -116,6 +120,26 @@ def measure_concurrent(port, path, cookie, clients, duration, expected):
     return len(samples) / elapsed, statistics.median(samples), p95(samples), errors, len(samples)
 
 
+def probe_initials_avatar(port, cookie, url):
+    parsed = urllib.parse.urlsplit(url)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        connection.request("GET", parsed.path + "?" + parsed.query, headers={"Cookie": cookie})
+        response = connection.getresponse()
+        body = response.read()
+        if response.status != 200 or response.getheader("Content-Type", "").split(";", 1)[0] != "image/svg+xml":
+            raise AssertionError(("avatar response", response.status, response.getheader("Content-Type")))
+        document = ET.fromstring(body)
+        namespace = "{http://www.w3.org/2000/svg}"
+        text = document.find(f".//{namespace}text")
+        rectangle = document.find(f".//{namespace}rect")
+        if text is None or rectangle is None:
+            raise AssertionError("Initials avatar lacks its text or background")
+        return (text.text or "").strip(), rectangle.get("fill")
+    finally:
+        connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--users", type=int, default=10000)
@@ -148,13 +172,14 @@ def main():
             add_users(rust_db, 52, args.users)
             add_users(camp_db, 52, args.users)
 
-        rust_process = start_server(rust_db, rust_port)
+        rust_process = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
         try:
             rust = measure(rust_port, "/autocompletable/users?query=User%203", "session_token=benchmark-session", args.iterations)
             rust_concurrent = {
                 clients: measure_concurrent(rust_port, "/autocompletable/users?query=User%203", "session_token=benchmark-session", clients, args.seconds, rust[3])
                 for clients in args.clients
             }
+            rust_initials = probe_initials_avatar(rust_port, "session_token=benchmark-session", rust[4][0]["avatar_url"])
         finally:
             stop_server(rust_process)
 
@@ -171,6 +196,7 @@ def main():
                 clients: measure_concurrent(camp_port, "/autocompletable/users.json?query=User%203", cookie, clients, args.seconds, camp[3])
                 for clients in args.clients
             }
+            camp_initials = probe_initials_avatar(camp_port, cookie, camp[4][0]["avatar_url"])
         except Exception:
             log.flush()
             log.seek(0)
@@ -182,6 +208,15 @@ def main():
 
         if rust[3] != camp[3]:
             raise AssertionError((rust[3], camp[3]))
+        for rust_user, camp_user in zip(rust[4], camp[4]):
+            if rust_user["sgid"] != camp_user["sgid"]:
+                raise AssertionError("Signed mention IDs differ despite the shared signing secret")
+            rust_avatar_url = urllib.parse.urlsplit(rust_user["avatar_url"])
+            camp_avatar_url = urllib.parse.urlsplit(camp_user["avatar_url"])
+            if (rust_avatar_url.path, rust_avatar_url.query) != (camp_avatar_url.path, camp_avatar_url.query):
+                raise AssertionError(("Avatar URLs differ beyond origin", rust_avatar_url, camp_avatar_url))
+        if rust_initials != camp_initials:
+            raise AssertionError(("Initials avatar differs", rust_initials, camp_initials))
         print(f"users={args.users} iterations={args.iterations} warmup=2 clients=1 results={len(rust[3])}")
         print(f"rustfire_median_ms={rust[0]:.3f} rustfire_p95_ms={rust[1]:.3f} body_bytes={sorted(rust[2])}")
         print(f"campfire_median_ms={camp[0]:.3f} campfire_p95_ms={camp[1]:.3f} body_bytes={sorted(camp[2])}")

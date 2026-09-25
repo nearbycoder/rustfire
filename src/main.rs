@@ -75,6 +75,8 @@ struct AppState {
     vapid_private: Vec<u8>,
     mention_signing_key: Vec<u8>,
     imported_mention_signing_key: Option<Vec<u8>>,
+    avatar_signing_key: Vec<u8>,
+    imported_avatar_signing_key: Option<Vec<u8>>,
     push_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
@@ -483,16 +485,103 @@ fn mention_signature(
     let mut signer = Signer::new(digest, &pkey)?;
     signer.sign_oneshot_to_vec(payload)
 }
-fn rails_sgid_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+fn rails_verifier_key(
+    secret_key_base: &str,
+    salt: &[u8],
+) -> Result<Vec<u8>, openssl::error::ErrorStack> {
     let mut key = vec![0u8; 64];
     pbkdf2_hmac(
         secret_key_base.as_bytes(),
-        b"signed_global_ids",
+        salt,
         1000,
         MessageDigest::sha256(),
         &mut key,
     )?;
     Ok(key)
+}
+fn rails_sgid_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    rails_verifier_key(secret_key_base, b"signed_global_ids")
+}
+fn rails_avatar_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    rails_verifier_key(secret_key_base, b"active_record/signed_id")
+}
+fn avatar_token(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
+    let payload = json!({"_rails":{"data":id,"pur":"user/avatar"}}).to_string();
+    let encoded = URL_SAFE_NO_PAD.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())?;
+    let digest = signature
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
+fn avatar_id_from_token(key: &[u8], token: &str) -> Option<i64> {
+    if token.len() > 1024 {
+        return None;
+    }
+    let (encoded, signature) = token.split_once("--")?;
+    if signature.len() != 64 {
+        return None;
+    }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())
+        .ok()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let payload = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let envelope: Value = serde_json::from_slice(&payload).ok()?;
+    let metadata = envelope.get("_rails")?;
+    if metadata.get("pur").and_then(Value::as_str) != Some("user/avatar") {
+        return None;
+    }
+    if let Some(expiry) = metadata.get("exp").filter(|expiry| !expiry.is_null()) {
+        if chrono::DateTime::parse_from_rfc3339(expiry.as_str()?).ok()? <= Utc::now() {
+            return None;
+        }
+    }
+    metadata.get("data")?.as_i64().filter(|id| *id > 0)
+}
+fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
+    let version = chrono::DateTime::parse_from_rfc3339(updated_at)
+        .map(|time| time.with_timezone(&Utc).format("%Y%m%d%H%M%S").to_string())
+        .unwrap_or_else(|_| updated_at.chars().filter(char::is_ascii_digit).collect());
+    Ok(format!(
+        "/users/{}/avatar?v={version}",
+        avatar_token(key, id).map_err(db_err)?
+    ))
+}
+fn avatar_initials_svg(id: i64, name: &str) -> String {
+    const COLORS: [&str; 18] = [
+        "#AF2E1B", "#CC6324", "#3B4B59", "#BFA07A", "#ED8008", "#ED3F1C", "#BF1B1B", "#736B1E",
+        "#D07B53", "#736356", "#AD1D1D", "#BF7C2A", "#C09C6F", "#698F9C", "#7C956B", "#5D618F",
+        "#3B3633", "#67695E",
+    ];
+    let mut checksum = !0u32;
+    for byte in id.to_string().bytes() {
+        checksum ^= u32::from(byte);
+        for _ in 0..8 {
+            checksum = (checksum >> 1) ^ (0xedb8_8320u32 & 0u32.wrapping_sub(checksum & 1));
+        }
+    }
+    let color = COLORS[(!checksum as usize) % COLORS.len()];
+    static INITIAL: OnceLock<Regex> = OnceLock::new();
+    let initial = INITIAL.get_or_init(|| Regex::new(r"\b\w").unwrap());
+    let initials = initial
+        .find_iter(name)
+        .map(|match_| match_.as_str())
+        .collect::<String>();
+    let text_length = if initials.chars().count() >= 3 {
+        "textLength=\"85%\" lengthAdjust=\"spacingAndGlyphs\""
+    } else {
+        ""
+    };
+    format!(
+        "<svg version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 512 512\" class=\"avatar\" aria-hidden=\"true\"><defs><clipPath id=\"porthole\"><circle cx=\"50%\" cy=\"50%\" r=\"50%\" /></clipPath></defs><g><rect width=\"100%\" height=\"100%\" rx=\"50\" fill=\"{color}\" /><text x=\"50%\" y=\"50%\" fill=\"#FFFFFF\" text-anchor=\"middle\" dy=\"0.35em\" {text_length} font-family=\"-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif\" font-size=\"230\" font-weight=\"800\" letter-spacing=\"-5\">{}</text></g></svg>",
+        esc(&initials)
+    )
 }
 fn mention_sgid(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
     let payload = json!({"_rails":{"data":format!("gid://campfire/User/{id}?expires_in"),"pur":"attachable"}}).to_string();
@@ -4252,19 +4341,31 @@ async fn profile_post(
 async fn avatar_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<i64>,
+    Path(token): Path<String>,
 ) -> AppResult {
     let _viewer = user(&s, &headers)?;
+    let id = token
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .or_else(|| {
+            avatar_id_from_token(&s.avatar_signing_key, &token).or_else(|| {
+                s.imported_avatar_signing_key
+                    .as_deref()
+                    .and_then(|key| avatar_id_from_token(key, &token))
+            })
+        })
+        .ok_or(StatusCode::NOT_FOUND)?;
     let db = pool(&s)?;
-    let role: Option<i64> = db
+    let account: Option<(String, i64)> = db
         .query_row(
-            "SELECT role FROM users WHERE id=?1 AND status=0",
+            "SELECT name,role FROM users WHERE id=?1 AND status=0",
             [id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(db_err)?;
-    let role = role.ok_or(StatusCode::NOT_FOUND)?;
+    let (name, role) = account.ok_or(StatusCode::NOT_FOUND)?;
     let row: Option<(String, String)> = db
         .query_row(
             "SELECT stored_name,content_type FROM avatars WHERE user_id=?1",
@@ -4273,27 +4374,88 @@ async fn avatar_get(
         )
         .optional()
         .map_err(db_err)?;
-    if let Some((stored, content_type)) = row {
-        let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-        let data = tokio::fs::read(std::path::Path::new(&dir).join("avatars").join(stored))
-            .await
-            .map_err(|_| StatusCode::NOT_FOUND)?;
-        let mut r = data.into_response();
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, content_type.parse().map_err(db_err)?);
-        r.headers_mut()
-            .insert("x-content-type-options", "nosniff".parse().unwrap());
-        r.headers_mut()
-            .insert("content-security-policy", "sandbox".parse().unwrap());
-        Ok(r)
-    } else {
-        Ok(Redirect::to(if role == 2 {
-            "/static/icons/default-bot-avatar.svg"
-        } else {
-            "/static/icons/default-avatar.svg"
-        })
-        .into_response())
+    if let Some((stored, _content_type)) = row {
+        if let Some(data) = avatar_webp_variant(&s, &stored).await {
+            let mut response = data.into_response();
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                "public, max-age=1800, stale-while-revalidate=604800"
+                    .parse()
+                    .unwrap(),
+            );
+            response
+                .headers_mut()
+                .insert("x-content-type-options", "nosniff".parse().unwrap());
+            return Ok(response);
+        }
     }
+    let body = if role == 2 {
+        include_str!("../static/icons/default-bot-avatar.svg").to_string()
+    } else {
+        avatar_initials_svg(id, &name)
+    };
+    let mut response = body.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "image/svg+xml".parse().unwrap());
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "public, max-age=1800, stale-while-revalidate=604800"
+            .parse()
+            .unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert("x-content-type-options", "nosniff".parse().unwrap());
+    Ok(response)
+}
+async fn avatar_webp_variant(s: &AppState, stored: &str) -> Option<Vec<u8>> {
+    if Uuid::parse_str(stored).is_err() {
+        return None;
+    }
+    let dir = std::path::PathBuf::from(
+        env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+    )
+    .join("avatars");
+    let input = dir.join(stored);
+    let cache = dir.join("variants");
+    tokio::fs::create_dir_all(&cache).await.ok()?;
+    let output = cache.join(format!("{stored}.webp"));
+    if tokio::fs::metadata(&output).await.is_err() {
+        let _permit = s.variant_slots.acquire().await.ok()?;
+        if tokio::fs::metadata(&output).await.is_err() {
+            let temporary = cache.join(format!("{stored}-{}.webp", Uuid::new_v4()));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::process::Command::new("vips")
+                    .arg("thumbnail")
+                    .arg(&input)
+                    .arg(&temporary)
+                    .args(["512", "--height", "512", "--size", "down"])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok);
+            if result
+                .as_ref()
+                .is_some_and(|result| result.status.success())
+            {
+                if tokio::fs::rename(&temporary, &output).await.is_err() {
+                    let _ = tokio::fs::remove_file(&temporary).await;
+                    return None;
+                }
+            } else {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                return None;
+            }
+        }
+    }
+    tokio::fs::read(output).await.ok()
 }
 async fn read_avatar(mut multipart: Multipart) -> Result<(Vec<u8>, String), StatusCode> {
     let mut upload = None;
@@ -4345,10 +4507,26 @@ fn save_avatar(
         let _ = std::fs::remove_file(dir.join(&stored));
         return Err(db_err(error));
     }
+    db.execute(
+        "UPDATE users SET updated_at=?1 WHERE id=?2",
+        params![now(), uid],
+    )
+    .map_err(db_err)?;
     if let Some(old) = old {
-        let _ = std::fs::remove_file(dir.join(old));
+        remove_avatar_files(&old);
     }
     Ok(())
+}
+fn remove_avatar_files(stored: &str) {
+    if Uuid::parse_str(stored).is_err() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(
+        env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+    )
+    .join("avatars");
+    let _ = std::fs::remove_file(dir.join(stored));
+    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}.webp")));
 }
 async fn avatar_post(
     State(s): State<Arc<AppState>>,
@@ -4373,9 +4551,13 @@ async fn avatar_delete(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Ap
         .map_err(db_err)?;
     db.execute("DELETE FROM avatars WHERE user_id=?1", [u.id])
         .map_err(db_err)?;
+    db.execute(
+        "UPDATE users SET updated_at=?1 WHERE id=?2",
+        params![now(), u.id],
+    )
+    .map_err(db_err)?;
     if let Some(old) = old {
-        let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-        let _ = std::fs::remove_file(std::path::Path::new(&dir).join("avatars").join(old));
+        remove_avatar_files(&old);
     }
     Ok(Redirect::to("/users/me/profile").into_response())
 }
@@ -4551,10 +4733,14 @@ async fn autocomplete(
         .or_else(|| q.get("query"))
         .cloned()
         .unwrap_or_default();
-    let mut st=db.prepare("SELECT u.id,u.name FROM users u WHERE u.status=0 AND u.name LIKE ?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.room_id=?2)) ORDER BY lower(u.name) LIMIT 20").map_err(db_err)?;
+    let mut st=db.prepare("SELECT u.id,u.name,u.updated_at FROM users u WHERE u.status=0 AND u.name LIKE ?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.room_id=?2)) ORDER BY lower(u.name) LIMIT 20").map_err(db_err)?;
     let users = st
         .query_map(params![format!("%{query}%"), room_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
@@ -4563,13 +4749,17 @@ async fn autocomplete(
         .imported_mention_signing_key
         .as_deref()
         .unwrap_or(&s.mention_signing_key);
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
     let rows = users
         .into_iter()
-        .map(|(id, name)| {
+        .map(|(id, name, updated_at)| {
             Ok(json!({
                 "value": id,
                 "name": esc(&name),
-                "avatar_url": public_url(&headers, &format!("/users/{id}/avatar")),
+                "avatar_url": public_url(&headers, &avatar_path(avatar_key, id, &updated_at)?),
                 "sgid": mention_sgid(signing_key, id).map_err(db_err)?,
             }))
         })
@@ -4757,9 +4947,13 @@ async fn bot_avatar_delete(
         .map_err(db_err)?;
     db.execute("DELETE FROM avatars WHERE user_id=?1", [id])
         .map_err(db_err)?;
+    db.execute(
+        "UPDATE users SET updated_at=?1 WHERE id=?2",
+        params![now(), id],
+    )
+    .map_err(db_err)?;
     if let Some(old) = old {
-        let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-        let _ = std::fs::remove_file(std::path::Path::new(&dir).join("avatars").join(old));
+        remove_avatar_files(&old);
     }
     Ok(Redirect::to(&format!("/account/bots/{id}/edit")).into_response())
 }
@@ -5615,6 +5809,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         INSERT OR IGNORE INTO account_settings(id,restrict_room_creation) VALUES(1,0);
         CREATE TABLE IF NOT EXISTS app_secrets(name TEXT PRIMARY KEY,value BLOB NOT NULL);
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('mention_sgid',randomblob(32));
+        INSERT OR IGNORE INTO app_secrets(name,value) VALUES('avatar_signed_id',randomblob(32));
         CREATE TABLE IF NOT EXISTS account_custom_styles(id INTEGER PRIMARY KEY CHECK(id=1),css TEXT NOT NULL DEFAULT '');
         INSERT OR IGNORE INTO account_custom_styles(id,css) VALUES(1,'');
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT NOT NULL,email_address TEXT UNIQUE,password_digest TEXT,role INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 0,bot_token TEXT UNIQUE,bio TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -5726,10 +5921,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |row| row.get(0),
     )?;
-    let imported_mention_signing_key = env::var("RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE")
+    let avatar_signing_key: Vec<u8> = db.get()?.query_row(
+        "SELECT value FROM app_secrets WHERE name='avatar_signed_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    let campfire_secret = env::var("RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE")
         .ok()
-        .filter(|base| !base.is_empty())
-        .map(|base| rails_sgid_key(&base))
+        .filter(|base| !base.is_empty());
+    let imported_mention_signing_key =
+        campfire_secret.as_deref().map(rails_sgid_key).transpose()?;
+    let imported_avatar_signing_key = campfire_secret
+        .as_deref()
+        .map(rails_avatar_key)
         .transpose()?;
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
@@ -5762,6 +5966,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vapid_private,
         mention_signing_key,
         imported_mention_signing_key,
+        avatar_signing_key,
+        imported_avatar_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
@@ -6027,6 +6233,23 @@ mod tests {
         let token = "eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvNDI_ZXhwaXJlc19pbiIsInB1ciI6ImF0dGFjaGFibGUifX0=--3d8933c1a8fd0d7a289fd1f62b3a5ecf0045041e";
         assert_eq!(super::mention_sgid(&key, 42).unwrap(), token);
         assert_eq!(super::mention_id_from_sgid(&key, token), Some(42));
+    }
+
+    #[test]
+    fn rails_avatar_signed_id_matches_the_pinned_verifier() {
+        let key = super::rails_avatar_key("test-secret-key-base").unwrap();
+        let token = "eyJfcmFpbHMiOnsiZGF0YSI6MSwicHVyIjoidXNlci9hdmF0YXIifX0--fe99b8547975d867621732d6e0d4344cea012c7eaf713418ef6b1414a24e2dd4";
+        assert_eq!(super::avatar_token(&key, 1).unwrap(), token);
+        assert_eq!(super::avatar_id_from_token(&key, token), Some(1));
+        assert_eq!(super::avatar_id_from_token(&[8u8; 32], token), None);
+        assert_eq!(
+            super::avatar_id_from_token(&key, &format!("{token}A")),
+            None
+        );
+        assert_eq!(
+            super::avatar_path(&key, 1, "2026-09-25T01:00:54Z").unwrap(),
+            format!("/users/{token}/avatar?v=20260925010054")
+        );
     }
 
     #[test]

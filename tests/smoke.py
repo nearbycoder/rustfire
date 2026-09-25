@@ -214,9 +214,13 @@ def main():
             code, _, _ = request(member, base, "/users/me/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200
             with member.open(base+"/users/2/avatar") as res:
-                assert res.status==200 and res.read()==png
+                image = res.read()
+                assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF" and image[8:12]==b"WEBP"
+            stored_avatar = sqlite3.connect(f"{tmp}/test.db").execute("SELECT stored_name FROM avatars WHERE user_id=2").fetchone()[0]
+            avatar_variant = pathlib.Path(tmp) / "uploads" / "avatars" / "variants" / f"{stored_avatar}.webp"
+            assert avatar_variant.is_file()
             code, _, _ = request(member, base, "/users/me/avatar/delete", {})
-            assert code == 200
+            assert code == 200 and not avatar_variant.exists()
             second_session = client()
             assert request(second_session, base, "/session/new")[0] == 200
             code, _, _ = request(second_session, base, "/session", {"email_address": "member2@example.com", "password": "newpassword123"})
@@ -279,7 +283,13 @@ def main():
             code, _, payload = request(member, base, "/autocompletable/users?room_id=1&query=Admin")
             admin_suggestion = json.loads(payload)[0]
             assert code == 200 and admin_suggestion["value"] == 1 and set(admin_suggestion) == {"value", "name", "avatar_url", "sgid"}
-            assert admin_suggestion["avatar_url"] == base + "/users/1/avatar"
+            avatar_url = urllib.parse.urlparse(admin_suggestion["avatar_url"])
+            expected_avatar_token = "eyJfcmFpbHMiOnsiZGF0YSI6MSwicHVyIjoidXNlci9hdmF0YXIifX0--fe99b8547975d867621732d6e0d4344cea012c7eaf713418ef6b1414a24e2dd4"
+            assert avatar_url.path == f"/users/{expected_avatar_token}/avatar"
+            assert re.fullmatch(r"v=\d{14}", avatar_url.query)
+            code, _, avatar_svg = request(member, base, avatar_url.path + "?" + avatar_url.query)
+            assert code == 200 and 'fill="#BF7C2A"' in avatar_svg and ">A</text>" in avatar_svg
+            assert request(member, base, avatar_url.path.replace(expected_avatar_token, expected_avatar_token[:-1] + "0"))[0] == 404
             assert admin_suggestion["sgid"]
             admin_mention_sgid = admin_suggestion["sgid"]
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "2"}, method="PATCH")
@@ -375,7 +385,8 @@ def main():
             code, _, _ = request(admin, base, "/account/bots/3/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200
             with admin.open(base+"/users/3/avatar") as res:
-                assert res.status == 200 and res.read() == png
+                image = res.read()
+                assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF" and image[8:12]==b"WEBP"
             code, _, _ = request(admin, base, "/account/bots/3/avatar/delete", {})
             assert code == 200
             code, _, _ = request(client(), base, "/account/bots/3/key", {})

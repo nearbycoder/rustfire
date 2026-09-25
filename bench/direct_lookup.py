@@ -29,7 +29,7 @@ def free_port():
         return listener.getsockname()[1]
 
 
-def start_server(database, port):
+def start_server(database, port, extra_env=None):
     env = dict(
         os.environ,
         RUSTFIRE_DB=str(database),
@@ -37,6 +37,7 @@ def start_server(database, port):
         RUSTFIRE_DISABLE_PUSH="1",
         RUSTFIRE_DISABLE_WEBHOOKS="1",
     )
+    env.update(extra_env or {})
     process = subprocess.Popen(
         [str(ROOT / "target/release/rustfire")], cwd=ROOT, env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
