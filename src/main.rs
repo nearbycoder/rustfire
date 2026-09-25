@@ -62,6 +62,8 @@ static VAPID_PUBLIC: OnceLock<String> = OnceLock::new();
 
 struct AppState {
     db: Db,
+    autocomplete_cache: RwLock<HashMap<i64, CachedAutocompleteUser>>,
+    autocomplete_slots: Arc<Semaphore>,
     events: RoomHub,
     typing_events: RoomHub,
     unread_events: RoomHub,
@@ -87,6 +89,12 @@ struct AppState {
     push_delivery_enabled: bool,
     login_attempts: Mutex<HashMap<IpAddr, VecDeque<std::time::Instant>>>,
     variant_slots: Arc<Semaphore>,
+}
+#[derive(Clone)]
+struct CachedAutocompleteUser {
+    updated_at: String,
+    avatar_path: String,
+    sgid: String,
 }
 #[derive(Clone)]
 struct Event {
@@ -7016,6 +7024,7 @@ async fn autocomplete(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult {
+    let _autocomplete_slot = s.autocomplete_slots.acquire().await.map_err(db_err)?;
     let u = user(&s, &headers)?;
     let db = pool(&s)?;
     let room_id = q
@@ -7050,17 +7059,47 @@ async fn autocomplete(
         .imported_avatar_signing_key
         .as_deref()
         .unwrap_or(&s.avatar_signing_key);
+    let base_url = public_url(&headers, "");
+    let cached = {
+        let cache = s.autocomplete_cache.read().unwrap();
+        users
+            .iter()
+            .map(|(id, _, updated_at)| {
+                cache
+                    .get(id)
+                    .filter(|entry| entry.updated_at == *updated_at)
+                    .cloned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut uncached = Vec::new();
     let rows = users
         .into_iter()
-        .map(|(id, name, updated_at)| {
+        .zip(cached)
+        .map(|((id, name, updated_at), entry)| {
+            let entry = match entry {
+                Some(entry) => entry,
+                None => {
+                    let entry = CachedAutocompleteUser {
+                        updated_at: updated_at.clone(),
+                        avatar_path: avatar_path(avatar_key, id, &updated_at)?,
+                        sgid: mention_sgid(signing_key, id).map_err(db_err)?,
+                    };
+                    uncached.push((id, entry.clone()));
+                    entry
+                }
+            };
             Ok(json!({
                 "value": id,
                 "name": esc(&name),
-                "avatar_url": public_url(&headers, &avatar_path(avatar_key, id, &updated_at)?),
-                "sgid": mention_sgid(signing_key, id).map_err(db_err)?,
+                "avatar_url": format!("{base_url}{}", entry.avatar_path),
+                "sgid": entry.sgid,
             }))
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
+    if !uncached.is_empty() {
+        s.autocomplete_cache.write().unwrap().extend(uncached);
+    }
     Ok(Json(rows).into_response())
 }
 async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
@@ -8939,6 +8978,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let state = Arc::new(AppState {
         db,
+        autocomplete_cache: RwLock::new(HashMap::new()),
+        autocomplete_slots: Arc::new(Semaphore::new(
+            env::var("RUSTFIRE_AUTOCOMPLETE_SLOTS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|slots| (1..=128).contains(slots))
+                .unwrap_or(4),
+        )),
         events: RoomHub::default(),
         typing_events: RoomHub::default(),
         unread_events: RoomHub::default(),

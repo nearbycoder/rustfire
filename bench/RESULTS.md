@@ -130,6 +130,21 @@ The same 10,000-user fixture was probed with `--iterations 30 --clients 1 8 32 -
 
 Both rates fell at 32 clients under this configuration. These are three-second endpoint trials with a Python client on the server host, not sustained capacity measurements. Campfire was limited to one Puma worker. The generated avatar images, related requests, and full-app work are outside this trial, so it does not establish a full-app speed or scale advantage.
 
+### Sustained autocomplete sweep with packaged Campfire workers
+
+The 10,000-user autocomplete fixture above was rerun with the checked Go keep-alive client, Campfire at 22 Puma workers, and each server running separately. Every measured JSON response had the same bytes as its server's warmed response; cross-app checks confirmed the same 20 IDs, names, signed mention IDs, avatar paths, avatar SVG initials and colors, and 7,642-byte response size. Each 15-second trial had zero response errors. Process-tree peak PSS was sampled once per second on the shared load-generator/server host.
+
+The initial Rustfire release build used a 32-connection SQLite pool and computed 20 mention and avatar signatures for each request. A 15-second run plateaued near 2.3k requests/s from 32 to 128 clients, similar to Campfire's rate at high concurrency, though Rustfire used much less memory. Rustfire then cached deterministic autocomplete signatures and avatar paths by user ID and update timestamp. A four-connection global SQLite pool improved this endpoint but constrained another read path, so the final build retains the 32-connection pool and limits autocomplete to four simultaneous requests. With that setting, the follow-up run measured:
+
+| Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 | Rustfire / Campfire peak PSS |
+|---:|---:|---:|---:|---:|---:|
+| 32 | 5,364.0 | 2,206.3 | 7.34 ms | 28.16 ms | 22.4 / 2,022.5 MiB |
+| 128 | 5,144.0 | 2,322.3 | 28.07 ms | 82.74 ms | 28.3 / 2,041.2 MiB |
+| 256 | 5,124.8 | 2,317.0 | 55.72 ms | 143.84 ms | 34.7 / 2,048.2 MiB |
+| 512 | 5,114.1 | 1,940.8 | 106.91 ms | 349.14 ms | 45.5 / 2,109.9 MiB |
+
+At a provisional 250 ms p95 target, the largest sampled passing client counts were 512 for Rustfire and 256 for Campfire. These are endpoint concurrency samples, not maximum capacity: the same host ran the client and server, the response uses cached identities, both apps were probed serially, PSS samples can miss peaks, and user updates, room-scoped autocomplete, other endpoints, long-lived sockets, and full-app side effects were outside the measured window. A separate check changed and restored one user's update timestamp while Rustfire was running and verified that the cached avatar version changed and the original response returned after restoration. Campfire's per-request work and framework memory differ. The result supports a faster, lower-memory autocomplete path on this fixture; it does not prove whole-app one-for-one parity or capacity.
+
 ## Paired bot message-list JSON trial
 
 `bench/paired_bot_messages.py` seeded disposable, matched fixtures with one room, one bot, and messages alternating between plain text and a simple rich-text `<div>`. Both servers used the same signing secret. The probe fetched the latest 40 messages from the bot JSON API and confirmed that every parsed field matched after removing the different URL origins, including ActionText-wrapped HTML, creator details, signed avatar URL paths, and timestamps. Campfire used a running Redis server for production caching; the fixture now uses a unique update timestamp per run so fragments from older trials cannot be reused. Rustfire used SQLite WAL. Two warmup requests preceded each set of 30 sequential requests. The servers and Python load generator shared a host and ran serially.
