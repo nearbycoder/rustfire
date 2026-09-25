@@ -220,7 +220,15 @@ def main():
             assert code==201,(code,payload)
             image_id=sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
             image_page=request(admin,base,"/rooms/1")[2]
-            assert f"/attachments/{image_id}/thumb" in image_page and "class='message__attachment'" in image_page
+            image_representation=re.search(r"src='(/rails/active_storage/representations/redirect/[^']+/image\.png)'",image_page)
+            assert image_representation and "class='message__attachment'" in image_page
+            assert "max-inline-size center flex overflow-clip' style='width: 0px; aspect-ratio: 1.0;'" in image_page
+            with admin.open(base+image_representation.group(1)) as response:
+                assert response.status==200 and response.headers.get_content_type()=="image/png" and response.read().startswith(b"\x89PNG\r\n\x1a\n")
+            with urllib.request.urlopen(base+image_representation.group(1)) as response:
+                assert response.status==200 and response.headers.get_content_type()=="image/png"
+            tampered_representation=image_representation.group(1).replace("--", "-x", 1)
+            assert request(admin,base,tampered_representation)[0]==404
             image_blob_download=re.search(r"href='(/rails/active_storage/blobs/redirect/[^']+/image\.png\?disposition=attachment)'",image_page).group(1)
             assert image_blob_download in image_page
             with admin.open(base+f"/attachments/{image_id}") as response:

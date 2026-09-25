@@ -5,6 +5,7 @@ Both runs use the same number of sockets and posts. Generated timestamps still d
 """
 
 import argparse
+import hashlib
 from datetime import datetime, timezone
 import html
 from html.parser import HTMLParser
@@ -14,6 +15,9 @@ import sqlite3
 import subprocess
 import tempfile
 import uuid
+import urllib.request
+import struct
+import zlib
 
 from direct_lookup import ROOT, free_port, start_server, stop_server
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
@@ -30,7 +34,7 @@ def seed_boost_message(rust_db, camp_db):
         db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Boost fixture','Message',1,?1,?1)", [camp_time])
 
 
-def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None):
+def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None, image_file=None):
     command = [
         "node", "bench/fanout.mjs", "--app", app,
         "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
@@ -40,6 +44,8 @@ def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample
     ]
     if sample_file is not None:
         command.extend(["--sample-file", str(sample_file)])
+    if image_file is not None:
+        command.extend(["--image-file", str(image_file)])
     result = subprocess.run(
         command,
         cwd=ROOT, text=True, capture_output=True,
@@ -121,6 +127,34 @@ def stream_structure(sample_file):
     return parser.tags, parser.attribute_keys, parser.attributes, parser.text
 
 
+def check_image_representation(sample_file, port, cookie, expected_dimensions):
+    sample = html.unescape(sample_file.read_text())
+    path = re.search(r"<img\b[^>]*class=['\"]message__attachment['\"][^>]*src=['\"]([^'\"]+)['\"]", sample)
+    if not path or not path.group(1).startswith("/rails/active_storage/representations/redirect/"):
+        raise RuntimeError(f"Image stream has no signed representation URL: {sample_file}")
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path.group(1)}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read()
+        if response.status != 200 or response.headers.get_content_type() != "image/png" or not body.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError(f"Signed representation did not serve a PNG: {sample_file}")
+    dimensions = struct.unpack(">II", body[16:24])
+    if dimensions != expected_dimensions:
+        raise RuntimeError(f"Representation dimensions {dimensions} differ from {expected_dimensions}: {sample_file}")
+    sample_file.with_suffix(".png").write_bytes(body)
+    return len(body), hashlib.sha256(body).hexdigest()
+
+
+def write_png(path, width, height):
+    def chunk(name, data):
+        return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            rows.extend((x % 256, y % 256, (x + y) % 256))
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b""))
+
+
 def stable_message_attributes(attributes):
     generated_times = {"data-message-timestamp", "data-message-updated-at", "data-sort-value", "datetime"}
     return [(tag, tuple((key, value) for key, value in attrs if key not in generated_times)) for tag, attrs in attributes]
@@ -140,15 +174,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
     parser.add_argument("--messages", type=int, default=5)
-    parser.add_argument("--operation", choices=["messages", "boosts", "attachments"], default="messages")
+    parser.add_argument("--operation", choices=["messages", "boosts", "attachments", "images"], default="messages")
     parser.add_argument("--campfire-workers", type=int, default=1)
     parser.add_argument("--sample-dir", type=pathlib.Path, help="Write one received Turbo event from each app to this directory")
+    parser.add_argument("--image-size", help="Use a generated PNG of WIDTHxHEIGHT for image uploads; default is 1x1")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
     args = parser.parse_args()
     if args.sockets < 1 or args.messages < 1 or args.campfire_workers < 1:
         parser.error("sockets, messages, and workers must be positive")
+    if args.image_size and (not re.fullmatch(r"[1-9]\d{0,3}x[1-9]\d{0,3}", args.image_size) or args.operation != "images"):
+        parser.error("--image-size requires images and WIDTHxHEIGHT, each below 10000")
     repo = args.campfire_repo.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     if revision != "91d294f4a09f9bbe37f9548959bfcb43645678fb":
@@ -162,6 +199,13 @@ def main():
         run_id = str(uuid.uuid4())
         output_dir = sample_dir or temp
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
+        image_file = temp / "upload.png" if args.image_size else None
+        expected_image_dimensions = (1, 1)
+        if image_file:
+            width, height = map(int, args.image_size.split("x"))
+            write_png(image_file, width, height)
+            factor = min(1.0, 1200 / width, 800 / height)
+            expected_image_dimensions = (round(width * factor), round(height * factor))
         rust_port, camp_port = free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
@@ -181,7 +225,8 @@ def main():
             "RUSTFIRE_PUBLIC_URL": "http://127.0.0.1",
         })
         try:
-            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html")
+            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html", image_file)
+            rust_image_bytes = check_image_representation(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session", expected_image_dimensions) if args.operation == "images" else None
         finally:
             stop_server(rust)
 
@@ -193,7 +238,8 @@ def main():
             try:
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
-                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html")
+                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html", image_file)
+                camp_image_bytes = check_image_representation(output_dir / "campfire.html", camp_port, cookie, expected_image_dimensions) if args.operation == "images" else None
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -207,16 +253,16 @@ def main():
         camp_identity = stream_avatar_identity(output_dir / "campfire.html")
         if rust_identity != camp_identity:
             raise RuntimeError(f"Avatar identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
-        if args.operation in {"messages", "attachments"} and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
+        if args.operation in {"messages", "attachments", "images"} and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
             raise RuntimeError("Message IDs differ in paired stream samples")
-        if args.operation in {"messages", "attachments"}:
+        if args.operation in {"messages", "attachments", "images"}:
             check_message_targets(output_dir / "rustfire.html")
             check_message_targets(output_dir / "campfire.html")
             rust_room_label = message_room_label(output_dir / "rustfire.html")
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
-        if args.operation in {"messages", "attachments"}:
+        if args.operation in {"messages", "attachments", "images"}:
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
             if rust_tags != camp_tags:
@@ -235,6 +281,15 @@ def main():
                 sample = (output_dir / f"{app}.html").read_text()
                 if expected_filename not in sample or "web-share#share" not in sample or "Download" not in sample:
                     raise RuntimeError(f"{app} attachment stream lacks its file or actions")
+        if args.operation == "images":
+            expected_filename = f"fanout-image-{run_id}-0.png"
+            for app in ("rustfire", "campfire"):
+                sample = (output_dir / f"{app}.html").read_text()
+                if expected_filename not in sample or "message__attachment" not in sample or "web-share#share" not in sample:
+                    raise RuntimeError(f"{app} image stream lacks its preview or actions")
+            if rust_image_bytes[1] != camp_image_bytes[1]:
+                raise RuntimeError("Rendered PNG preview bytes differ from Campfire")
+            print(f"image_representation_bytes rustfire={rust_image_bytes[0]} campfire={camp_image_bytes[0]} sha256_equal={rust_image_bytes[1] == camp_image_bytes[1]}")
         if args.operation == "boosts":
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")

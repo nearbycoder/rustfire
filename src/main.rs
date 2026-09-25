@@ -201,6 +201,10 @@ struct Attachment {
     id: i64,
     filename: String,
     content_type: String,
+    #[serde(skip_serializing)]
+    width: Option<i64>,
+    #[serde(skip_serializing)]
+    height: Option<i64>,
 }
 
 fn now() -> String {
@@ -675,6 +679,104 @@ fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> 
     Ok(format!(
         "/rails/active_storage/blobs/redirect/{}/{encoded_filename}",
         blob_token(key, id).map_err(db_err)?
+    ))
+}
+fn image_format(content_type: &str) -> Option<&'static str> {
+    match content_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpeg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/avif" => Some("avif"),
+        _ => None,
+    }
+}
+fn analyze_image_and_thumbnail(
+    input: &std::path::Path,
+    stored: &str,
+    format: &str,
+) -> (Option<i64>, Option<i64>) {
+    let dimension = |field: &str| -> Option<i64> {
+        let output = std::process::Command::new("vipsheader")
+            .args(["-f", field])
+            .arg(input)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout)
+            .ok()?
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+    };
+    let dimensions = (dimension("width"), dimension("height"));
+    let cache = input
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("variants");
+    if std::fs::create_dir_all(&cache).is_ok() {
+        let output = cache.join(format!("{stored}-thumb.{format}"));
+        let nonce = Uuid::new_v4();
+        let stage = cache.join(format!("{stored}-thumb-{nonce}.v"));
+        let temporary = cache.join(format!("{stored}-thumb-{nonce}.{format}"));
+        let resized = std::process::Command::new("vips")
+            .arg("thumbnail")
+            .arg(input)
+            .arg(&stage)
+            .args(["1200", "--height", "800", "--size", "down"])
+            .output()
+            .is_ok_and(|result| result.status.success());
+        let sharpened = resized
+            && std::process::Command::new("vips")
+                .arg("conv")
+                .arg(&stage)
+                .arg(&temporary)
+                .arg("static/vips-sharpen-mask.txt")
+                .args(["--precision", "integer"])
+                .output()
+                .is_ok_and(|result| result.status.success());
+        let _ = std::fs::remove_file(&stage);
+        if sharpened {
+            if std::fs::rename(&temporary, &output).is_err() {
+                let _ = std::fs::remove_file(&temporary);
+            }
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+    dimensions
+}
+fn image_variation_token(key: &[u8], format: &str) -> Result<String, StatusCode> {
+    let payload =
+        json!({"_rails":{"data":{"format":format,"resize_to_limit":[1200,800]},"pur":"variation"}})
+            .to_string();
+    let encoded = STANDARD.encode(payload);
+    let signature =
+        mention_signature(key, encoded.as_bytes(), MessageDigest::sha1()).map_err(db_err)?;
+    let digest = signature
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
+fn image_representation_path(s: &AppState, attachment: &Attachment) -> Result<String, StatusCode> {
+    let key = s
+        .imported_blob_signing_key
+        .as_deref()
+        .unwrap_or(&s.blob_signing_key);
+    let format = image_format(&attachment.content_type).ok_or(StatusCode::NOT_FOUND)?;
+    let blob = blob_path(key, attachment.id, &attachment.filename)?;
+    let (prefix, filename) = blob
+        .rsplit_once('/')
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(format!(
+        "{}/{}/{}",
+        prefix.replacen("/blobs/", "/representations/", 1),
+        image_variation_token(key, format)?,
+        filename
     ))
 }
 fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
@@ -2051,7 +2153,7 @@ fn message_list_with_room_name(
         })
         .transpose()?;
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
@@ -2069,7 +2171,7 @@ fn message_list_with_room_name(
 fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
     let db = pool(s)?;
     let mut message = db.query_row(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
         params![rid, mid],
         chat_message_from_row,
     )
@@ -2098,7 +2200,7 @@ fn messages_after_position(
     } else {
         i64::MIN
     };
-    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
+    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
     let mut messages = query
         .query_map(
             params![rid, cursor_time, after, limit],
@@ -2130,6 +2232,8 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
             id,
             filename: r.get(8).unwrap_or_default(),
             content_type: r.get(9).unwrap_or_default(),
+            width: r.get(15).unwrap_or_default(),
+            height: r.get(16).unwrap_or_default(),
         }),
         boosts: serde_json::from_str(&r.get::<_, String>(10)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -2157,7 +2261,7 @@ fn messages_since(
         ("m.created_at_ns>?2", "ASC", "idx_messages_room_created_ns")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
@@ -2257,6 +2361,35 @@ fn attachment_blob_path(s: &AppState, attachment: &Attachment) -> String {
     blob_path(key, attachment.id, &attachment.filename)
         .unwrap_or_else(|_| format!("/attachments/{}", attachment.id))
 }
+fn image_preview_dimensions(attachment: &Attachment) -> Option<(String, String, String)> {
+    let (width, height) = (attachment.width?, attachment.height?);
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    if width <= 1200 && height <= 800 {
+        return Some((
+            width.to_string(),
+            height.to_string(),
+            format!(
+                "{}px; aspect-ratio: {:?};",
+                width / 2,
+                width as f64 / height as f64
+            ),
+        ));
+    }
+    let factor = (1200.0 / width as f64).min(800.0 / height as f64);
+    let scaled_width = width as f64 * factor;
+    let scaled_height = height as f64 * factor;
+    Some((
+        format!("{scaled_width:?}"),
+        format!("{scaled_height:?}"),
+        format!(
+            "{:?}px; aspect-ratio: {:?};",
+            scaled_width / 2.0,
+            scaled_width / scaled_height
+        ),
+    ))
+}
 fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
     let attachment = m
         .attachment
@@ -2266,7 +2399,13 @@ fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
             let blob_url = attachment_blob_path(s, a);
             let download_url = format!("{blob_url}?disposition=attachment");
             if safe_inline_image(&a.content_type) {
-                format!("<div class='max-inline-size center overflow-clip'><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img class='message__attachment' src='/attachments/{id}/thumb' alt='{filename}' loading='lazy'></a></div>",id=a.id)
+                let (container_class, style, dimensions) = if let Some((width, height, style)) = image_preview_dimensions(a) {
+                    ("max-inline-size center flex overflow-clip", format!(" style='width: {style}'"), format!(" width='{width}' height='{height}'"))
+                } else {
+                    ("max-inline-size center overflow-clip", String::new(), String::new())
+                };
+                let representation = image_representation_path(s, a).unwrap_or_else(|_| format!("/attachments/{}/thumb", a.id));
+                format!("<div class='{container_class}'{style}><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img{dimensions} class='message__attachment' loading='lazy' src='{representation}'></a></div>")
             } else if safe_inline_video(&a.content_type) {
                 format!("<div class='max-inline-size center overflow-clip'><video src='{blob_url}' poster='/attachments/{id}/poster' controls preload='none' width='100%' height='100%' class='message__attachment'></video></div>",id=a.id)
             } else {
@@ -3079,12 +3218,18 @@ fn insert_message(
         let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
         std::fs::create_dir_all(&dir).map_err(db_err)?;
         let stored = Uuid::new_v4().to_string();
-        std::fs::write(std::path::Path::new(&dir).join(&stored), file.bytes).map_err(db_err)?;
-        db.execute("INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,file.filename,file.content_type,stored,t]).map_err(db_err)?;
+        let input = std::path::Path::new(&dir).join(&stored);
+        std::fs::write(&input, file.bytes).map_err(db_err)?;
+        let (width, height) = image_format(&file.content_type)
+            .map(|format| analyze_image_and_thumbnail(&input, &stored, format))
+            .unwrap_or((None, None));
+        db.execute("INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,file.filename,file.content_type,stored,t,width,height]).map_err(db_err)?;
         Some(Attachment {
             id: db.last_insert_rowid(),
             filename: file.filename,
             content_type: file.content_type,
+            width,
+            height,
         })
     } else {
         None
@@ -5835,6 +5980,49 @@ async fn signed_blob_get(
     )
     .await
 }
+async fn signed_representation_get(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((token, variation, _filename)): Path<(String, String, String)>,
+) -> AppResult {
+    let key = [
+        Some(s.blob_signing_key.as_slice()),
+        s.imported_blob_signing_key.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|key| blob_id_from_token(key, &token).is_some())
+    .ok_or(StatusCode::NOT_FOUND)?;
+    let id = blob_id_from_token(key, &token).ok_or(StatusCode::NOT_FOUND)?;
+    let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
+    let format = image_format(&content_type).ok_or(StatusCode::NOT_FOUND)?;
+    let expected = image_variation_token(key, format)?;
+    if !memcmp::eq(variation.as_bytes(), expected.as_bytes()) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let dir = std::path::PathBuf::from(
+        env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+    );
+    let input = dir.join(&stored);
+    let output = dir
+        .join("variants")
+        .join(format!("{stored}-thumb.{format}"));
+    if tokio::fs::metadata(&output).await.is_err() {
+        let _permit = s.variant_slots.acquire().await.map_err(db_err)?;
+        if tokio::fs::metadata(&output).await.is_err() {
+            let stored_copy = stored.clone();
+            let format_copy = format.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                analyze_image_and_thumbnail(&input, &stored_copy, &format_copy)
+            })
+            .await;
+        }
+    }
+    if tokio::fs::metadata(&output).await.is_err() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    serve_attachment(&output, &filename, &content_type, &headers, true).await
+}
 fn remove_attachment_files(stored: &str) {
     if Uuid::parse_str(stored).is_err() {
         return;
@@ -5845,6 +6033,12 @@ fn remove_attachment_files(stored: &str) {
     let _ = std::fs::remove_file(dir.join(stored));
     for kind in ["thumb", "poster"] {
         let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-{kind}.webp")));
+    }
+    for format in ["png", "jpeg", "gif", "webp", "avif"] {
+        let _ = std::fs::remove_file(
+            dir.join("variants")
+                .join(format!("{stored}-thumb.{format}")),
+        );
     }
 }
 async fn attachment_variant(
@@ -6411,7 +6605,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         END;
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
-        CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -6436,6 +6630,19 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if !has_csrf {
         conn.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT", [])?;
+    }
+    for column in ["width", "height"] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('attachments') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE attachments ADD COLUMN {column} INTEGER"),
+                [],
+            )?;
+        }
     }
     conn.execute("UPDATE sessions SET csrf_token=lower(hex(randomblob(16))) WHERE csrf_token IS NULL OR csrf_token=''", [])?;
     let has_connections: bool = conn.query_row(
@@ -6821,6 +7028,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/rails/active_storage/blobs/redirect/{token}/{filename}",
             get(signed_blob_get),
+        )
+        .route(
+            "/rails/active_storage/representations/redirect/{token}/{variation}/{filename}",
+            get(signed_representation_get),
         )
         .nest_service("/assets", ServeDir::new("static/assets"))
         .nest_service("/static", ServeDir::new("static"))
