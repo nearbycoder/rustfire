@@ -81,6 +81,7 @@ struct AppState {
     imported_blob_signing_key: Option<Vec<u8>>,
     turbo_stream_signing_key: Vec<u8>,
     imported_turbo_stream_signing_key: Option<Vec<u8>>,
+    imported_cookie_signing_key: Option<Vec<u8>>,
     push_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
@@ -650,6 +651,9 @@ fn rails_blob_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::Erro
 fn rails_turbo_stream_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
     rails_verifier_key(secret_key_base, b"turbo/signed_stream_verifier_key")
 }
+fn rails_cookie_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    rails_verifier_key(secret_key_base, b"signed cookie")
+}
 fn room_stream_token(
     key: &[u8],
     room_kind: &str,
@@ -1196,6 +1200,56 @@ fn cookie(headers: &HeaderMap, key: &str) -> Option<String> {
                 .map(|(_, v)| v.to_string())
         })
 }
+fn rails_session_cookie_token(key: &[u8], signed: &str) -> Option<String> {
+    if signed.len() > 4096 {
+        return None;
+    }
+    let decoded = {
+        let mut bytes = Vec::with_capacity(signed.len());
+        let mut input = signed.as_bytes().iter().copied();
+        while let Some(byte) = input.next() {
+            if byte == b'%' {
+                let high = (input.next()? as char).to_digit(16)?;
+                let low = (input.next()? as char).to_digit(16)?;
+                bytes.push(((high << 4) | low) as u8);
+            } else {
+                bytes.push(byte);
+            }
+        }
+        String::from_utf8(bytes).ok()?
+    };
+    let (encoded, signature) = decoded.split_once("--")?;
+    if signature.len() != 40 {
+        return None;
+    }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())
+        .ok()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let payload: Value = serde_json::from_slice(&STANDARD.decode(encoded).ok()?).ok()?;
+    let metadata = payload.get("_rails")?;
+    if metadata.get("pur").and_then(Value::as_str) != Some("cookie.session_token") {
+        return None;
+    }
+    let expiry = metadata.get("exp")?.as_str()?;
+    if chrono::DateTime::parse_from_rfc3339(expiry).ok()? <= Utc::now() {
+        return None;
+    }
+    let message = STANDARD.decode(metadata.get("message")?.as_str()?).ok()?;
+    serde_json::from_slice::<String>(&message).ok()
+}
+fn session_token(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let value = cookie(headers, "session_token")?;
+    if value.contains("--") {
+        rails_session_cookie_token(state.imported_cookie_signing_key.as_deref()?, &value)
+    } else {
+        Some(value)
+    }
+}
 fn safe_return_path(encoded: &str) -> Option<String> {
     let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     let path = String::from_utf8(bytes).ok()?;
@@ -1207,7 +1261,7 @@ fn safe_return_path(encoded: &str) -> Option<String> {
     .then_some(path)
 }
 fn user(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
-    let token = cookie(headers, "session_token").ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = session_token(state, headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let db = pool(state)?;
     db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
@@ -1982,7 +2036,7 @@ async fn reject_banned_ip(
                 Some(token) => Some(token),
                 None => return StatusCode::FORBIDDEN.into_response(),
             }
-        } else if let Some(session_token) = cookie(request.headers(), "session_token") {
+        } else if let Some(session_token) = session_token(&s, request.headers()) {
             match pool(&s).and_then(|db|db.query_row("SELECT s.csrf_token FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1 AND u.status=0",[session_token],|r|r.get(0)).optional().map_err(db_err)) {
                 Ok(token)=>token,
                 Err(code)=>return code.into_response(),
@@ -2334,7 +2388,7 @@ async fn session_post(
     .await
 }
 async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> AppResult {
-    if let Some(t) = cookie(&headers, "session_token") {
+    if let Some(t) = session_token(&s, &headers) {
         let db = pool(&s)?;
         let uid: Option<i64> = db
             .query_row("SELECT user_id FROM sessions WHERE token=?1", [&t], |row| {
@@ -8484,6 +8538,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .map(rails_turbo_stream_key)
         .transpose()?;
+    let imported_cookie_signing_key = campfire_secret.as_deref().map(rails_cookie_key).transpose()?;
     if command.as_deref() == Some("--render-imported-rich-text") {
         render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref())?;
         return Ok(());
@@ -8525,6 +8580,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         imported_blob_signing_key,
         turbo_stream_signing_key,
         imported_turbo_stream_signing_key,
+        imported_cookie_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
@@ -8771,6 +8827,19 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn imported_rails_session_cookie_verifies_purpose_expiry_and_signature() {
+        let key = super::rails_cookie_key("0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        let source_cookie = "eyJfcmFpbHMiOnsibWVzc2FnZSI6IkltbHRjRzl5ZEdWa0xYTmxjM05wYjI0aSIsImV4cCI6IjIwOTktMDEtMDFUMDA6MDA6MDAuMDAwWiIsInB1ciI6ImNvb2tpZS5zZXNzaW9uX3Rva2VuIn19--30ae05ed03445e2452fb8957a8759ec4529f55af";
+        assert_eq!(super::rails_session_cookie_token(&key, source_cookie).as_deref(), Some("imported-session"));
+        assert_eq!(super::rails_session_cookie_token(&key, &source_cookie.replace("--", "%2D%2D")).as_deref(), Some("imported-session"));
+        assert!(super::rails_session_cookie_token(b"wrong", source_cookie).is_none());
+        let expired = serde_json::json!({"_rails":{"message":base64::engine::general_purpose::STANDARD.encode("\"imported-session\""),"exp":"2020-01-01T00:00:00.000Z","pur":"cookie.session_token"}}).to_string();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(expired);
+        let digest = super::mention_signature(&key, encoded.as_bytes(), openssl::hash::MessageDigest::sha1()).unwrap().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        assert!(super::rails_session_cookie_token(&key, &format!("{encoded}--{digest}")).is_none());
+    }
 
     #[test]
     fn attachment_filename_is_searchable_without_changing_message_body() {

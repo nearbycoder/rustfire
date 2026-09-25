@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 
@@ -107,6 +108,7 @@ def main():
             assert imported.execute("SELECT restrict_room_creation FROM account_settings").fetchone() == (1,)
             assert imported.execute("SELECT css FROM account_custom_styles").fetchone() == ("body { color: navy; }",)
             assert imported.execute("SELECT token FROM sessions WHERE id=1").fetchone() == ("imported-session",)
+            csrf_token = imported.execute("SELECT csrf_token FROM sessions WHERE id=1").fetchone()[0]
             for table in ("avatars", "account_logos"):
                 media = imported.execute(f"SELECT stored_name FROM {table}").fetchone()[0]
                 assert (target_uploads / media).read_bytes() == file_bytes
@@ -128,6 +130,19 @@ def main():
                 raise AssertionError("imported Rustfire server did not serve the room")
             assert "Imported room" in page and "Hello" in page and "imported.txt" in page
             assert public_key in page, page[:800]
+            cookie_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"signed cookie", 1000, 64)
+            message = base64.b64encode(json.dumps("imported-session").encode()).decode()
+            envelope = {"_rails": {"message": message, "exp": "2099-01-01T00:00:00.000Z", "pur": "cookie.session_token"}}
+            encoded_cookie = base64.b64encode(json.dumps(envelope, separators=(",", ":")).encode()).decode()
+            signed_cookie = f"{encoded_cookie}--{hmac.new(cookie_key, encoded_cookie.encode(), hashlib.sha1).hexdigest()}"
+            signed_request = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1", headers={"Cookie": f"session_token={signed_cookie}"})
+            with urllib.request.urlopen(signed_request, timeout=2) as response:
+                assert "Imported room" in response.read().decode()
+            form = urllib.parse.urlencode({"message[body]": "posted with imported cookie"}).encode()
+            post = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages", data=form,
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
+            with urllib.request.urlopen(post, timeout=2) as response:
+                assert response.status == 201
         finally:
             server.terminate()
             server.wait(timeout=5)
