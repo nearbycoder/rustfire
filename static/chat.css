@@ -177,14 +177,16 @@ turbo-frame[id^='boosting_message_'],turbo-frame[id^='new_boost_message_'] { dis
 .boost-item { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 3px 7px 3px 3px; border: 1px solid var(--chat-border); border-radius: 999px; background: var(--chat-bg); color: var(--chat-text); }
 .boost__avatar { width: 22px; height: 22px; margin: 0; }
 .boost__avatar .avatar { display: block; width: 22px; height: 22px; }
-.boost-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
-.boost-content { line-height: 1.2; }
-.boost-item.mine .boost-content { cursor: pointer; }
-.boost-item.mine .boost-content:focus-visible { outline: 2px solid var(--chat-text); outline-offset: 3px; border-radius: 4px; }
+.boost__avatar img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.boost-item [data-boost-delete-target='content'] { line-height: 1.2; }
+.boost-item.mine [data-boost-delete-target='content'] { cursor: pointer; }
+.boost-item.mine [data-boost-delete-target='content']:focus-visible { outline: 2px solid var(--chat-text); outline-offset: 3px; border-radius: 4px; }
 .boost-item .button_to { margin: 0; }
-.boost-delete { border: 0; border-radius: 50%; width: 22px; height: 22px; line-height: 1; background: #a83f31; color: white; padding: 0; }
-.boost-delete img { width: 15px; height: 15px; filter: brightness(0) invert(1); }
-.boost-delete[hidden] { display: none; }
+.boost__delete { display: none; border: 0; border-radius: 50%; width: 22px; height: 22px; line-height: 1; background: #a83f31; color: white; padding: 0; }
+.boost.expanded .boost__delete { display: flex; }
+.boost__delete img { width: 15px; height: 15px; filter: brightness(0) invert(1); }
+.message--emoji .message__body { background: transparent; }
+.message--emoji [id^='presentation_message_'] .trix-content { font-size: 2rem; }
 .for-screen-reader { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: none; }

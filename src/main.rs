@@ -2148,8 +2148,13 @@ fn boost_html(
         .unwrap_or(&s.avatar_signing_key);
     let avatar_url = avatar_path(avatar_key, booster_id, booster_updated_at)
         .unwrap_or_else(|_| format!("/users/{booster_id}/avatar"));
+    let content_class = if all_emoji(content) {
+        "txt-small txt-medium"
+    } else {
+        "txt-small"
+    };
     format!(
-        "<div class='boost boost-item flex-inline postion--relative max-width align-center fill-white gap' id='boost_{id}' data-booster-id='{booster_id}' data-controller='boost-delete' data-boost-delete-perform-class='boost--deleting' data-boost-delete-reveal-class='expanded' data-boost-delete-booster-id-value='{booster_id}'><figure class='avatar boost__avatar flex-item-no-shrink'><a title='{}' class='btn avatar' data-turbo-frame='_top' href='/users/{booster_id}'><img class='boost-avatar' aria-label='{} boosted {}' src='{}' width='48' height='48'></a></figure><span class='boost-content txt-small' role='button' aria-expanded='false' data-action='click-&gt;boost-delete#reveal keydown.enter-&gt;boost-delete#reveal:prevent' data-boost-reveal>{}</span><form class='button_to' method='post' action='/messages/{message_id}/boosts/{id}'><input type='hidden' name='_method' value='delete'><button class='boost-delete btn btn--negative flex-item-justify-end boost__delete' type='submit' data-action='boost-delete#perform' data-delete-boost='/messages/{message_id}/boosts/{id}' aria-label='Delete this boost' hidden><img src='/static/icons/minus.svg' width='20' height='20' alt=''><span class='for-screen-reader'>Delete this boost</span></button></form></div>",
+        "<div id='boost_{id}' class='boost boost-item flex-inline postion--relative max-width align-center fill-white gap' data-controller='boost-delete' data-boost-delete-perform-class='boost--deleting' data-boost-delete-reveal-class='expanded' data-boost-delete-booster-id-value='{booster_id}'><figure class='avatar boost__avatar flex-item-no-shrink'><a title='{}' class='btn avatar' data-turbo-frame='_top' href='/users/{booster_id}'><img aria-label='{} boosted {}' src='{}' width='48' height='48'></a></figure><span role='button' class='{content_class}' data-action='click-&gt;boost-delete#reveal keydown.enter-&gt;boost-delete#reveal:prevent' data-boost-delete-target='content'>{}</span><form class='button_to' method='post' action='/messages/{message_id}/boosts/{id}'><input type='hidden' name='_method' value='delete'><button data-action='boost-delete#perform' data-boost-delete-target='button' class='btn btn--negative flex-item-justify-end boost__delete' type='submit'><img aria-hidden='true' src='/assets/minus-b31a1093.svg' width='20' height='20'><span class='for-screen-reader'>Delete this boost</span></button></form></div><span id='delete_boost_accessible_label' class='for-screen-reader'>Press enter to delete this boost</span>",
         esc(booster_name),
         esc(booster_name),
         esc(content),
@@ -2216,14 +2221,14 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
     let quick_boosts=[("👍","Thumbs up"),("👏","Clapping"),("👋","Waving hand"),("💪","Muscle"),("❤️","Red heart"),("😂","Face with tears of joy"),("🎉","Party popper"),("🔥","Fire")].iter().map(|(emoji,label)|format!("<form data-turbo-frame='boosting_message_{client_id}' data-action='popup#close' action='/messages/{}/boosts' accept-charset='UTF-8' method='post'><input type='hidden' name='boost[content]' id='boost_content' value='{emoji}'><button name='button' type='submit' title='{label}' class='btn message__action-btn' data-emoji='{emoji}'><figure class='margin-none boost-character'>{emoji}</figure><span class='for-screen-reader'>{label}</span></button></form>",m.id)).collect::<String>();
     let content_action = if m.attachment.is_some() {
         format!(
-            "<a class='btn message__action-btn center full-width' href='/attachments/{}' title='Download' aria-label='Download' download><img class='colorize--black' aria-hidden='true' src='/static/icons/download.svg' width='20' height='20'></a>",
+            "<a class='btn message__action-btn center full-width' href='/attachments/{}' title='Download' aria-label='Download' download><img class='colorize--black' aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'></a>",
             m.attachment.as_ref().unwrap().id
         )
     } else {
-        "<button class='btn message__action-btn center full-width' data-action='reply#reply' title='Reply' aria-label='Reply'><img class='colorize--black' aria-hidden='true' src='/static/icons/reply.svg' width='20' height='20'></button>".to_string()
+        "<button class='btn message__action-btn center full-width' data-action='reply#reply' title='Reply' aria-label='Reply'><img class='colorize--black' aria-hidden='true' src='/assets/reply-edb77e33.svg' width='20' height='20'></button>".to_string()
     };
     let actions = format!(
-        "<details class='position-relative' data-controller='popup' data-action='keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn message__action-btn message__options-btn'><img class='colorize--black' aria-hidden='true' src='/static/icons/menu-dots-horizontal.svg' width='20' height='20'><span class='for-screen-reader'>Message options</span></summary><div class='message__actions-menu border shadow' data-popup-target='menu'><div class='quick-boosts'>{quick_boosts}<a class='btn message__action-btn message__boost-btn' href='/messages/{message_id}/boosts/new' data-turbo-frame='new_boost_message_{client_id}' data-action='soft-keyboard#open popup#close'><img class='colorize--black' aria-hidden='true' src='/static/icons/boost.svg' width='20' height='20'><span class='for-screen-reader'>New boost</span></a></div><div class='flex flex-wrap border-top margin-block-start-half pad-block-start-half message__actions-grid'>{content_action}<button class='btn message__action-btn center full-width' title='Copy link' aria-label='Copy link' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='/rooms/{room_id}/@{message_id}'><img class='colorize--black' aria-hidden='true' src='/static/icons/link.svg' width='20' height='20'></button><a class='btn message__action-btn center full-width message__edit-btn' href='/rooms/{room_id}/messages/{message_id}/edit' data-turbo-frame='edit_message_{client_id}' title='Edit' aria-label='Edit'><img class='colorize--black' aria-hidden='true' src='/static/icons/pencil.svg' width='20' height='20'></a></div></div></details>",
+        "<details class='position-relative' data-controller='popup' data-action='keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn message__action-btn message__options-btn'><img class='colorize--black' aria-hidden='true' src='/assets/menu-dots-horizontal-f6a5d793.svg' width='20' height='20'><span class='for-screen-reader'>Message options</span></summary><div class='message__actions-menu border shadow' data-popup-target='menu'><div class='quick-boosts'>{quick_boosts}<a class='btn message__action-btn message__boost-btn' href='/messages/{message_id}/boosts/new' data-turbo-frame='new_boost_message_{client_id}' data-action='soft-keyboard#open popup#close'><img class='colorize--black' aria-hidden='true' src='/assets/boost-4a7bab66.svg' width='20' height='20'><span class='for-screen-reader'>New boost</span></a></div><div class='flex flex-wrap border-top margin-block-start-half pad-block-start-half message__actions-grid'>{content_action}<button class='btn message__action-btn center full-width' title='Copy link' aria-label='Copy link' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='/rooms/{room_id}/@{message_id}'><img class='colorize--black' aria-hidden='true' src='/assets/link-e546a5df.svg' width='20' height='20'></button><a class='btn message__action-btn center full-width message__edit-btn' href='/rooms/{room_id}/messages/{message_id}/edit' data-turbo-frame='edit_message_{client_id}' title='Edit' aria-label='Edit'><img class='colorize--black' aria-hidden='true' src='/assets/pencil-cf9d28aa.svg' width='20' height='20'></a></div></div></details>",
         message_id = m.id,
         room_id = m.room_id
     );
@@ -2244,8 +2249,13 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
         .collect::<String>();
     let creator_name = esc(&m.creator_name);
     let datetime = esc(&datetime);
+    let message_classes = if all_emoji(&m.body) {
+        "message message--emoji"
+    } else {
+        "message "
+    };
     let boost_area = format!(
-        "<turbo-frame id='boosting_message_{client_id}'><div class='boosts flex flex-wrap align-center gap full-width' style='--column-gap: 0.4ch; --row-gap: 0' data-controller='turbo-streaming' data-action='turbo:submit-start-&gt;turbo-streaming#unsubscribe'><div class='flex-inline flex-wrap gap' id='boosts_message_{client_id}' data-turbo-streaming-target='container'>{boosts}</div><turbo-frame id='new_boost_message_{client_id}'><div class='flex-inline message__boost-inline' data-controller='soft-keyboard'><a class='boost__action txt-small btn' href='/messages/{}/boosts/new' action='soft-keyboard#open'><img aria-hidden='true' src='/static/icons/boost.svg' width='20' height='20'><span class='for-screen-reader'>Add a boost</span></a></div></turbo-frame></div></turbo-frame>",
+        "<turbo-frame id='boosting_message_{client_id}'><div class='boosts flex flex-wrap align-center gap full-width' style='--column-gap: 0.4ch; --row-gap: 0' data-controller='turbo-streaming' data-action='turbo:submit-start-&gt;turbo-streaming#unsubscribe'><div class='flex-inline flex-wrap gap' id='boosts_message_{client_id}' data-turbo-streaming-target='container'>{boosts}</div><turbo-frame id='new_boost_message_{client_id}'><div class='flex-inline message__boost-inline' data-controller='soft-keyboard'><a class='boost__action txt-small btn' href='/messages/{}/boosts/new' action='soft-keyboard#open'><img aria-hidden='true' src='/assets/boost-4a7bab66.svg' width='20' height='20'><span class='for-screen-reader'>Add a boost</span></a></div></turbo-frame></div></turbo-frame>",
         m.id
     );
     let metadata = format!(
@@ -2255,10 +2265,19 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
         room_name = esc(&m.room_name),
     );
     format!(
-        "<div id='message_{client_id}' class='message ' data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-time-target='date'></time></h2><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message__body'><div class='message__body-content'>{metadata}{presentation}{boost_area}</div></div></turbo-frame></div>",
+        "<div id='message_{client_id}' class='{message_classes}' data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-time-target='date'></time></h2><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message__body'><div class='message__body-content'>{metadata}{presentation}{boost_area}</div></div></turbo-frame></div>",
         message_id = m.id,
         creator_id = m.creator_id,
     )
+}
+fn all_emoji(content: &str) -> bool {
+    static EMOJI: OnceLock<Regex> = OnceLock::new();
+    EMOJI
+        .get_or_init(|| {
+            Regex::new(r"\A(?:\p{Emoji_Presentation}|\p{Extended_Pictographic}|\u{FE0F})+\z")
+                .unwrap()
+        })
+        .is_match(content)
 }
 fn sound_presentation(body: &str) -> Option<String> {
     let name = body.strip_prefix("/play ")?;
@@ -2418,7 +2437,7 @@ async fn room_show_with_target(
     let at_message = target.map(|id| id.to_string()).unwrap_or_default();
     let messages_target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
     let mut content = format!(
-        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/static/icons/menu-dots-horizontal.svg' alt=''></a><a class='icon-btn' href='/rooms/{}/involvement' aria-label='Notifications'><img src='/static/icons/notification-bell-mentions.svg' alt=''></a><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
+        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/assets/menu-dots-horizontal-f6a5d793.svg' alt=''></a><a class='icon-btn' href='/rooms/{}/involvement' aria-label='Notifications'><img src='/static/icons/notification-bell-mentions.svg' alt=''></a><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
         sidebar(&s, &u, Some(rid))?,
         rid,
         esc(&room.name),
@@ -6082,7 +6101,7 @@ fn turbo_room_event(payload: &Value) -> Option<String> {
             ))
         }
         "boost" => Some(format!(
-            "<turbo-stream action=\"append\" target=\"boosts_message_{}\"><template>{}</template></turbo-stream>",
+            "<turbo-stream maintain_scroll=\"true\" action=\"append\" target=\"boosts_message_{}\"><template>{}</template></turbo-stream>",
             esc(payload.get("client_message_id")?.as_str()?),
             payload.get("boost_html")?.as_str()?
         )),
@@ -6656,6 +6675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/{bid}/delete", post(boost_delete))
         .route("/attachments/{id}", get(attachment_get))
         .route("/attachments/{id}/{kind}", get(attachment_variant))
+        .nest_service("/assets", ServeDir::new("static/assets"))
         .nest_service("/static", ServeDir::new("static"))
         .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
@@ -6685,6 +6705,16 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn emoji_only_matches_campfire_message_classes() {
+        assert!(super::all_emoji("😄🤘"));
+        assert!(super::all_emoji("❤️"));
+        assert!(!super::all_emoji("Haha! 😄🤘"));
+        assert!(!super::all_emoji("🔥\nmultiple lines\n💯"));
+        assert!(!super::all_emoji("🔥 💯"));
+        assert!(!super::all_emoji(""));
+    }
 
     #[test]
     fn message_time_migration_preserves_rails_microseconds() {

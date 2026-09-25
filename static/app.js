@@ -62,10 +62,11 @@ if (chat) {
   const decorateOwn=()=>{
     messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.userId===document.body.dataset.userId));
     messages.querySelectorAll('.boost-item').forEach(node=>{
-      const mine=node.dataset.boosterId===document.body.dataset.userId;
+      const mine=node.dataset.boostDeleteBoosterIdValue===document.body.dataset.userId;
       node.classList.toggle('mine',mine);
-      const content=node.querySelector('[data-boost-reveal]');
-      if(mine)content?.setAttribute('tabindex','0');else content?.removeAttribute('tabindex');
+      const content=node.querySelector('[data-boost-delete-target="content"]');
+      if(mine){content?.setAttribute('tabindex','0');content?.setAttribute('aria-describedby','delete_boost_accessible_label');}
+      else{content?.removeAttribute('tabindex');content?.removeAttribute('aria-describedby');}
     });
   };
   const formatMessageGroups=()=>{
@@ -326,14 +327,11 @@ if (chat) {
   function revealBoost(node){
     const boost=node.closest('.boost-item');
     if(!boost?.classList.contains('mine'))return;
-    const shown=boost.classList.toggle('revealed');
-    const button=boost.querySelector('.boost-delete');
-    button.hidden=!shown;
-    node.setAttribute('aria-expanded',String(shown));
-    if(shown)button.focus();else node.focus();
+    boost.classList.toggle('expanded');
+    boost.querySelector('[data-boost-delete-target="button"]')?.focus();
   }
   messages.addEventListener('keydown',event=>{
-    const content=event.target.closest('[data-boost-reveal]');
+    const content=event.target.closest('[data-boost-delete-target="content"]');
     if(content&&(event.key==='Enter'||event.key===' ')){event.preventDefault();revealBoost(content);}
   });
   messages.addEventListener('click',event=>{
@@ -347,15 +345,15 @@ if (chat) {
     });
   });
   messages.addEventListener('click', async e => {
-    const boostDelete=e.target.closest('[data-delete-boost]');
+    const boostDelete=e.target.closest('[data-boost-delete-target="button"]');
     if(boostDelete){
       e.preventDefault();
-      const response=await fetch(boostDelete.dataset.deleteBoost,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken,Accept:'text/vnd.turbo-stream.html'}});
+      const response=await fetch(boostDelete.closest('form').action,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken,Accept:'text/vnd.turbo-stream.html'}});
       if(response.ok)boostDelete.closest('.boost-item')?.remove();
       else alert('Could not delete boost');
       return;
     }
-    const boostReveal=e.target.closest('[data-boost-reveal]');
+    const boostReveal=e.target.closest('[data-boost-delete-target="content"]');
     if(boostReveal){revealBoost(boostReveal);return;}
     const edit=e.target.closest('.message__edit-btn');
     if(edit){

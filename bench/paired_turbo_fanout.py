@@ -13,6 +13,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import uuid
 
 from direct_lookup import ROOT, free_port, start_server, stop_server
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
@@ -29,12 +30,13 @@ def seed_boost_message(rust_db, camp_db):
         db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Boost fixture','Message',1,?1,?1)", [camp_time])
 
 
-def fanout(app, port, cookie, csrf, sockets, messages, operation, sample_file=None):
+def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None):
     command = [
         "node", "bench/fanout.mjs", "--app", app,
         "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
         "--csrf", csrf, "--room", "1", "--sockets", str(sockets),
         "--messages", str(messages), "--operation", operation,
+        "--run-id", run_id,
     ]
     if sample_file is not None:
         command.extend(["--sample-file", str(sample_file)])
@@ -93,10 +95,13 @@ class MessageTagSequence(HTMLParser):
         super().__init__()
         self.tags = []
         self.attribute_keys = []
+        self.attributes = []
+        self.text = []
 
     def handle_starttag(self, tag, attrs):
         self.tags.append(("start", tag))
         self.attribute_keys.append((tag, tuple(sorted(key for key, _ in attrs))))
+        self.attributes.append((tag, tuple(sorted(attrs))))
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
@@ -105,11 +110,15 @@ class MessageTagSequence(HTMLParser):
         if tag not in {"img", "input", "br", "hr", "source", "meta", "link"}:
             self.tags.append(("end", tag))
 
+    def handle_data(self, data):
+        if data.strip():
+            self.text.append(data.strip())
 
-def message_structure(sample_file):
+
+def stream_structure(sample_file):
     parser = MessageTagSequence()
     parser.feed(sample_file.read_text())
-    return parser.tags, parser.attribute_keys
+    return parser.tags, parser.attribute_keys, parser.attributes, parser.text
 
 
 def main():
@@ -135,6 +144,7 @@ def main():
         sample_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="paired-turbo-fanout-") as scratch:
         temp = pathlib.Path(scratch)
+        run_id = str(uuid.uuid4())
         output_dir = sample_dir or temp
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
         rust_port, camp_port = free_port(), free_port()
@@ -155,7 +165,7 @@ def main():
             "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"],
         })
         try:
-            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, output_dir / "rustfire.html")
+            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html")
         finally:
             stop_server(rust)
 
@@ -167,7 +177,7 @@ def main():
             try:
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
-                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, output_dir / "campfire.html")
+                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html")
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -190,12 +200,23 @@ def main():
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
-            rust_tags, rust_attributes = message_structure(output_dir / "rustfire.html")
-            camp_tags, camp_attributes = message_structure(output_dir / "campfire.html")
+            rust_tags, rust_attributes, _, _ = stream_structure(output_dir / "rustfire.html")
+            camp_tags, camp_attributes, _, _ = stream_structure(output_dir / "campfire.html")
             if rust_tags != camp_tags:
                 raise RuntimeError("Message stream tag structure differs from Campfire")
             if rust_attributes != camp_attributes:
                 raise RuntimeError("Message stream attribute keys differ from Campfire")
+        elif args.operation == "boosts":
+            rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
+            camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
+            if rust_tags != camp_tags:
+                raise RuntimeError("Boost stream tag structure differs from Campfire")
+            if rust_attributes != camp_attributes:
+                raise RuntimeError("Boost stream attribute keys differ from Campfire")
+            if rust_values != camp_values:
+                raise RuntimeError("Boost stream attribute values differ from Campfire")
+            if rust_text != camp_text:
+                raise RuntimeError("Boost stream text differs from Campfire")
         print(f"{args.operation}_identity_match=true")
 
 

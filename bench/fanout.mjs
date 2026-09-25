@@ -120,10 +120,10 @@ try {
   for (let start = 0; start < socketCount; start += 50) {
     await Promise.all(Array.from({ length: Math.min(50, socketCount - start) }, (_, i) => connect(start + i)));
   }
-  const runId = crypto.randomUUID();
+  const runId = args['run-id'] ?? crypto.randomUUID();
   const begin = performance.now();
   for (let i = 0; i < messageCount; i++) {
-    const id = operation === 'boosts' ? `z${crypto.randomBytes(4).toString('hex')}` : `${runId}-${i}`;
+    const id = operation === 'boosts' ? `z${crypto.createHash('sha256').update(`${runId}-${i}`).digest('hex').slice(0,8)}` : `${runId}-${i}`;
     sent.set(id, performance.now());
     const response = await fetch(new URL(operation === 'boosts' ? `/messages/${messageId}/boosts` : `/rooms/${room}/messages`, base), {
       method: 'POST',
