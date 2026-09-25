@@ -70,6 +70,8 @@ struct AppState {
     unread_events: RoomHub,
     read_events: RoomHub,
     room_list_events: RoomHub,
+    turbo_user_rooms: RoomHub,
+    turbo_shared_rooms: RoomHub,
     revoked_users: broadcast::Sender<i64>,
     trusted_proxies: HashSet<IpAddr>,
     webhook_client: reqwest::Client,
@@ -164,6 +166,17 @@ impl RoomHub {
             let payload = Arc::new(HubPayload {
                 json: event.payload.into(),
                 turbo,
+                access: RwLock::new(HashMap::new()),
+                frames: RwLock::new(HashMap::new()),
+            });
+            let _ = channel.send(payload);
+        }
+    }
+    fn send_turbo(&self, stream_id: i64, html: String) {
+        if let Some(channel) = self.rooms.lock().unwrap().get(&stream_id) {
+            let payload = Arc::new(HubPayload {
+                json: "null".into(),
+                turbo: serde_json::to_string(&html).ok().map(Into::into),
                 access: RwLock::new(HashMap::new()),
                 frames: RwLock::new(HashMap::new()),
             });
@@ -684,6 +697,23 @@ fn room_stream_token(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(format!("{encoded}--{signature}"))
+}
+fn turbo_stream_token(key: &[u8], stream: &str) -> Result<String, openssl::error::ErrorStack> {
+    let encoded = STANDARD.encode(json!(stream).to_string());
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{signature}"))
+}
+fn turbo_stream_from_token(key: &[u8], token: &str) -> Option<String> {
+    if token.len() > 4096 { return None; }
+    let (encoded, signature) = token.split_once("--")?;
+    if signature.len() != 64 { return None; }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256()).ok()?
+        .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) { return None; }
+    serde_json::from_slice(&STANDARD.decode(encoded).ok()?).ok()
 }
 fn room_from_stream_token(key: &[u8], token: &str) -> Option<(i64, String)> {
     if token.len() > 4096 {
@@ -2886,7 +2916,10 @@ fn rooms_for(s: &AppState, uid: i64) -> Result<Vec<Room>, StatusCode> {
 }
 fn sidebar_room_link(room: &Room, active: Option<i64>, unread: bool) -> String {
     format!(
-        "<a class='room-link {}' href='/rooms/{}'>{}</a>",
+        "<a id='{}' data-rooms-list-target='room' data-room-id='{}' data-badge-dot-target='unread' data-sorted-list-target='item' data-sorted-list-name='{}' style='--column-gap: 0.5em' class='align-center gap room btn txt-nowrap room-link {}' href='/rooms/{}'><span class='overflow-ellipsis'>{}</span></a>",
+        room_list_target(room),
+        room.id,
+        esc(&room.name),
         format!(
             "{} {}",
             if active == Some(room.id) {
@@ -2899,6 +2932,40 @@ fn sidebar_room_link(room: &Room, active: Option<i64>, unread: bool) -> String {
         room.id,
         esc(&room.name)
     )
+}
+fn room_list_target(room: &Room) -> String {
+    let kind = match room.kind.as_str() {
+        "Rooms::Open" => "rooms_open",
+        "Rooms::Closed" => "rooms_closed",
+        "Rooms::Direct" => "rooms_direct",
+        _ => "room",
+    };
+    format!("list_{kind}_{}", room.id)
+}
+fn broadcast_user_room_visibility(s: &AppState, user_id: i64, room: &Room, visible: bool) {
+    let target = room_list_target(room);
+    let html = if visible {
+        format!("<turbo-stream action=\"prepend\" target=\"shared_rooms\"><template>{}</template></turbo-stream>", sidebar_room_link(room, None, false))
+    } else {
+        format!("<turbo-stream action=\"remove\" target=\"{target}\"></turbo-stream>")
+    };
+    s.turbo_user_rooms.send_turbo(user_id, html);
+}
+fn broadcast_room_created(s: &AppState, room: &Room, members: &[i64]) {
+    let html = format!("<turbo-stream action=\"prepend\" target=\"shared_rooms\"><template>{}</template></turbo-stream>", sidebar_room_link(room, None, false));
+    if room.kind == "Rooms::Open" {
+        s.turbo_shared_rooms.send_turbo(0, html);
+    } else {
+        for &id in members { s.turbo_user_rooms.send_turbo(id, html.clone()); }
+    }
+}
+fn broadcast_room_updated(s: &AppState, room: &Room, members: &HashSet<i64>) {
+    let html = format!("<turbo-stream action=\"replace\" target=\"{}\"><template>{}</template></turbo-stream>", room_list_target(room), sidebar_room_link(room, None, false));
+    if room.kind == "Rooms::Open" {
+        s.turbo_shared_rooms.send_turbo(0, html);
+    } else {
+        for &id in members { s.turbo_user_rooms.send_turbo(id, html.clone()); }
+    }
 }
 fn sidebar_direct_link(
     room: &Room,
@@ -2992,8 +3059,13 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
             |r| r.get(0),
         )
         .map_err(db_err)?;
-    let mut html = String::from(
-        "<aside class='sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/assets/menu-5462dfd3.svg' alt=''></button><div class='sidebar-main'><div class='sidebar-directs'><a class='direct-new' href='/rooms/directs/new' aria-label='New ping'><span class='direct-new-icon'><img src='/static/assets/messages-add-d229e6c2.svg' alt=''></span><span>Ping</span></a><nav id='direct-rooms'>",
+    let stream_key = s.imported_turbo_stream_signing_key.as_deref().unwrap_or(&s.turbo_stream_signing_key);
+    let shared_token = turbo_stream_token(stream_key, "rooms").map_err(db_err)?;
+    let user_gid = URL_SAFE_NO_PAD.encode(format!("gid://campfire/User/{}", u.id));
+    let user_token = turbo_stream_token(stream_key, &format!("{user_gid}:rooms")).map_err(db_err)?;
+    let mut html = format!(
+        "<aside class='sidebar'><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/assets/menu-5462dfd3.svg' alt=''></button><div class='sidebar-main'><div class='sidebar-directs'><a class='direct-new' href='/rooms/directs/new' aria-label='New ping'><span class='direct-new-icon'><img src='/static/assets/messages-add-d229e6c2.svg' alt=''></span><span>Ping</span></a><nav id='direct-rooms'>",
+        esc(&shared_token), esc(&user_token)
     );
     for r in rooms.iter().filter(|r| r.kind == "Rooms::Direct") {
         html.push_str(&sidebar_direct_link(
@@ -3014,7 +3086,7 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
             esc(first_name)
         ));
     }
-    html.push_str("</div></div><div class='sidebar-rooms'><nav>");
+    html.push_str("</div></div><div class='sidebar-rooms'><nav id='shared_rooms'>");
     for r in rooms.iter().filter(|r| r.kind != "Rooms::Direct") {
         html.push_str(&sidebar_room_link(r, active, unread.contains(&r.id)));
     }
@@ -4065,6 +4137,7 @@ async fn involvement_post(
     tx.commit().map_err(db_err)?;
     if room.kind != "Rooms::Direct" && (previous == "invisible") != (involvement == "invisible") {
         notify_room_lists(&s, [u.id]);
+        broadcast_user_room_visibility(&s, u.id, &room, involvement != "invisible");
     }
     Ok(found_redirect(&public_url(
         &headers,
@@ -5183,7 +5256,8 @@ async fn create_room(
         tx.execute("INSERT OR IGNORE INTO memberships(room_id,user_id,involvement,created_at) VALUES(?1,?2,'mentions',?3)",params![rid,id,t]).map_err(db_err)?;
     }
     tx.commit().map_err(db_err)?;
-    notify_room_lists(&s, ids);
+    notify_room_lists(&s, ids.iter().copied());
+    broadcast_room_created(&s, &Room { id: rid, name: name.trim().to_owned(), kind: ty.to_owned(), creator_id: u.id }, &ids);
     Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
 }
 async fn create_open_room(
@@ -5338,6 +5412,7 @@ fn update_room_values(
             .map_err(db_err)?
     };
     notify_room_lists(s, prior_members.union(&current_members).copied());
+    broadcast_room_updated(s, &Room { id: rid, name: name.trim().to_owned(), kind: ty.to_owned(), creator_id: r.creator_id }, &current_members);
     for id in revoked {
         let _ = s.revoked_users.send(id);
     }
@@ -5481,6 +5556,7 @@ async fn room_delete(
     }
     s.events.remove(rid);
     notify_room_lists(&s, members);
+    s.turbo_shared_rooms.send_turbo(0, format!("<turbo-stream action=\"remove\" target=\"{}\"></turbo-stream>", room_list_target(&r)));
     Ok(Redirect::to("/").into_response())
 }
 async fn direct_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
@@ -8866,13 +8942,16 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                 let details:Value=serde_json::from_str(ident).unwrap_or(Value::Null);
                 let channel=details.get("channel").and_then(Value::as_str).unwrap_or("");
                 let signed_name=if channel=="RoomMessagesChannel" {details.get("signed_stream_name").and_then(Value::as_str)} else {None};
+                let list_stream=if channel=="Turbo::StreamsChannel" {details.get("signed_stream_name").and_then(Value::as_str).and_then(|token|turbo_stream_from_token(&s.turbo_stream_signing_key,token).or_else(||s.imported_turbo_stream_signing_key.as_deref().and_then(|key|turbo_stream_from_token(key,token))))} else {None};
+                let list_user=list_stream.as_deref().and_then(|stream|stream.strip_suffix(":rooms")).and_then(|gid|URL_SAFE_NO_PAD.decode(gid).ok()).and_then(|raw|String::from_utf8(raw).ok()).and_then(|gid|gid.strip_prefix("gid://campfire/User/").and_then(|id|id.parse::<i64>().ok()));
+                let list_valid=list_stream.as_deref()==Some("rooms") || list_user==Some(u.id);
                 let signed_room=signed_name.and_then(|token|room_from_stream_token(&s.turbo_stream_signing_key,token).or_else(||s.imported_turbo_stream_signing_key.as_deref().and_then(|key|room_from_stream_token(key,token))));
                 let rid=if signed_name.is_some() {signed_room.as_ref().map(|(id,_)|*id).unwrap_or(0)} else {details.get("room_id").and_then(Value::as_i64).unwrap_or(0)};
                 let signed_valid=signed_name.is_none() || signed_room.as_ref().is_some_and(|(_,kind)|room_for(&s,u.id,rid).is_ok_and(|room|room.kind==*kind));
                 if action=="subscribe" {
-                    let user_channel=channel=="UnreadRoomsChannel" || channel=="ReadRoomsChannel" || channel=="RoomListChannel" || channel=="HeartbeatChannel";
-                    let hub=match channel {"RoomMessagesChannel"=>Some(&s.events),"TypingNotificationsChannel"=>Some(&s.typing_events),"UnreadRoomsChannel"=>Some(&s.unread_events),"ReadRoomsChannel"=>Some(&s.read_events),"RoomListChannel"=>Some(&s.room_list_events),_=>None};
-                    let accepted=signed_valid && (hub.is_some() || channel=="PresenceChannel" || channel=="HeartbeatChannel") && (user_channel || (rid>0 && room_for(&s,u.id,rid).is_ok()));
+                    let user_channel=channel=="UnreadRoomsChannel" || channel=="ReadRoomsChannel" || channel=="RoomListChannel" || channel=="HeartbeatChannel" || (channel=="Turbo::StreamsChannel" && list_user==Some(u.id));
+                    let hub=match channel {"RoomMessagesChannel"=>Some(&s.events),"TypingNotificationsChannel"=>Some(&s.typing_events),"UnreadRoomsChannel"=>Some(&s.unread_events),"ReadRoomsChannel"=>Some(&s.read_events),"RoomListChannel"=>Some(&s.room_list_events),"Turbo::StreamsChannel" if list_user==Some(u.id)=>Some(&s.turbo_user_rooms),"Turbo::StreamsChannel" if list_stream.as_deref()==Some("rooms")=>Some(&s.turbo_shared_rooms),_=>None};
+                    let accepted=signed_valid && (channel!="Turbo::StreamsChannel" || list_valid) && (hub.is_some() || channel=="PresenceChannel" || channel=="HeartbeatChannel") && (user_channel || channel=="Turbo::StreamsChannel" || (rid>0 && room_for(&s,u.id,rid).is_ok()));
                     if accepted {
                         if channel=="PresenceChannel" {
                             if presence_rooms.insert(rid) { let _=presence_update(&s,u.id,rid,"present"); }
@@ -8880,8 +8959,8 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                             let mut room_events=hub.channel(if user_channel {u.id} else {rid}).subscribe();
                             let tx=event_tx.clone();
                             let identifier: Arc<str> = serde_json::to_string(ident).unwrap_or_default().into();
-                            let event_rid=if user_channel {0} else {rid};
-                            let turbo=signed_name.is_some();
+                            let event_rid=if user_channel || channel=="Turbo::StreamsChannel" {0} else {rid};
+                            let turbo=signed_name.is_some() || channel=="Turbo::StreamsChannel";
                             entry.insert(tokio::spawn(async move {loop {match room_events.recv().await {Ok(payload)=>{if tx.send((identifier.clone(),event_rid,payload,turbo)).await.is_err(){break}},Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}}}));
                         }}
                     }
@@ -9382,6 +9461,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         unread_events: RoomHub::default(),
         read_events: RoomHub::default(),
         room_list_events: RoomHub::default(),
+        turbo_user_rooms: RoomHub::default(),
+        turbo_shared_rooms: RoomHub::default(),
         revoked_users: broadcast::channel(1024).0,
         trusted_proxies,
         webhook_client: reqwest::Client::builder()
@@ -9886,6 +9967,21 @@ mod tests {
         );
         assert!(super::room_from_stream_token(&key, &format!("{expected}x")).is_none());
         assert!(super::room_from_stream_token(&[7; 64], expected).is_none());
+    }
+
+    #[test]
+    fn sidebar_streams_use_rails_signed_names_and_reject_tampering() {
+        let key = super::rails_turbo_stream_key("test-secret-key-base").unwrap();
+        let user_gid = super::URL_SAFE_NO_PAD.encode("gid://campfire/User/1");
+        let user_stream = format!("{user_gid}:rooms");
+        let global = super::turbo_stream_token(&key, "rooms").unwrap();
+        let personal = super::turbo_stream_token(&key, &user_stream).unwrap();
+        assert_eq!(global, "InJvb21zIg==--dcfabe3fec2e45adc36d44cfecefd60064e52b3421db32232366c884ec9d6c91");
+        assert_eq!(personal, "IloybGtPaTh2WTJGdGNHWnBjbVV2VlhObGNpOHg6cm9vbXMi--8733c3a87d89b28e99f139a55694f39557f261923e592dd25230821bdb4d12b0");
+        assert_eq!(super::turbo_stream_from_token(&key, &global).as_deref(), Some("rooms"));
+        assert_eq!(super::turbo_stream_from_token(&key, &personal).as_deref(), Some(user_stream.as_str()));
+        assert!(super::turbo_stream_from_token(&key, &format!("{personal}x")).is_none());
+        assert!(super::turbo_stream_from_token(&[7; 64], &personal).is_none());
     }
 
     #[test]

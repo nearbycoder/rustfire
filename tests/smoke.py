@@ -327,14 +327,14 @@ def main():
             code, _, _ = request(admin, base, "/rooms/1/messages", {"message[body]": "second", "message[client_message_id]": "test-2"}, headers={"Accept": "application/json"})
             assert code == 201
             code, _, page = request(member, base, "/users/me/sidebar")
-            assert code == 200 and "unread" in page
+            assert code == 200 and re.search(r"<a id='list_rooms_open_1'[^>]*class='[^']*\bunread\b", page)
             code, _, _ = request(member, base, "/rooms/1/involvement", {"involvement": "everything"})
             assert code == 200
             code, _, page = request(member, base, "/users/me/sidebar")
-            assert code == 200 and "unread" in page
+            assert code == 200 and re.search(r"<a id='list_rooms_open_1'[^>]*class='[^']*\bunread\b", page)
             assert request(member, base, "/rooms/1")[0] == 200
             code, _, page = request(member, base, "/users/me/sidebar")
-            assert code == 200 and "unread" not in page
+            assert code == 200 and not re.search(r"<a id='list_rooms_open_1'[^>]*class='[^']*\bunread\b", page)
             assert request(member, base, "/rooms/1/involvement", {"involvement": "invisible"})[0] == 200
             with member.open(base + "/users/me/sidebar?active=1") as sidebar_response:
                 assert sidebar_response.headers["x-rustfire-active-room-accessible"] == "1"

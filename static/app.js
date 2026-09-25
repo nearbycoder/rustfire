@@ -247,6 +247,7 @@ if (chat) {
   const unreadIdent=JSON.stringify({channel:'UnreadRoomsChannel'});
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
+  const sidebarStreamIdents=[...document.querySelectorAll('.sidebar turbo-cable-stream-source[channel="Turbo::StreamsChannel"]')].map(source=>JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:source.getAttribute('signed-stream-name')}));
   const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar .room-link[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct-rooms')link.parentElement.prepend(link)});
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
@@ -275,6 +276,23 @@ if (chat) {
     nav.prepend(link);
     if(sidebarRefreshPending)sidebarRefreshAgain=true;
     return true;
+  }
+  function applySidebarStream(html){
+    const parsed=new DOMParser().parseFromString(html,'text/html');
+    for(const stream of parsed.querySelectorAll('turbo-stream')){
+      const target=document.getElementById(stream.getAttribute('target'));
+      if(!target||!target.closest('.sidebar'))continue;
+      const action=stream.getAttribute('action');
+      if(action==='remove'){target.remove();continue;}
+      const fragment=stream.querySelector('template')?.content.cloneNode(true);
+      if(!fragment)continue;
+      for(const link of fragment.querySelectorAll('.room-link')){
+        if(link.id)document.getElementById(link.id)?.remove();
+        link.classList.toggle('active',link.getAttribute('href')===`/rooms/${roomId}`);
+      }
+      if(action==='prepend')target.prepend(fragment);
+      else if(action==='replace')target.replaceWith(fragment);
+    }
   }
   const typingIndicator=document.getElementById('typing-indicator');
   const typingPeople=new Map();
@@ -328,9 +346,9 @@ if (chat) {
   }
   function connect() {
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/cable`, 'actioncable-v1-json');
-    socket.addEventListener('open', () => { catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,unreadIdent,readIdent,roomListIdent])socket.send(JSON.stringify({command:'subscribe',identifier})); });
+    socket.addEventListener('open', () => { catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,unreadIdent,readIdent,roomListIdent,...sidebarStreamIdents])socket.send(JSON.stringify({command:'subscribe',identifier})); });
     socket.addEventListener('message', e => {
-      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
+      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(sidebarStreamIdents.includes(frame.identifier)){if(typeof data==='string')applySidebarStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
       } catch {}
     });
     socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});
