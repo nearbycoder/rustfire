@@ -248,7 +248,7 @@ if (chat) {
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
   const sidebarStreamIdents=[...document.querySelectorAll('.sidebar turbo-cable-stream-source[channel="Turbo::StreamsChannel"]')].map(source=>JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:source.getAttribute('signed-stream-name')}));
-  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar .room-link[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct-rooms')link.parentElement.prepend(link)});
+  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar .room-link[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
     if(sidebarRefreshPending){sidebarRefreshAgain=true;return;}
@@ -267,7 +267,7 @@ if (chat) {
     finally{sidebarRefreshPending=false;if(sidebarRefreshAgain){sidebarRefreshAgain=false;refreshSidebar()}}
   }
   function updateDirectRoom(data){
-    const nav=document.getElementById('direct-rooms');
+    const nav=document.getElementById('direct_rooms');
     if(!nav||!Number.isInteger(data?.room_id)||typeof data.html!=='string')return false;
     const link=new DOMParser().parseFromString(data.html,'text/html').querySelector('.room-link');
     if(!link||link.getAttribute('href')!==`/rooms/${data.room_id}`)return false;

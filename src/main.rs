@@ -199,20 +199,26 @@ fn notify_direct_room(s: &AppState, rid: i64, ids: impl IntoIterator<Item = i64>
     for uid in ids.into_iter().collect::<HashSet<_>>() {
         let rendered = (|| -> Result<String, StatusCode> {
             let room = room_for(s, uid, rid)?;
-            let unread: bool = pool(s)?
+            let db = pool(s)?;
+            let unread: bool = db
                 .query_row(
                     "SELECT unread_at IS NOT NULL FROM memberships WHERE room_id=?1 AND user_id=?2",
                     params![rid, uid],
                     |row| row.get(0),
                 )
                 .map_err(db_err)?;
-            Ok(sidebar_room_link(&room, None, unread))
+            let mut members_query = db.prepare("SELECT u.id,u.name FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND u.id!=?2 ORDER BY u.id").map_err(db_err)?;
+            let members = members_query.query_map(params![rid,uid],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?))).map_err(db_err)?.collect::<Result<Vec<_>,_>>().map_err(db_err)?;
+            Ok(sidebar_direct_link(&room, uid, &room.name, &members, None, unread))
         })();
         match rendered {
-            Ok(html) => s.room_list_events.send(Event {
-                room_id: uid,
-                payload: json!({"type":"direct_room_added","room_id":rid,"html":html}).to_string(),
-            }),
+            Ok(html) => {
+                s.room_list_events.send(Event {
+                    room_id: uid,
+                    payload: json!({"type":"direct_room_added","room_id":rid,"html":html}).to_string(),
+                });
+                s.turbo_user_rooms.send_turbo(uid, format!("<turbo-stream action=\"prepend\" target=\"direct_rooms\"><template>{html}</template></turbo-stream>"));
+            },
             Err(status) => {
                 eprintln!("Rustfire direct-room update could not render for user {uid}: {status}")
             }
@@ -2969,12 +2975,13 @@ fn broadcast_room_updated(s: &AppState, room: &Room, members: &HashSet<i64>) {
 }
 fn sidebar_direct_link(
     room: &Room,
-    current_user: &User,
+    current_user_id: i64,
+    current_user_name: &str,
     members: &[(i64, String)],
     active: Option<i64>,
     unread: bool,
 ) -> String {
-    let fallback = vec![(current_user.id, current_user.name.clone())];
+    let fallback = vec![(current_user_id, current_user_name.to_owned())];
     let members = if members.is_empty() { &fallback } else { members };
     let label = if members.len() == 1 {
         members[0].1.split_whitespace().next().unwrap_or(&members[0].1).to_owned()
@@ -2996,7 +3003,8 @@ fn sidebar_direct_link(
         .map(|(id, _)| format!("<img src='/users/{id}/avatar' alt=''>"))
         .collect::<String>();
     format!(
-        "<a class='room-link direct-room {} {}' href='/rooms/{}' aria-label='Ping with {}'><span class='direct-room-avatars {}'>{}</span><span class='direct-room-name'>{}</span></a>",
+        "<a id='{}' class='room-link direct-room {} {}' href='/rooms/{}' aria-label='Ping with {}'><span class='direct-room-avatars {}'>{}</span><span class='direct-room-name'>{}</span></a>",
+        room_list_target(room),
         if active == Some(room.id) { "active" } else { "" },
         if unread { "unread" } else { "" },
         room.id,
@@ -3064,13 +3072,14 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
     let user_gid = URL_SAFE_NO_PAD.encode(format!("gid://campfire/User/{}", u.id));
     let user_token = turbo_stream_token(stream_key, &format!("{user_gid}:rooms")).map_err(db_err)?;
     let mut html = format!(
-        "<aside class='sidebar'><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/assets/menu-5462dfd3.svg' alt=''></button><div class='sidebar-main'><div class='sidebar-directs'><a class='direct-new' href='/rooms/directs/new' aria-label='New ping'><span class='direct-new-icon'><img src='/static/assets/messages-add-d229e6c2.svg' alt=''></span><span>Ping</span></a><nav id='direct-rooms'>",
+        "<aside class='sidebar'><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><turbo-cable-stream-source channel='Turbo::StreamsChannel' signed-stream-name='{}'></turbo-cable-stream-source><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/assets/menu-5462dfd3.svg' alt=''></button><div class='sidebar-main'><div class='sidebar-directs'><a class='direct-new' href='/rooms/directs/new' aria-label='New ping'><span class='direct-new-icon'><img src='/static/assets/messages-add-d229e6c2.svg' alt=''></span><span>Ping</span></a><nav id='direct_rooms'>",
         esc(&shared_token), esc(&user_token)
     );
     for r in rooms.iter().filter(|r| r.kind == "Rooms::Direct") {
         html.push_str(&sidebar_direct_link(
             r,
-            u,
+            u.id,
+            &u.name,
             direct_members.get(&r.id).map(Vec::as_slice).unwrap_or(&[]),
             active,
             unread.contains(&r.id),
