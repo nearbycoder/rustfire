@@ -212,9 +212,10 @@ fn touch_room(db: &rusqlite::Connection, rid: i64) -> Result<(), StatusCode> {
 }
 fn touch_message(db: &rusqlite::Connection, mid: i64, rid: i64) -> Result<(), StatusCode> {
     let timestamp = now();
+    let timestamp_ns = message_timestamp_ns(&timestamp).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
-        "UPDATE messages SET updated_at=?1 WHERE id=?2 AND room_id=?3",
-        params![timestamp, mid, rid],
+        "UPDATE messages SET updated_at=?1,updated_at_ns=?2 WHERE id=?3 AND room_id=?4",
+        params![timestamp, timestamp_ns, mid, rid],
     )
     .map_err(db_err)?;
     db.execute(
@@ -2017,25 +2018,25 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
 fn messages_since(
     s: &AppState,
     rid: i64,
-    cutoff: &str,
+    cutoff_ns: i64,
     updated: bool,
 ) -> Result<Vec<ChatMessage>, StatusCode> {
     let db = pool(s)?;
     let (predicate, order, index) = if updated {
         (
-            "m.created_at<=?2 AND m.updated_at>?2",
+            "m.created_at_ns<=?2 AND m.updated_at_ns>?2",
             "DESC",
-            "idx_messages_room_updated",
+            "idx_messages_room_updated_ns",
         )
     } else {
-        ("m.created_at>?2", "ASC", "idx_messages_room_created")
+        ("m.created_at_ns>?2", "ASC", "idx_messages_room_created_ns")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
-        .query_map(params![rid, cutoff], chat_message_from_row)
+        .query_map(params![rid, cutoff_ns], chat_message_from_row)
         .map_err(db_err)?;
     let mut messages = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
     if updated {
@@ -2304,11 +2305,12 @@ async fn room_refresh(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if let Some(since) = q.since {
-        let cutoff = chrono::DateTime::<Utc>::from_timestamp_millis(since)
+        let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
             .ok_or(StatusCode::BAD_REQUEST)?
-            .to_rfc3339();
-        let new_messages = messages_since(&s, rid, &cutoff, false)?;
-        let updated_messages = messages_since(&s, rid, &cutoff, true)?;
+            .timestamp_nanos_opt()
+            .ok_or(StatusCode::BAD_REQUEST)?;
+        let new_messages = messages_since(&s, rid, cutoff_ns, false)?;
+        let updated_messages = messages_since(&s, rid, cutoff_ns, true)?;
         if accept.contains("json") {
             let entries = |messages: &[ChatMessage]| {
                 messages
@@ -2746,7 +2748,7 @@ fn insert_message(
         .timestamp_nanos_opt()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7)",params![rid,u.id,plain,body_html,if rich {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
+    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     touch_room(&db, rid)?;
     let mut valid_mentions = Vec::new();
@@ -3311,13 +3313,17 @@ async fn message_update(
     if plain.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
+    let updated_at = now();
+    let updated_at_ns =
+        message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
-        "UPDATE messages SET body=?1,body_html=?2,body_source=?3,updated_at=?4 WHERE id=?5",
+        "UPDATE messages SET body=?1,body_html=?2,body_source=?3,updated_at=?4,updated_at_ns=?5 WHERE id=?6",
         params![
             plain,
             body_html,
             if rich { Some(body) } else { None },
-            now(),
+            updated_at,
+            updated_at_ns,
             mid
         ],
     )
@@ -5294,7 +5300,10 @@ async fn bot_message_update(
     if creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
-    let found=db.execute("UPDATE messages SET body=?1,body_html=NULL,body_source=NULL,updated_at=?2 WHERE id=?3 AND room_id=?4 AND creator_id=?5",params![body,now(),mid,rid,u.id]).map_err(db_err)?;
+    let updated_at = now();
+    let updated_at_ns =
+        message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let found=db.execute("UPDATE messages SET body=?1,body_html=NULL,body_source=NULL,updated_at=?2,updated_at_ns=?3 WHERE id=?4 AND room_id=?5 AND creator_id=?6",params![body,updated_at,updated_at_ns,mid,rid,u.id]).map_err(db_err)?;
     if found == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -6021,7 +6030,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS direct_room_sets_membership_delete AFTER DELETE ON memberships BEGIN
             UPDATE direct_room_sets SET member_ids=COALESCE((SELECT group_concat(user_id,',') FROM (SELECT user_id FROM memberships WHERE room_id=old.room_id ORDER BY user_id)),'') WHERE room_id=old.room_id;
         END;
-        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
@@ -6093,6 +6102,14 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     if !has_created_at_ns {
         conn.execute("ALTER TABLE messages ADD COLUMN created_at_ns INTEGER", [])?;
     }
+    let has_updated_at_ns: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='updated_at_ns')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_updated_at_ns {
+        conn.execute("ALTER TABLE messages ADD COLUMN updated_at_ns INTEGER", [])?;
+    }
     let missing_timestamps = {
         let mut query =
             conn.prepare("SELECT id,created_at FROM messages WHERE created_at_ns IS NULL")?;
@@ -6115,7 +6132,30 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         }
         transaction.commit()?;
     }
+    let missing_updated_timestamps = {
+        let mut query =
+            conn.prepare("SELECT id,updated_at FROM messages WHERE updated_at_ns IS NULL")?;
+        query
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if !missing_updated_timestamps.is_empty() {
+        let transaction = conn.transaction()?;
+        {
+            let mut update =
+                transaction.prepare("UPDATE messages SET updated_at_ns=?1 WHERE id=?2")?;
+            for (id, updated_at) in missing_updated_timestamps {
+                let nanos = message_timestamp_ns(&updated_at)
+                    .ok_or("message timestamp outside supported range")?;
+                update.execute(params![nanos, id])?;
+            }
+        }
+        transaction.commit()?;
+    }
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_created_ns ON messages(room_id,created_at_ns,id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_updated_ns ON messages(room_id,updated_at_ns,id)", [])?;
     if !fts_exists {
         conn.execute(
             "INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages",

@@ -685,6 +685,19 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 check_db.execute("DROP TRIGGER direct_room_sets_membership_delete")
                 check_db.execute("DROP TABLE direct_room_sets")
+                imported_cutoff = int(time.time() * 1000) + 300000
+                rails_time = lambda milliseconds: datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+                old_created = rails_time(imported_cutoff - 60000)
+                old_updated = rails_time(imported_cutoff + 2000)
+                new_created = rails_time(imported_cutoff + 1000)
+                imported_old = check_db.execute(
+                    "INSERT INTO messages(room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(1,1,'imported edited','imported-edited',?,?)",
+                    (old_created, old_updated),
+                ).lastrowid
+                imported_new = check_db.execute(
+                    "INSERT INTO messages(room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(1,1,'imported new','imported-new',?,?)",
+                    (new_created, new_created),
+                ).lastrowid
             process = subprocess.Popen([str(ROOT / "target/debug/rustfire")], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             for _ in range(100):
                 try:
@@ -696,6 +709,12 @@ def main():
                 raise AssertionError("server did not restart for direct-room index migration")
             assert request(admin, base, "/session/new")[0] == 200
             assert request(admin, base, "/session", {"email_address":"admin@example.com","password":"password123"})[0] == 200
+            code, _, payload = request(admin, base, f"/rooms/1/refresh?since={imported_cutoff}", headers={"Accept":"application/json"})
+            imported_refresh = json.loads(payload)
+            assert code == 200 and [entry["id"] for entry in imported_refresh["messages"]] == [imported_new], imported_refresh
+            assert [entry["id"] for entry in imported_refresh["updated"]] == [imported_old], imported_refresh
+            with sqlite3.connect(f"{tmp}/test.db") as check_db:
+                assert check_db.execute("SELECT count(*) FROM messages WHERE id IN (?,?) AND created_at_ns IS NOT NULL AND updated_at_ns IS NOT NULL", (imported_old, imported_new)).fetchone()[0] == 2
             code, _, suggestions = request(admin, base, "/autocompletable/users?room_id=1&query=Admin")
             assert code == 200 and json.loads(suggestions)[0]["sgid"] == admin_mention_sgid
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
