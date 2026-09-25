@@ -838,6 +838,15 @@ def main():
             assert request(second_session, base, "/rooms/1")[0] == 401
             assert request(moved, base, "/rooms/1")[0] == 401
             assert request(moved, base, transfer, {}, method="PUT", headers={"X-CSRF-Token": transfer_csrf})[0] == 400
+            for _ in range(100):
+                with sqlite3.connect(f"{tmp}/test.db") as ban_db:
+                    remaining = ban_db.execute("SELECT COUNT(*) FROM messages WHERE creator_id=2 AND body='ban removes this message'").fetchone()[0]
+                    pending = ban_db.execute("SELECT COUNT(*) FROM background_jobs WHERE user_id=2").fetchone()[0]
+                if remaining == 0 and pending == 0:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError((remaining, pending))
             assert "ban removes this message" not in request(admin, base, "/rooms/1")[2]
             code, _, _ = request(admin, base, "/users/2/ban", method="DELETE")
             assert code == 302

@@ -7137,21 +7137,6 @@ async fn user_ban(
     if status.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut st = tx
-        .prepare("SELECT id,room_id,client_message_id FROM messages WHERE creator_id=?1")
-        .map_err(db_err)?;
-    let removed = st
-        .query_map([id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(db_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    drop(st);
     let mut ip_stmt = tx
         .prepare(
             "SELECT DISTINCT ip_address FROM sessions WHERE user_id=?1 AND ip_address IS NOT NULL",
@@ -7173,9 +7158,6 @@ async fn user_ban(
         )
         .map_err(db_err)?;
     }
-    let inline_blobs = inline_blob_ids(&tx, "SELECT DISTINCT e.blob_id FROM inline_embeds e JOIN messages m ON m.id=e.message_id WHERE m.creator_id=?1", id)?;
-    tx.execute("DELETE FROM messages WHERE creator_id=?1", [id])
-        .map_err(db_err)?;
     tx.execute("DELETE FROM sessions WHERE user_id=?1", [id])
         .map_err(db_err)?;
     tx.execute("DELETE FROM session_transfers WHERE user_id=?1", [id])
@@ -7185,16 +7167,95 @@ async fn user_ban(
         params![now(), id],
     )
     .map_err(db_err)?;
+    tx.execute(
+        "INSERT INTO background_jobs(kind,user_id,created_at) VALUES('remove_banned_content',?1,?2)",
+        params![id, now()],
+    )
+    .map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    let _ = s.revoked_users.send(id);
+    Ok(found_redirect(&format!("/users/{id}")))
+}
+
+fn process_banned_content_batch(s: &AppState) -> Result<bool, StatusCode> {
+    let mut db = pool(s)?;
+    let pending: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM background_jobs WHERE kind='remove_banned_content')", [], |row| row.get(0))
+        .map_err(db_err)?;
+    if !pending {
+        return Ok(false);
+    }
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(db_err)?;
+    let job: Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT id,user_id FROM background_jobs WHERE kind='remove_banned_content' ORDER BY id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db_err)?;
+    let Some((job_id, user_id)) = job else {
+        return Ok(false);
+    };
+    let mut statement = tx
+        .prepare("SELECT id,room_id,client_message_id FROM messages WHERE creator_id=?1 ORDER BY id LIMIT 50")
+        .map_err(db_err)?;
+    let messages = statement
+        .query_map([user_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    drop(statement);
+    let mut attachment_files = Vec::new();
+    let mut inline_blobs = Vec::new();
+    for (mid, rid, _) in &messages {
+        let attachment: Option<String> = tx
+            .query_row("SELECT stored_name FROM attachments WHERE message_id=?1", [mid], |row| row.get(0))
+            .optional()
+            .map_err(db_err)?;
+        if let Some(stored) = attachment {
+            attachment_files.push(stored);
+        }
+        inline_blobs.extend(inline_blob_ids(&tx, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", *mid)?);
+        tx.execute("DELETE FROM messages WHERE id=?1", [mid]).map_err(db_err)?;
+        touch_room(&tx, *rid)?;
+    }
+    if messages.len() < 50 {
+        tx.execute("DELETE FROM background_jobs WHERE id=?1", [job_id]).map_err(db_err)?;
+    }
     tx.commit().map_err(db_err)?;
     purge_orphan_inline_blobs(&db, &inline_blobs)?;
-    let _ = s.revoked_users.send(id);
-    for (mid, rid, client_message_id) in removed {
+    for stored in attachment_files {
+        remove_attachment_files(&stored);
+    }
+    for (mid, rid, client_message_id) in messages {
         s.events.send(Event {
             room_id: rid,
             payload: json!({"type":"message_deleted","room_id":rid,"id":mid,"client_message_id":client_message_id}).to_string(),
         });
     }
-    Ok(found_redirect(&format!("/users/{id}")))
+    Ok(true)
+}
+
+async fn run_background_jobs(s: Arc<AppState>) {
+    loop {
+        let state = s.clone();
+        let pause = match tokio::task::spawn_blocking(move || process_banned_content_batch(&state)).await {
+            Ok(Ok(true)) => std::time::Duration::from_millis(10),
+            Ok(Ok(false)) => std::time::Duration::from_millis(250),
+            Ok(Err(error)) => {
+                eprintln!("Background job failed: {error}");
+                std::time::Duration::from_secs(1)
+            }
+            Err(error) => {
+                eprintln!("Background worker failed: {error}");
+                std::time::Duration::from_secs(1)
+            }
+        };
+        tokio::time::sleep(pause).await;
+    }
 }
 async fn user_unban(
     State(s): State<Arc<AppState>>,
@@ -8959,6 +9020,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,token TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,last_active_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS bans(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,ip_address TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(ip_address);
+        CREATE TABLE IF NOT EXISTS background_jobs(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_kind ON background_jobs(kind,id);
         CREATE TABLE IF NOT EXISTS session_transfers(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY,name TEXT,type TEXT NOT NULL,creator_id INTEGER NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT NOT NULL DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
@@ -8979,7 +9042,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS searches(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,query TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(user_id,query));
-        CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id,id);CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id,created_at,id);CREATE INDEX IF NOT EXISTS idx_messages_room_updated ON messages(room_id,updated_at,id);CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);CREATE INDEX IF NOT EXISTS idx_boosts_message ON boosts(message_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id,id);CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id,created_at,id);CREATE INDEX IF NOT EXISTS idx_messages_room_updated ON messages(room_id,updated_at,id);CREATE INDEX IF NOT EXISTS idx_messages_creator_id ON messages(creator_id,id);CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);CREATE INDEX IF NOT EXISTS idx_boosts_message ON boosts(message_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS message_search_index USING fts5(body, tokenize=porter);
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
@@ -9345,6 +9408,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         login_attempts: Mutex::new(HashMap::new()),
         variant_slots: Arc::new(Semaphore::new(4)),
     });
+    tokio::spawn(run_background_jobs(state.clone()));
     let app = Router::new()
         .route("/", get(root))
         .route("/up", get(health))
