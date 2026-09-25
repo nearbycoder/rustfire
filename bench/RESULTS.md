@@ -397,3 +397,7 @@ The pinned Campfire and Rustfire builds each searched 10,000 messages in one acc
 The search results now use full message markup in Rustfire's chat layout, including attachment, boost, and message action elements. The two pages still differ in HTML serialization and surrounding layout, and the response sizes differ. This trial is evidence for this warm serial read path, with the client on the server host. It does not prove whole-app speed or sustained capacity at feature parity.
 
 After the webhook and rich-text changes, the 2026-09-25 release build passed the same `--messages 10000 --requests 30` paired probe. Rustfire's median was **9.51 ms** and p95 **12.59 ms**; Campfire's median was **24.60 ms** and p95 **61.46 ms**. The response sizes remained 860,568 and 1,050,197 bytes. This is a single warm, serial regression run with the same semantic result checks and the same limitations described above.
+
+## Attachment search-index regression check
+
+After indexing attachment filenames for file-only messages, `bench/paired_turbo_fanout.py --operation attachments --sockets 200 --messages 10 --campfire-workers 1` delivered all **2,000/2,000** expected events for each app and found matching attachment-message identities. Rustfire p95 delivery was **29.01 ms**; Campfire p95 was **223.62 ms** on this one short localhost trial. Average received message sizes were 10,459 and 11,571 bytes. The probe does not compare the apps' full storage or notification side effects, and one 200-socket burst does not establish sustained capacity.

@@ -20,7 +20,7 @@ use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use openssl::{
     bn::BigNumContext,
-    ec::{EcGroup, EcKey, PointConversionForm},
+    ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     hash::MessageDigest,
     memcmp,
     nid::Nid,
@@ -1812,6 +1812,42 @@ fn load_vapid_key(
         &mut context,
     )?;
     Ok((der, URL_SAFE_NO_PAD.encode(public)))
+}
+fn import_campfire_vapid_key(db_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let private_encoded = env::var("RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY")?;
+    let public_encoded = env::var("RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY")?;
+    let private_bytes = URL_SAFE_NO_PAD
+        .decode(&private_encoded)
+        .or_else(|_| URL_SAFE.decode(&private_encoded))?;
+    if private_bytes.len() != 32 {
+        return Err("Campfire VAPID private key must decode to 32 bytes".into());
+    }
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+    let private = openssl::bn::BigNum::from_slice(&private_bytes)?;
+    let mut context = BigNumContext::new()?;
+    let mut public = EcPoint::new(&group)?;
+    public.mul_generator2(&group, &private, &mut context)?;
+    let public_bytes = public.to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)?;
+    let source_public = URL_SAFE_NO_PAD
+        .decode(&public_encoded)
+        .or_else(|_| URL_SAFE.decode(&public_encoded))?;
+    if source_public != public_bytes {
+        return Err("Campfire VAPID public and private keys do not match".into());
+    }
+    let der = EcKey::from_private_components(&group, &private, &public)?.private_key_to_der()?;
+    let path = env::var("RUSTFIRE_VAPID_KEY_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| db_path.with_extension("vapid.der"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    options.open(path)?.write_all(&der)?;
+    Ok(())
 }
 fn create_session(state: &AppState, uid: i64, ip: IpAddr) -> Result<Response, StatusCode> {
     create_session_to(state, uid, ip, "/")
@@ -8318,18 +8354,79 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
             CREATE TRIGGER message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
             CREATE TRIGGER message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
             CREATE TRIGGER message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;
-            INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages;")?;
+            INSERT INTO message_search_index(rowid,body) SELECT m.id,COALESCE(NULLIF(m.body,''),a.filename,'') FROM messages m LEFT JOIN attachments a ON a.message_id=m.id;")?;
         transaction.commit()?;
     } else if !fts_exists {
         conn.execute(
-            "INSERT INTO message_search_index(rowid,body) SELECT id,body FROM messages",
+            "INSERT INTO message_search_index(rowid,body) SELECT m.id,COALESCE(NULLIF(m.body,''),a.filename,'') FROM messages m LEFT JOIN attachments a ON a.message_id=m.id",
             [],
         )?;
+    }
+    conn.execute_batch("DROP TRIGGER IF EXISTS message_fts_insert;
+        DROP TRIGGER IF EXISTS message_fts_update;
+        DROP TRIGGER IF EXISTS message_fts_delete;
+        CREATE TRIGGER message_fts_insert AFTER INSERT ON messages BEGIN
+            INSERT INTO message_search_index(rowid,body) VALUES(new.id,COALESCE(NULLIF(new.body,''),(SELECT filename FROM attachments WHERE message_id=new.id),''));
+        END;
+        CREATE TRIGGER message_fts_update AFTER UPDATE OF body ON messages BEGIN
+            UPDATE message_search_index SET body=COALESCE(NULLIF(new.body,''),(SELECT filename FROM attachments WHERE message_id=new.id),'') WHERE rowid=new.id;
+        END;
+        CREATE TRIGGER message_fts_delete AFTER DELETE ON messages BEGIN
+            DELETE FROM message_search_index WHERE rowid=old.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS attachment_fts_insert AFTER INSERT ON attachments BEGIN
+            UPDATE message_search_index SET body=COALESCE(NULLIF((SELECT body FROM messages WHERE id=new.message_id),''),new.filename) WHERE rowid=new.message_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS attachment_fts_update AFTER UPDATE OF filename ON attachments BEGIN
+            UPDATE message_search_index SET body=COALESCE(NULLIF((SELECT body FROM messages WHERE id=new.message_id),''),new.filename) WHERE rowid=new.message_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS attachment_fts_delete AFTER DELETE ON attachments BEGIN
+            UPDATE message_search_index SET body=(SELECT body FROM messages WHERE id=old.message_id) WHERE rowid=old.message_id;
+        END;")?;
+    let attachment_fts_migrated: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM app_secrets WHERE name='attachment_fts_migrated')",[],|r|r.get(0))?;
+    if !attachment_fts_migrated {
+        let transaction = conn.transaction()?;
+        transaction.execute("UPDATE message_search_index SET body=(SELECT a.filename FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.id=message_search_index.rowid AND m.body='') WHERE rowid IN (SELECT m.id FROM messages m JOIN attachments a ON a.message_id=m.id WHERE m.body='')", [])?;
+        transaction.execute("INSERT INTO app_secrets(name,value) VALUES('attachment_fts_migrated',X'01')", [])?;
+        transaction.commit()?;
     }
     conn.execute(
         "INSERT OR IGNORE INTO direct_room_sets(room_id,member_ids) SELECT r.id,COALESCE((SELECT group_concat(user_id,',') FROM (SELECT user_id FROM memberships WHERE room_id=r.id ORDER BY user_id)),'') FROM rooms r WHERE r.type='Rooms::Direct' AND NOT EXISTS(SELECT 1 FROM direct_room_sets d WHERE d.room_id=r.id)",
         [],
     )?;
+    Ok(())
+}
+fn render_imported_rich_text(
+    db: &Db,
+    signing_key: &[u8],
+    imported_key: Option<&[u8]>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = db.get()?;
+    let mut last_id = 0_i64;
+    loop {
+        let batch = {
+            let mut query = conn.prepare("SELECT id,body_source FROM messages WHERE id>?1 AND body_source IS NOT NULL ORDER BY id LIMIT 1000")?;
+            query
+                .query_map([last_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if batch.is_empty() {
+            break;
+        }
+        let tx = conn.transaction()?;
+        for (id, source) in &batch {
+            let trusted = replace_mention_attachments(&source, &tx, signing_key, imported_key)
+                .map_err(|status| format!("rendering imported message {id}: {status}"))?;
+            let (_, html) = rich_body(&trusted, None);
+            tx.execute("UPDATE messages SET body_html=?1 WHERE id=?2", params![html, id])?;
+            tx.execute("DELETE FROM message_mentions WHERE message_id=?1", [id])?;
+            for user_id in mention_ids(source, signing_key, imported_key) {
+                tx.execute("INSERT OR IGNORE INTO message_mentions(message_id,user_id) VALUES(?1,?2)", params![id,user_id])?;
+            }
+        }
+        last_id = batch.last().unwrap().0;
+        tx.commit()?;
+    }
     Ok(())
 }
 #[tokio::main]
@@ -8345,6 +8442,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let db = Pool::builder().max_size(32).build(manager)?;
     init_db(&db)?;
+    let command = env::args().nth(1);
+    if command.as_deref() == Some("--init-db") {
+        return Ok(());
+    }
+    if command.as_deref() == Some("--import-campfire-vapid") {
+        import_campfire_vapid_key(std::path::Path::new(&db_path))?;
+        return Ok(());
+    }
     let mention_signing_key: Vec<u8> = db.get()?.query_row(
         "SELECT value FROM app_secrets WHERE name='mention_sgid'",
         [],
@@ -8379,6 +8484,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .map(rails_turbo_stream_key)
         .transpose()?;
+    if command.as_deref() == Some("--render-imported-rich-text") {
+        render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref())?;
+        return Ok(());
+    }
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
     let has_push_subscriptions: bool =
@@ -8662,6 +8771,30 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn attachment_filename_is_searchable_without_changing_message_body() {
+        let db = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .unwrap();
+        super::init_db(&db).unwrap();
+        let conn = db.get().unwrap();
+        conn.execute_batch("INSERT INTO users(id,name,created_at,updated_at) VALUES(1,'Test','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+            INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(1,'Room','Rooms::Open',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+            INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(1,1,1,'','attachment-test','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+            INSERT INTO attachments(id,message_id,filename,content_type,stored_name,created_at) VALUES(1,1,'report.txt','text/plain','stored-file','2026-01-01T00:00:00Z');").unwrap();
+        let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(indexed, "report.txt");
+        let body: String = conn.query_row("SELECT body FROM messages WHERE id=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(body, "");
+        conn.execute("UPDATE attachments SET filename='updated.txt' WHERE id=1", []).unwrap();
+        let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(indexed, "updated.txt");
+        conn.execute("UPDATE messages SET body='A caption' WHERE id=1", []).unwrap();
+        let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(indexed, "A caption");
+    }
 
     #[test]
     fn rich_text_plain_matches_campfire_blocks_and_lists() {
