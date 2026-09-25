@@ -4625,6 +4625,55 @@ async fn search_clear(State(s): State<Arc<AppState>>, headers: HeaderMap) -> App
         .map_err(db_err)?;
     Ok(Redirect::to("/searches").into_response())
 }
+fn account_user_item(
+    u: &User,
+    id: i64,
+    name: &str,
+    email: Option<&str>,
+    role: i64,
+    status: i64,
+) -> String {
+    let controls = if is_admin(u) && status == 0 {
+        let role_control = if id == u.id {
+            "<span aria-label='Role: Administrator'>Administrator</span>".to_string()
+        } else {
+            format!(
+                "<form class='inline-form' method='post' action='/account/users/{id}' data-auto-submit-role><input type='hidden' name='_method' value='patch'><select name='user[role]' aria-label='Role for {}'><option value='member' {}>Member</option><option value='administrator' {}>Administrator</option></select><button>Save</button></form>",
+                esc(name),
+                if role == 0 { "selected" } else { "" },
+                if role == 1 { "selected" } else { "" }
+            )
+        };
+        let deactivate_control = if id == u.id {
+            "<a href='/users/me/profile'>My settings</a>".to_string()
+        } else {
+            format!(
+                "<form class='inline-form' method='post' action='/account/users/{id}'><input type='hidden' name='_method' value='delete'><button class='danger' aria-label='Delete {}'>Delete</button></form>",
+                esc(name)
+            )
+        };
+        format!("{role_control}{deactivate_control}")
+    } else {
+        String::new()
+    };
+    format!(
+        "<li><a href='/users/{id}'><strong>{}</strong></a> · {} {} {controls}</li>",
+        esc(name),
+        esc(email.unwrap_or("")),
+        if status == 2 {
+            "(banned)"
+        } else if role == 1 {
+            "(admin)"
+        } else {
+            ""
+        }
+    )
+}
+fn account_next_page_container(page: i64) -> String {
+    format!(
+        "<turbo-frame loading=\"lazy\" class=\"flex center\" id=\"next_page_container\" src=\"/account/users.turbo_stream?page={page}\"><div class=\"spinner center\"></div></turbo-frame>"
+    )
+}
 async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
     let db = pool(&s)?;
@@ -4635,6 +4684,7 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         .map_err(db_err)?;
     let mut administrators = String::new();
     let mut members = String::new();
+    let mut total_users = 0;
     let mut q = db
         .prepare("SELECT id,name,email_address,role,status FROM users WHERE status=0 OR (?1 AND status=2) ORDER BY lower(name)")
         .map_err(db_err)?;
@@ -4654,41 +4704,8 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         if role == 2 {
             continue;
         }
-        let controls = if is_admin(&u) && status == 0 {
-            let role_control = if id == u.id {
-                "<span aria-label='Role: Administrator'>Administrator</span>".to_string()
-            } else {
-                format!(
-                    "<form class='inline-form' method='post' action='/account/users/{id}' data-auto-submit-role><input type='hidden' name='_method' value='patch'><select name='user[role]' aria-label='Role for {}'><option value='member' {}>Member</option><option value='administrator' {}>Administrator</option></select><button>Save</button></form>",
-                    esc(&n),
-                    if role == 0 { "selected" } else { "" },
-                    if role == 1 { "selected" } else { "" }
-                )
-            };
-            let deactivate_control = if id == u.id {
-                "<a href='/users/me/profile'>My settings</a>".to_string()
-            } else {
-                format!(
-                    "<form class='inline-form' method='post' action='/account/users/{id}'><input type='hidden' name='_method' value='delete'><button class='danger' aria-label='Delete {}'>Delete</button></form>",
-                    esc(&n)
-                )
-            };
-            format!("{role_control}{deactivate_control}")
-        } else {
-            String::new()
-        };
-        let item = format!(
-            "<li><a href='/users/{id}'><strong>{}</strong></a> · {} {} {controls}</li>",
-            esc(&n),
-            esc(email.as_deref().unwrap_or("")),
-            if status == 2 {
-                "(banned)"
-            } else if role == 1 {
-                "(admin)"
-            } else {
-                ""
-            }
-        );
+        total_users += 1;
+        let item = account_user_item(&u, id, &n, email.as_deref(), role, status);
         if role == 1 {
             administrators.push_str(&item);
         } else {
@@ -4700,8 +4717,13 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
     } else {
         ""
     };
+    let next_page = if total_users > 500 {
+        account_next_page_container(2)
+    } else {
+        String::new()
+    };
     let list = format!(
-        "<turbo-frame id='account_users'><ul class='people-list'>{administrators}</ul>{divider}<ul class='people-list'>{members}</ul></turbo-frame>"
+        "<turbo-frame id='account_users'><ul class='people-list'>{administrators}</ul>{divider}<ul class='people-list'>{members}</ul>{next_page}</turbo-frame>"
     );
     let restricted: bool = db
         .query_row(
@@ -4742,6 +4764,72 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         ),
         Some(&u),
     ))
+}
+async fn account_users_index(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> AppResult {
+    let u = user(&s, &headers)?;
+    let page = query
+        .get("page")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|number| *number > 0)
+        .unwrap_or(1);
+    let db = pool(&s)?;
+    let total: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM users WHERE status=0 AND role!=2",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    let page_count = (total.saturating_add(499) / 500).max(1);
+    let offset = page.saturating_sub(1).saturating_mul(500);
+    let mut q = db
+        .prepare("SELECT id,name,email_address,role,status FROM users WHERE status=0 AND role!=2 ORDER BY lower(name) LIMIT 500 OFFSET ?1")
+        .map_err(db_err)?;
+    let mut rows = String::new();
+    for row in q
+        .query_map([offset], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(db_err)?
+    {
+        let (id, name, email, role, status) = row.map_err(db_err)?;
+        rows.push_str(&account_user_item(
+            &u,
+            id,
+            &name,
+            email.as_deref(),
+            role,
+            status,
+        ));
+    }
+    let rows = csrf_forms(&rows, u.csrf_token.as_deref().unwrap_or(""));
+    let next = if page != page_count {
+        format!(
+            "\n\n<turbo-stream action=\"append\" target=\"account_users\"><template>{}</template></turbo-stream>",
+            account_next_page_container(page.saturating_add(1))
+        )
+    } else {
+        String::new()
+    };
+    let mut response = format!(
+        "<turbo-stream action=\"replace\" target=\"next_page_container\"><template>{rows}</template></turbo-stream>{next}"
+    )
+    .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "text/vnd.turbo-stream.html; charset=utf-8".parse().unwrap(),
+    );
+    Ok(response)
 }
 async fn account_update(
     State(s): State<Arc<AppState>>,
@@ -7608,7 +7696,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/account/logo/delete", post(logo_delete))
         .route("/account/join_code", post(join_code_create))
-        .route("/account/users", get(account_get))
+        .route("/account/users", get(account_users_index))
+        .route("/account/users.turbo_stream", get(account_users_index))
         .route(
             "/account/users/{id}",
             post(user_admin_post)

@@ -482,6 +482,42 @@ if (chat) {
     else alert('Could not boost message');
   });
 }
+const accountUsers=document.getElementById('account_users');
+if(accountUsers){
+  const observer='IntersectionObserver' in window?new IntersectionObserver(entries=>{
+    for(const entry of entries)if(entry.isIntersecting)loadPage(entry.target);
+  },{rootMargin:'300px'}):null;
+  const observeNext=()=>{
+    const frame=accountUsers.querySelector('#next_page_container[src]');
+    if(frame){if(observer)observer.observe(frame);else loadPage(frame);}
+  };
+  async function loadPage(frame){
+    if(frame.dataset.loading)return;
+    frame.dataset.loading='true';
+    observer?.unobserve(frame);
+    try{
+      const response=await fetch(frame.getAttribute('src'),{headers:{Accept:'text/vnd.turbo-stream.html'}});
+      if(!response.ok)throw Error(`Could not load people (${response.status})`);
+      const documentStream=new DOMParser().parseFromString(await response.text(),'text/html');
+      for(const stream of documentStream.querySelectorAll('turbo-stream')){
+        const target=document.getElementById(stream.getAttribute('target'));
+        const fragment=stream.querySelector('template')?.content.cloneNode(true);
+        if(!target||!fragment)continue;
+        if(stream.getAttribute('action')==='replace')target.replaceWith(fragment);
+        if(stream.getAttribute('action')==='append')target.append(fragment);
+      }
+      observeNext();
+    }catch{
+      frame.dataset.loading='';
+      frame.replaceChildren();
+      const retry=document.createElement('button');
+      retry.type='button';retry.textContent='Load more people';
+      retry.addEventListener('click',()=>loadPage(frame),{once:true});
+      frame.append(retry);
+    }
+  }
+  observeNext();
+}
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker').catch(() => {});
 document.addEventListener('change',event=>{
   const control=event.target;
