@@ -2228,7 +2228,7 @@ fn rooms_for(s: &AppState, uid: i64) -> Result<Vec<Room>, StatusCode> {
 }
 fn sidebar_room_link(room: &Room, active: Option<i64>, unread: bool) -> String {
     format!(
-        "<a class='room-link {}' href='/rooms/{}'>{} {}</a>",
+        "<a class='room-link {}' href='/rooms/{}'>{}</a>",
         format!(
             "{} {}",
             if active == Some(room.id) {
@@ -2239,17 +2239,68 @@ fn sidebar_room_link(room: &Room, active: Option<i64>, unread: bool) -> String {
             if unread { "unread" } else { "" }
         ),
         room.id,
-        if room.kind == "Rooms::Direct" {
-            "↗"
-        } else {
-            "#"
-        },
         esc(&room.name)
+    )
+}
+fn sidebar_direct_link(
+    room: &Room,
+    current_user: &User,
+    members: &[(i64, String)],
+    active: Option<i64>,
+    unread: bool,
+) -> String {
+    let fallback = vec![(current_user.id, current_user.name.clone())];
+    let members = if members.is_empty() { &fallback } else { members };
+    let label = if members.len() == 1 {
+        members[0].1.split_whitespace().next().unwrap_or(&members[0].1).to_owned()
+    } else {
+        members
+            .iter()
+            .map(|(_, name)| {
+                name.split_whitespace()
+                    .take(3)
+                    .filter_map(|part| part.chars().next())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    let avatars = members
+        .iter()
+        .take(4)
+        .map(|(id, _)| format!("<img src='/users/{id}/avatar' alt=''>"))
+        .collect::<String>();
+    format!(
+        "<a class='room-link direct-room {} {}' href='/rooms/{}' aria-label='Ping with {}'><span class='direct-room-avatars {}'>{}</span><span class='direct-room-name'>{}</span></a>",
+        if active == Some(room.id) { "active" } else { "" },
+        if unread { "unread" } else { "" },
+        room.id,
+        esc(&room.name),
+        if members.len() > 1 { "direct-room-avatars--group" } else { "" },
+        avatars,
+        esc(&label)
     )
 }
 fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, StatusCode> {
     let rooms = rooms_for(s, u.id)?;
     let db = pool(s)?;
+    let mut direct_members: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    let mut direct_member_query = db
+        .prepare("SELECT m.room_id,u.id,u.name FROM memberships m JOIN users u ON u.id=m.user_id JOIN rooms r ON r.id=m.room_id WHERE r.type='Rooms::Direct' AND m.user_id!=?1 AND EXISTS (SELECT 1 FROM memberships mine WHERE mine.room_id=m.room_id AND mine.user_id=?1) ORDER BY m.room_id,u.id")
+        .map_err(db_err)?;
+    for row in direct_member_query
+        .query_map([u.id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db_err)?
+    {
+        let (room_id, id, name) = row.map_err(db_err)?;
+        direct_members.entry(room_id).or_default().push((id, name));
+    }
     let direct_participants: i64 = db
         .query_row(
             "SELECT COUNT(DISTINCT m2.user_id) FROM memberships m1 JOIN rooms r ON r.id=m1.room_id JOIN memberships m2 ON m2.room_id=r.id WHERE m1.user_id=?1 AND r.type='Rooms::Direct'",
@@ -2283,13 +2334,17 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
             |r| r.get(0),
         )
         .map_err(db_err)?;
-    let mut html = format!(
-        "<aside class='sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'>×</button><div class='sidebar-account'><a class='icon-btn' href='/rooms/directs/new' aria-label='New ping'>✚</a><a class='sidebar-user' href='/users/me/profile'><img src='/users/{}/avatar' alt=''><span>{}</span></a></div><div class='sidebar-title'>Pings</div><nav id='direct-rooms'>",
-        u.id,
-        esc(u.name.split_whitespace().next().unwrap_or(&u.name))
+    let mut html = String::from(
+        "<aside class='sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/assets/menu-5462dfd3.svg' alt=''></button><div class='sidebar-main'><div class='sidebar-directs'><a class='direct-new' href='/rooms/directs/new' aria-label='New ping'><span class='direct-new-icon'><img src='/static/assets/messages-add-d229e6c2.svg' alt=''></span><span>Ping</span></a><nav id='direct-rooms'>",
     );
     for r in rooms.iter().filter(|r| r.kind == "Rooms::Direct") {
-        html.push_str(&sidebar_room_link(r, active, unread.contains(&r.id)));
+        html.push_str(&sidebar_direct_link(
+            r,
+            u,
+            direct_members.get(&r.id).map(Vec::as_slice).unwrap_or(&[]),
+            active,
+            unread.contains(&r.id),
+        ));
     }
     html.push_str("</nav><div id='direct-placeholders' class='direct-placeholders' aria-label='People you can ping'>");
     for (id, name) in placeholders {
@@ -2301,15 +2356,15 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
             esc(first_name)
         ));
     }
-    html.push_str("</div><div class='sidebar-title'>Rooms</div><nav>");
+    html.push_str("</div></div><div class='sidebar-rooms'><nav>");
     for r in rooms.iter().filter(|r| r.kind != "Rooms::Direct") {
         html.push_str(&sidebar_room_link(r, active, unread.contains(&r.id)));
     }
     html.push_str("</nav>");
     if is_admin(u) || !restricted {
-        html.push_str("<a class='sidebar-new-room' href='/rooms/opens/new' title='New room' aria-label='New room'>+</a>");
+        html.push_str("<a class='sidebar-new-room' href='/rooms/opens/new' title='New room' aria-label='New room'><img src='/static/assets/add-f232d8a6.svg' alt=''></a>");
     }
-    html.push_str("<div class='sidebar-footer'><a href='/searches'>Search</a><a href='/account'>Account</a></div></aside>");
+    html.push_str(&format!("</div></div><div class='sidebar-tools'><a class='sidebar-user' href='/users/me/profile' aria-label='My settings'><img src='/users/{}/avatar' alt=''></a><a class='sidebar-settings' href='/account/edit' aria-label='Account settings'><img src='/static/assets/settings-aee56972.svg' alt=''></a></div></aside>", u.id));
     Ok(html)
 }
 fn message_list(
@@ -2998,7 +3053,7 @@ async fn room_show_with_target(
     for m in messages {
         content.push_str(&message_html(&s, &m, Some(&headers)));
     }
-    content.push_str(&format!("</div><div class='typing-indicator' id='typing-indicator' aria-live='polite' hidden></div><form class='composer' id='composer' method='post' enctype='multipart/form-data' action='/rooms/{rid}/messages'><a class='search-round' href='/searches' aria-label='Search'><img src='/static/icons/search.svg' alt=''></a><input type='hidden' id='message-body' name='message[body]'><input type='hidden' name='message[format]' value='html'><trix-editor input='message-body' aria-label='Write a message' aria-controls='mention-suggestions' placeholder='Write a message…'></trix-editor><div class='mention-suggestions' id='mention-suggestions' role='listbox' aria-label='Mention a person' hidden></div><label class='file-btn' title='Attach file'><img src='/assets/attachment-8bcccab0.svg' alt='' width='22' height='22'><input type='file' name='message[attachment]'></label><button type='button' id='rich-toggle' class='rich-toggle' aria-label='Rich text toolbar' aria-expanded='false'>A</button><input type='hidden' name='message[client_message_id]' value='{}'><button class='button' aria-label='Send message'><img src='/assets/arrow-up-f96b3895.svg' alt='' width='20' height='20'></button></form></section></div>",Uuid::new_v4()));
+    content.push_str(&format!("</div><div class='typing-indicator' id='typing-indicator' aria-live='polite' hidden></div><form class='composer' id='composer' method='post' enctype='multipart/form-data' action='/rooms/{rid}/messages'><a class='search-round' href='/searches' aria-label='Search'><img src='/static/icons/search.svg' alt=''></a><input type='hidden' id='message-body' name='message[body]'><input type='hidden' name='message[format]' value='html'><img class='composer-chat-icon' src='/static/assets/messages-outlined-87ff0331.svg' alt=''><trix-editor input='message-body' aria-label='Write a message' aria-controls='mention-suggestions' placeholder='Write a message…'></trix-editor><div class='mention-suggestions' id='mention-suggestions' role='listbox' aria-label='Mention a person' hidden></div><label class='file-btn' title='Attach file'><img src='/assets/attachment-8bcccab0.svg' alt='' width='22' height='22'><input type='file' name='message[attachment]'></label><button type='button' id='rich-toggle' class='rich-toggle' aria-label='Rich text toolbar' aria-expanded='false'><img src='/static/assets/text-options-055e0d16.svg' alt=''></button><input type='hidden' name='message[client_message_id]' value='{}'><button class='button' aria-label='Send message'><img src='/assets/arrow-up-f96b3895.svg' alt='' width='20' height='20'></button></form></section></div>",Uuid::new_v4()));
     let mut response = render(&room.name, &content, Some(&u));
     response.headers_mut().append(
         header::SET_COOKIE,

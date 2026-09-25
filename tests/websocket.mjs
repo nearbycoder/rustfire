@@ -153,8 +153,8 @@ try{
   assert.equal((await nextFrame()).type,'confirm_subscription');
   for(const involvement of ['invisible','mentions']){
     const changed=await fetch(base+'/rooms/1/involvement',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({involvement}),redirect:'manual'});
-    assert.equal(changed.status,303);
-    assert.equal(changed.headers.get('location'),'/rooms/1/involvement');
+    assert.equal(changed.status,302);
+    assert.equal(new URL(changed.headers.get('location'),base).pathname,'/rooms/1/involvement');
     const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no visibility event')),3000))]);
     assert.equal(frame.identifier,roomListIdentifier);
     assert.equal(frame.message.type,'rooms_changed');

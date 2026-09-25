@@ -387,7 +387,10 @@ def main():
             code, direct_url, _ = creations[0]
             assert creations[1][0] == 200 and creations[1][1] == direct_url, creations
             assert code == 200 and "/rooms/3" in direct_url
-            assert "data-ping-user-id='2'" not in request(admin, base, "/users/me/sidebar")[2]
+            admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
+            assert "data-ping-user-id='2'" not in admin_sidebar
+            assert re.search(r"class='room-link direct-room [^']*' href='/rooms/3'[^>]*><span class='direct-room-avatars '><img src='/users/2/avatar'", admin_sidebar)
+            assert "class='direct-room-name'>Member</span>" in admin_sidebar
             assert "data-ping-user-id='1'" not in request(member, base, "/users/me/sidebar")[2]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM rooms WHERE type='Rooms::Direct'").fetchone() == (1,)
