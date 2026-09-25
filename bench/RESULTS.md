@@ -372,3 +372,20 @@ The screen's forms and sampled mutations match, but its full response bytes diff
 Rustfire now renders the source's welcome invitation in the original room while it has at most 40 messages. The card contains the account logo, translated welcome text, current join URL, QR link, copy value, share control, and administrator regenerate form. `bench/paired_room_invitation.py` verified both apps displayed the card with 0, 1, and 40 messages, removed it at 41, and omitted it from a second room. It also decoded each QR path to its displayed join URL and matched the copy value. A browser opened Rustfire's QR dialog and posted a message through the mobile composer; the welcome card remained visible after that post.
 
 At 1280 × 633 px in dark mode, Campfire's welcome body measured x=318.81, y=88.98, width=373.58, height=243.78 px; Rustfire's measured x=318.59, y=89, width=374, height=243 px. At 390 × 844 px, both bodies started at x≈12.8, y≈155 with width≈364.4 px. The mobile composer form measured x≈12.8, y=778, width≈364.4, height=42 px in both apps after the layout adjustment. Rustfire uses the upstream attachment and send SVG assets. The visible sidebar and notification bell still differ, as do broader room markup and interaction details; this geometry check does not establish full visual or behavioral parity.
+
+## Current attachment fanout sweep
+
+The room sidebar, composer, and notification bell were brought closer to Campfire, and the composer now sends every selected file as a separate message. A browser check selected two files, removed and re-added one, and sent them with text; Rustfire stored three separate messages. This was a behavior check, not a paired browser upload benchmark.
+
+The WebSocket path now shares each broadcast payload, prepares its Turbo representation once, uses a membership-existence query for authorization, and caches access and the serialized frame only for that broadcast. The next event rechecks membership. Before the authorization change, two 10,000-socket attachment trials measured Rustfire p95 at 594.56 and 631.08 ms against 456.97 and 477.91 ms for Campfire. The final build was checked with the following paired, disposable runs using `bench/paired_turbo_fanout.py`, 22 Puma workers, one Rustfire process, one room and account, 20 small text-file posts, and the same number of subscribed sockets in each app. Both apps ran serially on the same host as the load generator. The probe compared the sampled attachment stream structure and identity whenever both runs completed.
+
+| Sockets | Rustfire deliveries | Campfire deliveries | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 200,000 / 200,000 | 200,000 / 200,000 | 356.33 ms | 454.50 ms |
+| 20,000 | 400,000 / 400,000 | 400,000 / 400,000 | 723.19 ms | 778.49 ms |
+| 30,000, run 1 | 600,000 / 600,000 | 600,000 / 600,000 | 1,164.52 ms | 1,235.33 ms |
+| 30,000, run 2 | 600,000 / 600,000 | 600,000 / 600,000 | 1,183.94 ms | 1,260.84 ms |
+| 40,000, run 1 | 800,000 / 800,000 | 797,090 / 800,000 | 1,613.09 ms | 1,762.55 ms on received events |
+| 40,000, run 2 | 800,000 / 800,000 | 798,041 / 800,000 | 1,595.78 ms | 1,573.76 ms on received events |
+
+The 40,000-socket Rustfire bursts took 20.18 and 20.42 seconds after posting began. Campfire's probe hit its 30-second delivery deadline with 2,910 and 1,959 events still missing; its p95 figures exclude those missing events and cannot be treated as complete-run latency. Rustfire's sampled event body was about 10,477 bytes and Campfire's about 11,589 bytes. At 30,000 sockets the client used two loopback source IPs; at 40,000 it used four. Single-IP and two-IP attempts that failed during connection setup with local port errors were excluded. The four-IP distribution was identical for both apps. These results show a larger **short-burst attachment-fanout delivery margin** for Rustfire on this fixture, not a maximum sustainable socket count or a whole-app speed and scale advantage. Long-lived connections, CPU, peak memory, browser rendering, varied rooms and users, and full feature-equivalent side effects remain unmeasured.

@@ -60,7 +60,11 @@ def start_server(database, port, extra_env=None):
 
 def stop_server(process):
     process.terminate()
-    process.wait(timeout=10)
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def p95(samples):

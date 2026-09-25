@@ -42,7 +42,7 @@ use std::{
     io::SeekFrom,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -92,12 +92,52 @@ struct Event {
     room_id: i64,
     payload: String,
 }
+struct HubPayload {
+    json: Arc<str>,
+    turbo: Option<Arc<str>>,
+    access: RwLock<HashMap<i64, bool>>,
+    frames: RwLock<HashMap<(Arc<str>, bool), WsMessage>>,
+}
+impl HubPayload {
+    fn accessible(&self, state: &AppState, uid: i64, rid: i64) -> bool {
+        // Cache only within this event; the next broadcast rechecks current membership.
+        if let Some(access) = self.access.read().unwrap().get(&uid) {
+            return *access;
+        }
+        let mut access = self.access.write().unwrap();
+        *access
+            .entry(uid)
+            .or_insert_with(|| room_accessible(state, uid, rid))
+    }
+    fn frame(&self, identifier: Arc<str>, turbo: bool) -> Option<WsMessage> {
+        let key = (identifier, turbo);
+        if let Some(frame) = self.frames.read().unwrap().get(&key) {
+            return Some(frame.clone());
+        }
+        let mut frames = self.frames.write().unwrap();
+        if let Some(frame) = frames.get(&key) {
+            return Some(frame.clone());
+        }
+        let message = if turbo {
+            self.turbo.as_deref()?
+        } else {
+            self.json.as_ref()
+        };
+        let frame = WsMessage::Text(
+            format!("{{\"identifier\":{},\"message\":{message}}}", key.0).into(),
+        );
+        if frames.len() < 32 {
+            frames.insert(key, frame.clone());
+        }
+        Some(frame)
+    }
+}
 #[derive(Default)]
 struct RoomHub {
-    rooms: Mutex<HashMap<i64, broadcast::Sender<String>>>,
+    rooms: Mutex<HashMap<i64, broadcast::Sender<Arc<HubPayload>>>>,
 }
 impl RoomHub {
-    fn channel(&self, room_id: i64) -> broadcast::Sender<String> {
+    fn channel(&self, room_id: i64) -> broadcast::Sender<Arc<HubPayload>> {
         let mut rooms = self.rooms.lock().unwrap();
         rooms
             .entry(room_id)
@@ -106,7 +146,18 @@ impl RoomHub {
     }
     fn send(&self, event: Event) {
         if let Some(channel) = self.rooms.lock().unwrap().get(&event.room_id) {
-            let _ = channel.send(event.payload);
+            let turbo = serde_json::from_str::<Value>(&event.payload)
+                .ok()
+                .and_then(|value| turbo_room_event(&value))
+                .and_then(|html| serde_json::to_string(&html).ok())
+                .map(Into::into);
+            let payload = Arc::new(HubPayload {
+                json: event.payload.into(),
+                turbo,
+                access: RwLock::new(HashMap::new()),
+                frames: RwLock::new(HashMap::new()),
+            });
+            let _ = channel.send(payload);
         }
     }
     fn remove(&self, room_id: i64) {
@@ -1150,6 +1201,18 @@ fn ensure_room_creation_allowed(s: &AppState, u: &User) -> Result<(), StatusCode
 fn room_for(state: &AppState, uid: i64, rid: i64) -> Result<Room, StatusCode> {
     let db = pool(state)?;
     db.query_row("SELECT r.id,CASE WHEN r.type='Rooms::Direct' THEN COALESCE((SELECT group_concat(name,', ') FROM (SELECT u2.name FROM users u2 JOIN memberships m2 ON m2.user_id=u2.id WHERE m2.room_id=r.id AND u2.id!=?1 ORDER BY u2.id)),(SELECT name FROM users WHERE id=?1)) ELSE COALESCE(r.name,'') END,r.type,r.creator_id FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=?1 AND r.id=?2",params![uid,rid],|r|Ok(Room{id:r.get(0)?,name:r.get(1)?,kind:r.get(2)?,creator_id:r.get(3)?})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)
+}
+fn room_accessible(state: &AppState, uid: i64, rid: i64) -> bool {
+    pool(state)
+        .and_then(|db| {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memberships m JOIN rooms r ON r.id=m.room_id WHERE m.user_id=?1 AND r.id=?2)",
+                params![uid, rid],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_err)
+        })
+        .unwrap_or(false)
 }
 fn can_admin(u: &User, room: &Room) -> bool {
     is_admin(u) || room.creator_id == u.id || room.kind == "Rooms::Direct"
@@ -7723,7 +7786,7 @@ async fn ws_upgrade(
 }
 async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
-    let (event_tx, mut event_rx) = mpsc::channel::<(String, i64, String, bool)>(256);
+    let (event_tx, mut event_rx) = mpsc::channel::<(Arc<str>, i64, Arc<HubPayload>, bool)>(256);
     let mut revoked_rx = s.revoked_users.subscribe();
     if sender
         .send(WsMessage::Text(
@@ -7766,7 +7829,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                         } else if let Some(hub)=hub { if let std::collections::hash_map::Entry::Vacant(entry)=subscriptions.entry(ident.to_string()) {
                             let mut room_events=hub.channel(if user_channel {u.id} else {rid}).subscribe();
                             let tx=event_tx.clone();
-                            let identifier=ident.to_string();
+                            let identifier: Arc<str> = serde_json::to_string(ident).unwrap_or_default().into();
                             let event_rid=if user_channel {0} else {rid};
                             let turbo=signed_name.is_some();
                             entry.insert(tokio::spawn(async move {loop {match room_events.recv().await {Ok(payload)=>{if tx.send((identifier.clone(),event_rid,payload,turbo)).await.is_err(){break}},Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}}}));
@@ -7791,7 +7854,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     }
                 }
             },
-            event=event_rx.recv()=>{if let Some((identifier,rid,payload,turbo))=event{if rid==0 || room_for(&s,u.id,rid).is_ok(){let message=if turbo {serde_json::from_str::<Value>(&payload).ok().and_then(|value|turbo_room_event(&value)).map(Value::String)} else {serde_json::from_str::<Value>(&payload).ok()};if let Some(message)=message {if sender.send(WsMessage::Text(json!({"identifier":identifier,"message":message}).to_string().into())).await.is_err(){break}}}}}
+            event=event_rx.recv()=>{if let Some((identifier,rid,payload,turbo))=event{if rid==0 || payload.accessible(&s,u.id,rid){if let Some(frame)=payload.frame(identifier,turbo){if sender.send(frame).await.is_err(){break}}}}}
         }
     }
     for (_, task) in subscriptions {

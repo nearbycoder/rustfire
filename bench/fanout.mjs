@@ -18,6 +18,7 @@ const operation = args.operation ?? 'messages';
 const socketCount = Number(args.sockets ?? 100);
 const messageCount = Number(args.messages ?? 20);
 const timeoutMs = Number(args.timeout ?? 30000);
+const sourceIps = args['source-ips']?.split(',').map(value => value.trim()).filter(Boolean) ?? [];
 const imageBytes = operation === 'images' ? (args['image-file'] ? fs.readFileSync(args['image-file']) : Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=','base64')) : null;
 const videoBytes = operation === 'videos' ? fs.readFileSync(args['video-file']) : null;
 if (!cookie || !['rustfire','rustfire-turbo','campfire'].includes(app) || !['messages','boosts','attachments','images','videos'].includes(operation) || !Number.isSafeInteger(room) || room < 1 || !Number.isSafeInteger(messageId) || messageId < 1 || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || base.protocol !== 'http:') {
@@ -65,7 +66,7 @@ function maskedTextFrame(value) {
 
 function connect(index) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: base.hostname, port: Number(base.port || 80) });
+    const socket = net.createConnection({ host: base.hostname, port: Number(base.port || 80), ...(sourceIps.length ? { localAddress: sourceIps[index % sourceIps.length] } : {}) });
     clients.push(socket);
     let buffer = Buffer.alloc(0);
     let handshake = false;

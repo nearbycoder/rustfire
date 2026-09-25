@@ -35,7 +35,7 @@ def seed_boost_message(rust_db, camp_db):
         db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Boost fixture','Message',1,?1,?1)", [camp_time])
 
 
-def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None, image_file=None, video_file=None):
+def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample_file=None, image_file=None, video_file=None, source_ips=None):
     command = [
         "node", "bench/fanout.mjs", "--app", app,
         "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
@@ -49,6 +49,8 @@ def fanout(app, port, cookie, csrf, sockets, messages, operation, run_id, sample
         command.extend(["--image-file", str(image_file)])
     if video_file is not None:
         command.extend(["--video-file", str(video_file)])
+    if source_ips:
+        command.extend(["--source-ips", source_ips])
     result = subprocess.run(
         command,
         cwd=ROOT, text=True, capture_output=True,
@@ -228,6 +230,7 @@ def main():
     parser.add_argument("--messages", type=int, default=5)
     parser.add_argument("--operation", choices=["messages", "boosts", "attachments", "images", "videos"], default="messages")
     parser.add_argument("--campfire-workers", type=int, default=1)
+    parser.add_argument("--source-ips", help="Comma-separated local IPs for outbound sockets, useful above one ephemeral-port range")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="Write one received Turbo event from each app to this directory")
     parser.add_argument("--image-size", help="Use a generated PNG of WIDTHxHEIGHT for image uploads; default is 1x1")
     parser.add_argument("--video-size", default="16x16", help="Generate a video of WIDTHxHEIGHT for video uploads; default is 16x16")
@@ -292,13 +295,14 @@ def main():
             "RUSTFIRE_PUBLIC_URL": "http://127.0.0.1",
         })
         try:
-            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html", image_file, video_file)
+            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html", image_file, video_file, args.source_ips)
             if args.check_edit:
                 fetch_edit_frame(output_dir / "rustfire-edit.html", rust_port, "session_token=benchmark-session", f"{run_id}-0")
             rust_image_bytes = check_image_representation(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session", expected_image_dimensions) if args.operation == "images" else None
             rust_poster_bytes = check_video_poster(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session") if args.operation == "videos" else None
         finally:
             stop_server(rust)
+        print(f"rustfire-turbo {rust_result}", flush=True)
 
         with open(temp / "puma.log", "w+") as log:
             camp = subprocess.Popen(
@@ -308,7 +312,7 @@ def main():
             try:
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
-                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html", image_file, video_file)
+                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html", image_file, video_file, args.source_ips)
                 if args.check_edit:
                     fetch_edit_frame(output_dir / "campfire-edit.html", camp_port, cookie, f"{run_id}-0")
                 camp_image_bytes = check_image_representation(output_dir / "campfire.html", camp_port, cookie, expected_image_dimensions) if args.operation == "images" else None
@@ -320,7 +324,6 @@ def main():
                 raise
             finally:
                 stop_server(camp)
-        print(f"rustfire-turbo {rust_result}")
         print(f"campfire       {camp_result}")
         rust_identity = stream_avatar_identity(output_dir / "rustfire.html")
         camp_identity = stream_avatar_identity(output_dir / "campfire.html")
