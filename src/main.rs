@@ -1167,6 +1167,11 @@ fn render_unauth(title: &str, body: &str) -> Response {
     response
 }
 fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
+    let account_stylesheet = if body.contains("class='panel account-settings") {
+        "<link rel='stylesheet' href='/static/account.css'>"
+    } else {
+        ""
+    };
     let nav = if let Some(u) = current {
         format!(
             "<div class='top-user'><span>{}</span><a href='/users/me/profile'>Settings</a><form method='post' action='/session/logout'><button>Sign out</button></form></div>",
@@ -1177,7 +1182,7 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
     };
     let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
     let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'><link rel='stylesheet' href='/account/custom_styles.css'><script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}<link rel='stylesheet' href='/account/custom_styles.css'><script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
         esc(token),
         VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
         esc(title),

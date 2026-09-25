@@ -15,7 +15,7 @@ document.addEventListener('click',async event=>{
     copy.classList.add(successClass);
   }catch{}
 });
-document.querySelectorAll('.account-settings [data-controller~="web-share"]').forEach(button=>{button.hidden=typeof navigator.share!=='function';});
+document.querySelectorAll('.account-settings [data-controller~="web-share"]').forEach(button=>{button.hidden=typeof navigator.canShare!=='function';});
 document.addEventListener('click',async event=>{
   const settings=event.target.closest('.account-settings');
   if(!settings)return;
