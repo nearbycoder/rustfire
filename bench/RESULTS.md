@@ -129,3 +129,25 @@ The same 10,000-user fixture was probed with `--iterations 30 --clients 1 8 32 -
 | 32 | 2,164.2 | 170.0 | 16.756 ms | 220.856 ms | 0 / 0 |
 
 Both rates fell at 32 clients under this configuration. These are three-second endpoint trials with a Python client on the server host, not sustained capacity measurements. Campfire was limited to one Puma worker. The generated avatar images, related requests, and full-app work are outside this trial, so it does not establish a full-app speed or scale advantage.
+
+## Paired bot message-list JSON trial
+
+`bench/paired_bot_messages.py` seeded disposable, matched fixtures with one room, one bot, and messages alternating between plain text and a simple rich-text `<div>`. Both servers used the same signing secret. The probe fetched the latest 40 messages from the bot JSON API and confirmed that every parsed field matched after removing the different URL origins, including ActionText-wrapped HTML, creator details, signed avatar URL paths, and timestamps. Campfire used Redis caching in production; Rustfire used SQLite WAL. Two warmup requests preceded each set of 30 sequential requests. The servers and Python load generator shared a host and ran serially.
+
+| Stored messages | Campfire workers | Rustfire median / p95 | Campfire median / p95 | Rustfire / Campfire JSON bytes |
+|---:|---:|---:|---:|---:|
+| 1,000 | 1 | 0.547 / 0.752 ms | 91.513 / 153.954 ms | 19,025 / 20,225 |
+| 10,000 | 1 | 0.566 / 0.773 ms | 94.455 / 151.363 ms | 19,185 / 20,385 |
+| 10,000 | 22 | 0.428 / 0.684 ms | 132.446 / 154.841 ms | 19,185 / 20,385 |
+
+The 22-worker, 10,000-message run was repeated; the first run measured 0.486 / 1.055 ms for Rustfire and 89.133 / 152.013 ms for Campfire. Both runs confirmed equal parsed content. The 1,200-byte response-size difference comes primarily from Campfire's JSON escaping of HTML characters. These trials show a faster **bot message-list read endpoint** on this fixture, not full-app parity or an overall speed ratio.
+
+The repeated 22-worker run also used three-second concurrent sweeps. Each client kept one HTTP connection and checked every response against its warmup body. No measured request failed.
+
+| Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+|---:|---:|---:|---:|---:|
+| 1 | 1,987.6 | 7.5 | 0.742 ms | 180.450 ms |
+| 8 | 10,688.6 | 38.9 | 1.072 ms | 386.656 ms |
+| 32 | 8,100.6 | 67.8 | 5.762 ms | 728.279 ms |
+
+The short 32-client Campfire trial completed 231 responses, so tail latency and throughput are sensitive to scheduling and requests finishing after the three-second start window. The earlier 22-worker run measured 73.7 requests/s at 32 clients. Attachment rendering, writes, ActionCable broadcasts, push delivery, webhooks, and sustained operation remain outside this probe. Maximum user or socket scale has not been established for the feature-complete app.

@@ -92,8 +92,11 @@ def main():
             assert code == 201, (code, payload)
             message = json.loads(payload)
             assert message["body"]["plain_text"] == "hello from smoke"
+            assert message["body"]["html"] == '<div class="trix-content">\n  hello from smoke\n</div>\n'
             assert message["url"] == f"{base}/rooms/1/messages/{message['id']}"
-            assert message["creator"]["avatar_url"] == f"{base}/users/1/avatar"
+            expected_avatar_token = "eyJfcmFpbHMiOnsiZGF0YSI6MSwicHVyIjoidXNlci9hdmF0YXIifX0--fe99b8547975d867621732d6e0d4344cea012c7eaf713418ef6b1414a24e2dd4"
+            assert re.fullmatch(re.escape(f"{base}/users/{expected_avatar_token}/avatar?v=") + r"\d{14}", message["creator"]["avatar_url"])
+            assert set(message) == {"id", "created_at", "body", "creator", "room", "url"}
             assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", message["created_at"])
             code, _, page = request(admin, base, f"/rooms/1/@{message['id']}")
             assert code == 200 and "hello from smoke" in page and "data-at-message='1'" in page and "id='composer'" in page, code
@@ -123,7 +126,7 @@ def main():
             code, _, payload = request(admin, base, "/rooms/1/messages", data=multipart, method="POST", headers={"Accept":"application/json", "Content-Type":f"multipart/form-data; boundary={boundary}"})
             assert code == 201, (code, payload)
             attachment_message = json.loads(payload)
-            attachment_id = attachment_message["attachment"]["id"]
+            attachment_id = sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (attachment_message["id"],)).fetchone()[0]
             code, _, payload = request(admin, base, f"/rooms/1/refresh?after={message['id']}", headers={"Accept":"application/json"})
             refresh = json.loads(payload)
             assert code == 200 and [m["id"] for m in refresh["messages"]] == [attachment_message["id"]]
@@ -194,7 +197,7 @@ def main():
             image_body=(b"--image-test\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--image-test--\r\n")
             code,_,payload=request(admin,base,"/rooms/1/messages",data=image_body,method="POST",headers={"Accept":"application/json","Content-Type":"multipart/form-data; boundary=image-test"})
             assert code==201,(code,payload)
-            image_id=json.loads(payload)["attachment"]["id"]
+            image_id=sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
             assert f"/attachments/{image_id}/thumb" in request(admin,base,"/rooms/1")[2]
             with admin.open(base+f"/attachments/{image_id}/thumb") as res:
                 assert res.status==200 and res.headers.get_content_type()==("image/webp" if shutil.which("vips") else "image/png") and len(res.read())>0
@@ -204,7 +207,7 @@ def main():
                 video_body=(b"--video-test\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"clip.mp4\"\r\nContent-Type: video/mp4\r\n\r\n"+video_file.read_bytes()+b"\r\n--video-test--\r\n")
                 code,_,payload=request(admin,base,"/rooms/1/messages",data=video_body,method="POST",headers={"Accept":"application/json","Content-Type":"multipart/form-data; boundary=video-test"})
                 assert code==201,(code,payload)
-                video_id=json.loads(payload)["attachment"]["id"]
+                video_id=sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
                 assert f"/attachments/{video_id}/poster" in request(admin,base,"/rooms/1")[2]
                 with admin.open(urllib.request.Request(base+f"/attachments/{video_id}",headers={"Range":"bytes=0-9"})) as res:
                     assert res.status==206 and res.headers.get_content_type()=="video/mp4" and len(res.read())==10
@@ -284,7 +287,6 @@ def main():
             admin_suggestion = json.loads(payload)[0]
             assert code == 200 and admin_suggestion["value"] == 1 and set(admin_suggestion) == {"value", "name", "avatar_url", "sgid"}
             avatar_url = urllib.parse.urlparse(admin_suggestion["avatar_url"])
-            expected_avatar_token = "eyJfcmFpbHMiOnsiZGF0YSI6MSwicHVyIjoidXNlci9hdmF0YXIifX0--fe99b8547975d867621732d6e0d4344cea012c7eaf713418ef6b1414a24e2dd4"
             assert avatar_url.path == f"/users/{expected_avatar_token}/avatar"
             assert re.fullmatch(r"v=\d{14}", avatar_url.query)
             code, _, avatar_svg = request(member, base, avatar_url.path + "?" + avatar_url.query)
@@ -512,7 +514,7 @@ def main():
             code, _, payload = request(client(), base, f"/rooms/1/{key}/messages/{bot_id}/boosts", data=b"fire", method="POST")
             assert code == 201 and json.loads(payload)["content"] == "fire"
             assert json.loads(payload)["message"]["url"] == f"{base}/rooms/1/messages/{bot_id}"
-            assert json.loads(payload)["booster"]["avatar_url"] == f"{base}/users/3/avatar"
+            assert re.fullmatch(re.escape(base) + r"/users/[A-Za-z0-9_-]+--[0-9a-f]{64}/avatar\?v=\d{14}", json.loads(payload)["booster"]["avatar_url"])
             boost_id = json.loads(payload)["id"]
             code, _, _ = request(client(), base, f"/rooms/1/{key}/messages/{bot_id}/boosts/{boost_id}", method="DELETE")
             assert code == 204
@@ -604,7 +606,7 @@ def main():
             assert code == 200
             code, _, payload = request(admin, base, "/rooms/3/messages", data=multipart, method="POST", headers={"Accept":"application/json", "Content-Type":f"multipart/form-data; boundary={boundary}"})
             assert code == 201
-            room_attachment_id = json.loads(payload)["attachment"]["id"]
+            room_attachment_id = sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 room_stored_name = check_db.execute("SELECT stored_name FROM attachments WHERE id=?", (room_attachment_id,)).fetchone()[0]
             room_stored_file = pathlib.Path(tmp, "uploads", room_stored_name)

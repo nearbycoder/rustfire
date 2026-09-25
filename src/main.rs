@@ -149,6 +149,8 @@ struct User {
     role: i64,
     bot_token: Option<String>,
     #[serde(skip_serializing)]
+    updated_at: String,
+    #[serde(skip_serializing)]
     csrf_token: Option<String>,
 }
 #[derive(Clone, Serialize)]
@@ -169,6 +171,8 @@ struct ChatMessage {
     creator_id: i64,
     creator_name: String,
     creator_role: i64,
+    #[serde(skip_serializing)]
+    creator_updated_at: String,
     body: String,
     body_html: Option<String>,
     created_at: String,
@@ -724,11 +728,11 @@ fn safe_return_path(encoded: &str) -> Option<String> {
 fn user(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
     let token = cookie(headers, "session_token").ok_or(StatusCode::UNAUTHORIZED)?;
     let db = pool(state)?;
-    db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
+    db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
 fn bot_user(state: &AppState, key: &str) -> Result<User, StatusCode> {
     let db = pool(state)?;
-    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token FROM users WHERE bot_token=?1 AND status=0", [key], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
+    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE bot_token=?1 AND status=0", [key], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
 fn is_admin(u: &User) -> bool {
     u.role == 1
@@ -1861,7 +1865,7 @@ fn message_list(
         ("(?2 IS NULL OR m.id<?2)", "DESC", before)
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
@@ -1882,6 +1886,7 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
         creator_id: r.get(2)?,
         creator_name: r.get(3)?,
         creator_role: r.get(11)?,
+        creator_updated_at: r.get(13)?,
         body: r.get(4)?,
         body_html: r.get(12)?,
         created_at: r.get(5)?,
@@ -1911,7 +1916,7 @@ fn messages_since(
         ("m.created_at>?2", "ASC", "idx_messages_room_created")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
@@ -2521,16 +2526,24 @@ async fn messages_index(
         return Ok(Json(
             messages
                 .iter()
-                .map(|m| message_json(m, Some(&headers)))
-                .collect::<Vec<_>>(),
+                .map(|m| message_json(&s, m, Some(&headers)))
+                .collect::<Result<Vec<_>, _>>()?,
         )
         .into_response());
     }
     Ok(Html(messages.iter().map(message_html).collect::<String>()).into_response())
 }
-fn message_json(m: &ChatMessage, headers: Option<&HeaderMap>) -> Value {
+fn message_json(
+    s: &AppState,
+    m: &ChatMessage,
+    headers: Option<&HeaderMap>,
+) -> Result<Value, StatusCode> {
     let message_path = format!("/rooms/{}/messages/{}", m.room_id, m.id);
-    let avatar_path = format!("/users/{}/avatar", m.creator_id);
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
+    let avatar_path = avatar_path(avatar_key, m.creator_id, &m.creator_updated_at)?;
     let (url, avatar_url) = if let Some(headers) = headers {
         (
             public_url(headers, &message_path),
@@ -2545,7 +2558,18 @@ fn message_json(m: &ChatMessage, headers: Option<&HeaderMap>) -> Value {
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         })
         .unwrap_or_else(|_| m.created_at.clone());
-    json!({"id":m.id,"created_at":created_at,"body":{"plain_text":if m.body.is_empty(){m.attachment.as_ref().map(|a|a.filename.as_str()).unwrap_or("")}else{&m.body},"html":m.body_html.clone().unwrap_or_else(||format!("<div>{}</div>",esc(&m.body)))},"creator":{"id":m.creator_id,"name":m.creator_name,"role":match m.creator_role{1=>"administrator",2=>"bot",_=>"member"},"avatar_url":avatar_url},"room":{"id":m.room_id},"attachment":m.attachment,"url":url})
+    let content = m.body_html.clone().unwrap_or_else(|| esc(&m.body));
+    let body_html = if content.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"trix-content\">\n  {}\n</div>\n",
+            content.replace('\n', "\n  ")
+        )
+    };
+    Ok(
+        json!({"id":m.id,"created_at":created_at,"body":{"plain_text":if m.body.is_empty(){m.attachment.as_ref().map(|a|a.filename.as_str()).unwrap_or("")}else{&m.body},"html":body_html},"creator":{"id":m.creator_id,"name":m.creator_name,"role":match m.creator_role{1=>"administrator",2=>"bot",_=>"member"},"avatar_url":avatar_url},"room":{"id":m.room_id},"url":url}),
+    )
 }
 #[derive(Deserialize)]
 struct PostMessage {
@@ -2649,6 +2673,7 @@ fn insert_message(
         creator_id: u.id,
         creator_name: u.name.clone(),
         creator_role: u.role,
+        creator_updated_at: u.updated_at.clone(),
         body: plain,
         body_html,
         created_at: t,
@@ -2656,7 +2681,7 @@ fn insert_message(
         attachment,
         boosts: String::new(),
     };
-    let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"message":message_json(&m,None),"html":message_html(&m)}).to_string()});
+    let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"message":message_json(s,&m,None)?,"html":message_html(&m)}).to_string()});
     for uid in newly_unread {
         s.unread_events.send(Event {
             room_id: uid,
@@ -3058,7 +3083,11 @@ async fn message_create(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if accept.contains("json") {
-        Ok((StatusCode::CREATED, Json(message_json(&m, Some(&headers)))).into_response())
+        Ok((
+            StatusCode::CREATED,
+            Json(message_json(&s, &m, Some(&headers))?),
+        )
+            .into_response())
     } else if accept.contains("turbo-stream") {
         Ok((StatusCode::CREATED,Html(format!("<turbo-stream action='append' target='messages'><template>{}</template></turbo-stream>",message_html(&m)))).into_response())
     } else {
@@ -3073,7 +3102,7 @@ async fn message_show(
     let u = user(&s, &headers)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
-    let m=db.query_row("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",params![rid,mid],|r|Ok(ChatMessage{id:r.get(0)?,room_id:r.get(1)?,room_kind:None,mention_ids:Vec::new(),creator_id:r.get(2)?,creator_name:r.get(3)?,creator_role:r.get(11)?,body:r.get(4)?,body_html:r.get(12)?,created_at:r.get(5)?,client_message_id:r.get(6)?,attachment:r.get::<_,Option<i64>>(7)?.map(|id|Attachment{id,filename:r.get(8).unwrap_or_default(),content_type:r.get(9).unwrap_or_default()}),boosts:r.get(10)?})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
+    let m=db.query_row("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",params![rid,mid],chat_message_from_row).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
     Ok(if headers.get("x-rustfire-fragment").is_some() {
         Html(message_html(&m)).into_response()
     } else if headers
@@ -3082,7 +3111,7 @@ async fn message_show(
         .unwrap_or("")
         .contains("json")
     {
-        Json(message_json(&m, Some(&headers))).into_response()
+        Json(message_json(&s, &m, Some(&headers))?).into_response()
     } else {
         render("Message", &message_html(&m), Some(&u))
     })
@@ -5022,8 +5051,8 @@ async fn bot_messages_get(
     let mut r = Json(
         messages
             .iter()
-            .map(|m| message_json(m, Some(&headers)))
-            .collect::<Vec<_>>(),
+            .map(|m| message_json(&s, m, Some(&headers)))
+            .collect::<Result<Vec<_>, _>>()?,
     )
     .into_response();
     r.headers_mut()
@@ -5161,7 +5190,7 @@ async fn bot_message_update(
         .into_iter()
         .find(|m| m.id == mid)
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(message_json(&m, Some(&headers))).into_response())
+    Ok(Json(message_json(&s, &m, Some(&headers))?).into_response())
 }
 async fn bot_message_delete(
     State(s): State<Arc<AppState>>,
@@ -5650,7 +5679,11 @@ async fn bot_boost_create(
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         })
         .unwrap_or(created);
-    let avatar_url = public_url(&headers, &format!("/users/{}/avatar", bot.id));
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
+    let avatar_url = public_url(&headers, &avatar_path(avatar_key, bot.id, &bot.updated_at)?);
     let message_url = public_url(&headers, &format!("/rooms/{rid}/messages/{mid}"));
     Ok((StatusCode::CREATED, Json(json!({"id":id,"content":content,"created_at":created_at,"booster":{"id":bot.id,"name":bot.name,"role":"bot","avatar_url":avatar_url},"message":{"id":mid,"url":message_url}}))).into_response())
 }
