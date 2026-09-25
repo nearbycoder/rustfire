@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -70,7 +71,11 @@ def transfer_path(page):
 
 
 def use_transfer(port, path):
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, response, code, message, headers, destination):
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), NoRedirect())
     base = f"http://127.0.0.1:{port}"
     with opener.open(base + path) as response:
         page = response.read().decode()
@@ -79,8 +84,13 @@ def use_transfer(port, path):
     token = re.search(r'name=["\']authenticity_token["\'] value=["\']([^"\']+)', page)
     assert token, "Device-transfer form has no CSRF token"
     body = urllib.parse.urlencode({"_method": "put", "authenticity_token": html.unescape(token.group(1))}).encode()
-    with opener.open(base + path, data=body) as response:
-        assert response.status == 200 and "/rooms/1" in response.url, (response.status, response.url)
+    try:
+        opener.open(base + path, data=body)
+        raise AssertionError("Device transfer did not redirect")
+    except urllib.error.HTTPError as response:
+        assert response.code == 302 and urllib.parse.urlsplit(response.headers["Location"]).path == "/", (response.code, response.headers["Location"])
+    with opener.open(base + "/rooms/1") as response:
+        assert response.status == 200 and response.url.endswith("/rooms/1")
         response.read()
 
 

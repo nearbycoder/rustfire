@@ -1921,7 +1921,9 @@ async fn transfer_update(
     };
     let uid = uid.ok_or(StatusCode::BAD_REQUEST)?;
     drop(db);
-    create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
+    let mut response = create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))?;
+    *response.status_mut() = StatusCode::FOUND;
+    Ok(response)
 }
 fn first_run_needed(state: &AppState) -> Result<bool, StatusCode> {
     let db = pool(state)?;

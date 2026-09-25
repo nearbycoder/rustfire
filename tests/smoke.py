@@ -730,7 +730,7 @@ def main():
             assert code == 200 and "data-controller='auto-submit'" in page and "name='_method' value='put'" in page
             transfer_csrf = CSRF[moved]
             code, _, _ = request(moved, base, transfer, {}, method="PUT")
-            assert code == 303, code
+            assert code == 302, code
             assert request(moved, base, "/rooms/1")[0] == 200
             code, _, payload = request(member, base, "/rooms/1/messages", {"message[body]": "ban removes this message"}, headers={"Accept": "application/json"})
             assert code == 201
