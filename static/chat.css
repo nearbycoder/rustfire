@@ -62,6 +62,24 @@ body:has(.app-shell)>header { display: none; }
 .sidebar__tools .sidebar__tool:last-child img { width: 20px; height: 20px; }
 .sidebar__toggle { display: none; }
 @media (prefers-color-scheme: dark) { .sidebar .colorize--black,.sidebar .rooms__new-btn img,.sidebar__tools .sidebar__tool:last-child img,.sidebar__toggle img { filter: invert(1); } }
+#direct_rooms_control .directs--new { display: flex; flex-direction: column; align-items: stretch; height: auto; min-height: 88px; gap: 2px; overflow: visible; padding: 16px 13.3px 8px; }
+#direct_rooms_control .directs--new form { display: flex; align-items: flex-start; width: 100%; gap: 8px; margin: 0; }
+#direct_rooms_control .directs--new form > .btn { display: grid; flex: none; place-items: center; width: 42px; height: 42px; padding: 0; border: 1px solid var(--chat-border); border-radius: 50%; background: var(--chat-bg); }
+#direct_rooms_control .directs--new form > .btn img { width: 20px; height: 20px; }
+#direct_rooms_control .directs--new form > .btn--reversed { background: var(--chat-pill); }
+#direct_rooms_control .directs--new form > .btn--reversed img { filter: invert(1); }
+#direct_rooms_control .autocomplete__container { position: relative; flex: 1; min-width: 0; padding: 2px 6px; border: 1px solid var(--chat-border); border-radius: 9px; background: var(--chat-bg); }
+#direct_rooms_control .autocomplete__container > .autocomplete__input { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 36px; }
+#direct_rooms_control .autocomplete__container input[data-autocomplete-target="input"] { flex: 1; width: 70px; min-width: 70px; padding: 5px; border: 0; outline: 0; background: transparent; color: var(--chat-text); }
+#direct_rooms_control .autocomplete__pill { display: inline-flex; align-items: center; max-width: 100%; gap: 4px; padding: 3px 5px; border-radius: 16px; background: var(--chat-bubble); font-size: 12px; }
+#direct_rooms_control .autocomplete__pill > img { width: 20px; height: 20px; border-radius: 50%; }
+#direct_rooms_control .autocomplete__pill > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#direct_rooms_control .autocomplete__pill > button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; background: transparent; }
+#direct_rooms_control .autocomplete__pill > button img { width: 16px; height: 16px; }
+#direct_rooms_control .ping-suggestions { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; right: 0; max-height: 220px; overflow-y: auto; box-shadow: 0 8px 20px #0004; }
+#direct_rooms_control .ping-suggestions[hidden] { display: none; }
+#direct_rooms_control .directs--new > span { align-self: center; color: var(--chat-muted); font-size: 12px; }
+@media (prefers-color-scheme: dark) { #direct_rooms_control .directs--new form > .btn img { filter: invert(1); } #direct_rooms_control .directs--new form > .btn--reversed img { filter: none; } }
 .chat { position: relative; grid-column: 1; grid-row: 1; height: 100%; min-height: 0; overflow: hidden; background: var(--chat-bg); }
 .return-to-latest { position: absolute; z-index: 3; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 9px 15px; border: 1px solid var(--chat-border); border-radius: 999px; background: var(--chat-bg); color: var(--chat-text); box-shadow: 0 4px 16px #0002; }
 .return-to-latest[hidden] { display: none; }

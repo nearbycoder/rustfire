@@ -53,6 +53,7 @@ def run(port, cookie, csrf, capture_dir):
         results = []
         placeholder_counts = []
         _, _, initial_sidebar = request(port, "/users/me/sidebar", cookie)
+        _, _, new_ping_page = request(port, "/rooms/directs/new", cookie)
         placeholder_counts.append(count_placeholders(initial_sidebar))
         placeholder_users = [placeholder_ids(initial_sidebar)]
         placeholder_html = [placeholder_fragments(initial_sidebar)]
@@ -73,7 +74,7 @@ def run(port, cookie, csrf, capture_dir):
         received = json.loads(output.strip().splitlines()[-1])
         assert received == {"received": 4, "unexpected": 0, "ids": [2, 3, 4, 5]}, received
         streams = [(capture_dir / f"{room_id}.html").read_text() for room_id in (2, 3, 4, 5)]
-        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages
+        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page
     finally:
         if process.poll() is None:
             process.kill()
@@ -103,8 +104,9 @@ def normalized_placeholders(groups):
 
 
 class SidebarTree(HTMLParser):
-    def __init__(self):
+    def __init__(self, frame_id):
         super().__init__()
+        self.frame_id = frame_id
         self.active = False
         self.depth = 0
         self.events = []
@@ -112,7 +114,7 @@ class SidebarTree(HTMLParser):
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
         if not self.active:
-            if tag != "turbo-frame" or values.get("id") != "user_sidebar":
+            if tag != "turbo-frame" or values.get("id") != self.frame_id:
                 return
             self.active = True
             self.depth = 1
@@ -136,10 +138,10 @@ class SidebarTree(HTMLParser):
             self.events.append(("text", " ".join(value.split())))
 
 
-def sidebar_tree(page):
-    parser = SidebarTree()
+def frame_tree(page, frame_id):
+    parser = SidebarTree(frame_id)
     parser.feed(page)
-    assert parser.events and parser.depth == 0, "User sidebar frame missing or unclosed"
+    assert parser.events and parser.depth == 0, f"{frame_id} frame missing or unclosed"
     return parser.events
 
 
@@ -164,7 +166,7 @@ def main():
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
-            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
+            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
         finally:
             stop_server(rust)
 
@@ -175,7 +177,7 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars = run(camp_port, cookie, csrf, temp / "camp-streams")
+            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping = run(camp_port, cookie, csrf, temp / "camp-streams")
         finally:
             if camp is not None:
                 stop_server(camp)
@@ -194,6 +196,8 @@ def main():
             for index, (rust_sidebar, camp_sidebar) in enumerate(zip(rust_sidebars, camp_sidebars)):
                 (args.sample_dir / f"rustfire-sidebar-{index}.html").write_text(rust_sidebar)
                 (args.sample_dir / f"campfire-sidebar-{index}.html").write_text(camp_sidebar)
+            (args.sample_dir / "rustfire-new-ping.html").write_text(rust_new_ping)
+            (args.sample_dir / "campfire-new-ping.html").write_text(camp_new_ping)
         for index, (rust_link, camp_link) in enumerate(zip(rust_links, camp_links), 2):
             assert normalized(rust_link) == normalized(camp_link), f"Direct room {index} markup differs; use --sample-dir to inspect"
             assert normalized(rust_streams[index - 2]) == normalized(camp_streams[index - 2]), f"Direct room {index} Turbo event differs; use --sample-dir to inspect"
@@ -203,8 +207,9 @@ def main():
         assert [len(group) for group in camp_placeholder_html] == camp_placeholders
         assert normalized_placeholders(rust_placeholder_html) == normalized_placeholders(camp_placeholder_html), "Direct placeholder markup differs; use --sample-dir to inspect"
         for index, (rust_sidebar, camp_sidebar) in enumerate(zip(rust_sidebars, camp_sidebars)):
-            assert sidebar_tree(rust_sidebar) == sidebar_tree(camp_sidebar), f"Sidebar frame differs after {index} direct rooms; use --sample-dir to inspect"
-        print("PASS paired direct links, Turbo events, 80 shortcut forms, and five sidebar frames; only room epoch milliseconds and form CSRF tokens normalized")
+            assert frame_tree(rust_sidebar, "user_sidebar") == frame_tree(camp_sidebar, "user_sidebar"), f"Sidebar frame differs after {index} direct rooms; use --sample-dir to inspect"
+        assert frame_tree(rust_new_ping, "direct_rooms_control") == frame_tree(camp_new_ping, "direct_rooms_control"), "New-ping frame differs; use --sample-dir to inspect"
+        print("PASS paired direct links, Turbo events, 80 shortcut forms, five sidebar frames, and new-ping frame; only room epoch milliseconds and form CSRF tokens normalized")
 
 
 if __name__ == "__main__":

@@ -66,27 +66,37 @@ document.querySelectorAll('[data-controller~="upload-preview"]').forEach(control
   });
   window.addEventListener('pagehide',()=>{if(objectUrl)URL.revokeObjectURL(objectUrl)},{once:true});
 });
-const pingForm=document.getElementById('ping-form');
-if(pingForm){
-  const input=document.getElementById('ping-search');
-  const selectedBox=document.getElementById('ping-selected');
-  const suggestionBox=document.getElementById('ping-suggestions');
+function initPingForm(){
+  const pingForm=document.querySelector('#direct_rooms_control form[action="/rooms/directs"]');
+  if(!pingForm||pingForm.dataset.initialized)return;
+  pingForm.dataset.initialized='true';
+  const input=pingForm.querySelector('[data-autocomplete-target="input"]');
+  const select=pingForm.querySelector('[data-autocomplete-target="select"]');
+  const template=pingForm.querySelector('#autocompletable-user');
+  const pillContainer=input?.parentElement;
+  if(!input||!select||!template||!pillContainer)return;
+  const suggestionBox=document.createElement('div');
+  suggestionBox.className='ping-suggestions';suggestionBox.id='ping-suggestions';suggestionBox.setAttribute('role','listbox');suggestionBox.hidden=true;
+  pingForm.querySelector('.autocomplete__container')?.append(suggestionBox);
+  input.setAttribute('role','combobox');input.setAttribute('aria-autocomplete','list');input.setAttribute('aria-controls','ping-suggestions');input.setAttribute('aria-expanded','false');
   const selected=new Map();
   let options=[],active=0,generation=0,timer;
   const hide=()=>{options=[];suggestionBox.replaceChildren();suggestionBox.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');};
   const markActive=()=>{[...suggestionBox.children].forEach((button,index)=>button.setAttribute('aria-selected',String(index===active)));input.setAttribute('aria-activedescendant',`ping-option-${active}`);};
   const renderSelected=()=>{
-    selectedBox.replaceChildren();
-    for(const [id,name] of selected){
-      const pill=document.createElement('span');pill.className='ping-pill';
-      const hidden=document.createElement('input');hidden.type='hidden';hidden.name='user_ids[]';hidden.value=String(id);
-      const label=document.createElement('span');label.textContent=name;
-      const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.setAttribute('aria-label',`Remove ${name}`);remove.addEventListener('click',()=>{selected.delete(id);renderSelected();input.focus();});
-      pill.append(hidden,label,remove);selectedBox.append(pill);
+    select.replaceChildren();pillContainer.querySelectorAll(':scope > .autocomplete__pill').forEach(pill=>pill.remove());
+    for(const [id,person] of selected){
+      const option=document.createElement('option');option.value=String(id);option.selected=true;option.textContent=person.name;select.append(option);
+      const pill=template.content.firstElementChild.cloneNode(true);pill.dataset.value=String(id);
+      pill.querySelector('[data-content="avatar"]').src=person.avatar_url;
+      pill.querySelector('[data-content="label"]').textContent=person.name;
+      pill.querySelector('[data-content="screenReaderLabel"]').textContent=person.name;
+      const remove=pill.querySelector('button');remove.dataset.value=String(id);remove.addEventListener('click',()=>{selected.delete(id);renderSelected();input.focus();});
+      pillContainer.insertBefore(pill,input);
     }
-    input.required=!selected.size;
+    select.required=false;input.required=!selected.size;
   };
-  const choose=person=>{selected.set(person.value,person.name);renderSelected();input.value='';input.setCustomValidity('');generation++;clearTimeout(timer);hide();input.focus();};
+  const choose=person=>{selected.set(person.value,person);renderSelected();input.value='';input.setCustomValidity('');generation++;clearTimeout(timer);hide();input.focus();};
   const search=()=>{
     const current=++generation;clearTimeout(timer);input.setCustomValidity('');
     timer=setTimeout(async()=>{
@@ -108,7 +118,7 @@ if(pingForm){
   input.addEventListener('focus',search);
   input.addEventListener('input',search);
   input.addEventListener('keydown',event=>{
-    if(event.key==='Escape'){generation++;clearTimeout(timer);hide();return;}
+    if(event.key==='Escape'){event.preventDefault();pingForm.querySelector('[data-form-target="cancel"]')?.click();return;}
     if(event.key==='Backspace'&&!input.value&&selected.size){selected.delete([...selected.keys()].at(-1));renderSelected();return;}
     if(suggestionBox.hidden||!options.length)return;
     if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();active=(active+(event.key==='ArrowDown'?1:-1)+options.length)%options.length;markActive();}
@@ -116,8 +126,18 @@ if(pingForm){
   });
   input.addEventListener('blur',()=>setTimeout(()=>{if(!suggestionBox.contains(document.activeElement))hide();},150));
   pingForm.addEventListener('submit',event=>{if(!selected.size){event.preventDefault();input.setCustomValidity('Choose a person from the list');input.reportValidity();input.focus();}});
+  renderSelected();input.focus();
 }
+initPingForm();
 const chat = document.querySelector('.chat');
+if(!chat){
+  document.addEventListener('click',event=>{
+    if(event.target.closest('#direct_rooms_control [data-form-target="cancel"]')){
+      event.preventDefault();
+      location.href='/';
+    }
+  });
+}
 if (chat) {
   const roomId = Number(chat.dataset.roomId);
   const messages = chat.querySelector('.messages');
@@ -266,6 +286,23 @@ if (chat) {
     }catch(error){console.error('Could not refresh room list',error)}
     finally{sidebarRefreshPending=false;if(sidebarRefreshAgain){sidebarRefreshAgain=false;refreshSidebar()}}
   }
+  document.addEventListener('click',async event=>{
+    const newPing=event.target.closest('.sidebar .direct__new');
+    if(newPing){
+      event.preventDefault();
+      try{
+        const response=await fetch(newPing.href,{headers:{'Turbo-Frame':'direct_rooms_control'}});
+        if(!response.ok)throw Error(`Ping form returned ${response.status}`);
+        const frame=new DOMParser().parseFromString(await response.text(),'text/html').querySelector('#direct_rooms_control');
+        if(!frame)throw Error('Ping form frame missing');
+        document.querySelector('.sidebar #direct_rooms_control')?.replaceWith(frame);
+        initPingForm();
+      }catch(error){console.error('Could not open ping form',error);location.href=newPing.href}
+      return;
+    }
+    const cancelPing=event.target.closest('.sidebar #direct_rooms_control [data-form-target="cancel"]');
+    if(cancelPing){event.preventDefault();await refreshSidebar();}
+  });
   function updateDirectRoom(data){
     const nav=document.getElementById('direct_rooms');
     if(!nav||!Number.isInteger(data?.room_id)||typeof data.html!=='string')return false;

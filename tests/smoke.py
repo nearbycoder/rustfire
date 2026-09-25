@@ -399,8 +399,13 @@ def main():
             assert request(admin, base, "/rooms/2")[1].endswith("/rooms/1")
             assert request(member, base, "/rooms/2")[0] == 200
             code, _, ping_page = request(admin, base, "/rooms/directs/new")
-            assert code == 200 and "id='ping-form'" in ping_page and "id='ping-suggestions'" in ping_page
+            assert code == 200 and 'id="direct_rooms_control"' in ping_page
+            assert 'name="user_ids[]" data-autocomplete-target="select"' in ping_page
+            assert 'name="rooms_direct[user_ids_input]"' in ping_page
             assert "type='checkbox' name='user_ids'" not in ping_page
+            code, _, ping_frame = request(admin, base, "/rooms/directs/new", headers={"Turbo-Frame": "direct_rooms_control"})
+            assert code == 200 and ping_frame.startswith('<turbo-frame id="direct_rooms_control"')
+            assert '<html' not in ping_frame
             admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
             assert 'action="/rooms/directs?user_ids%5B%5D=2"' in admin_sidebar
             assert f'name="authenticity_token" value="{CSRF[admin]}"' in admin_sidebar
