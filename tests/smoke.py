@@ -282,6 +282,9 @@ def main():
                 assert check_db.execute("SELECT user_id FROM memberships WHERE room_id=2").fetchall() == [(2,)]
             assert request(admin, base, "/rooms/2")[1].endswith("/rooms/1")
             assert request(member, base, "/rooms/2")[0] == 200
+            code, _, ping_page = request(admin, base, "/rooms/directs/new")
+            assert code == 200 and "id='ping-form'" in ping_page and "id='ping-suggestions'" in ping_page
+            assert "type='checkbox' name='user_ids'" not in ping_page
             admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
             assert "data-ping-user-id='2'" in admin_sidebar
             assert f"name='authenticity_token' value='{CSRF[admin]}'" in admin_sidebar

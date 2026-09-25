@@ -2,6 +2,57 @@ document.addEventListener('trix-file-accept',event=>event.preventDefault());
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-datetime]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;node.textContent=new Intl.DateTimeFormat(undefined,{dateStyle:'short',timeStyle:'short'}).format(date);node.title=new Intl.DateTimeFormat(undefined,{dateStyle:'short',timeStyle:'short'}).format(date)});
 formatLocalTimes();
+const pingForm=document.getElementById('ping-form');
+if(pingForm){
+  const input=document.getElementById('ping-search');
+  const selectedBox=document.getElementById('ping-selected');
+  const suggestionBox=document.getElementById('ping-suggestions');
+  const selected=new Map();
+  let options=[],active=0,generation=0,timer;
+  const hide=()=>{options=[];suggestionBox.replaceChildren();suggestionBox.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');};
+  const markActive=()=>{[...suggestionBox.children].forEach((button,index)=>button.setAttribute('aria-selected',String(index===active)));input.setAttribute('aria-activedescendant',`ping-option-${active}`);};
+  const renderSelected=()=>{
+    selectedBox.replaceChildren();
+    for(const [id,name] of selected){
+      const pill=document.createElement('span');pill.className='ping-pill';
+      const hidden=document.createElement('input');hidden.type='hidden';hidden.name='user_ids[]';hidden.value=String(id);
+      const label=document.createElement('span');label.textContent=name;
+      const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.setAttribute('aria-label',`Remove ${name}`);remove.addEventListener('click',()=>{selected.delete(id);renderSelected();input.focus();});
+      pill.append(hidden,label,remove);selectedBox.append(pill);
+    }
+    input.required=!selected.size;
+  };
+  const choose=person=>{selected.set(person.id,person.name);renderSelected();input.value='';input.setCustomValidity('');generation++;clearTimeout(timer);hide();input.focus();};
+  const search=()=>{
+    const current=++generation;clearTimeout(timer);input.setCustomValidity('');
+    timer=setTimeout(async()=>{
+      try{
+        const response=await fetch(`/autocompletable/users?query=${encodeURIComponent(input.value.trim())}`);
+        if(!response.ok||current!==generation)return;
+        const people=await response.json();if(current!==generation)return;
+        options=people.filter(person=>!selected.has(person.id));active=0;suggestionBox.replaceChildren();
+        for(const [index,person] of options.entries()){
+          const button=document.createElement('button');button.type='button';button.id=`ping-option-${index}`;button.setAttribute('role','option');button.className='ping-suggestion';
+          const avatar=document.createElement('img');avatar.src=`/users/${person.id}/avatar`;avatar.alt='';
+          const label=document.createElement('span');label.textContent=person.name;button.append(avatar,label);
+          button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>choose(person));suggestionBox.append(button);
+        }
+        suggestionBox.hidden=!options.length;input.setAttribute('aria-expanded',String(!!options.length));if(options.length)markActive();
+      }catch{hide()}
+    },120);
+  };
+  input.addEventListener('focus',search);
+  input.addEventListener('input',search);
+  input.addEventListener('keydown',event=>{
+    if(event.key==='Escape'){generation++;clearTimeout(timer);hide();return;}
+    if(event.key==='Backspace'&&!input.value&&selected.size){selected.delete([...selected.keys()].at(-1));renderSelected();return;}
+    if(suggestionBox.hidden||!options.length)return;
+    if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();active=(active+(event.key==='ArrowDown'?1:-1)+options.length)%options.length;markActive();}
+    if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();choose(options[active]);}
+  });
+  input.addEventListener('blur',()=>setTimeout(()=>{if(!suggestionBox.contains(document.activeElement))hide();},150));
+  pingForm.addEventListener('submit',event=>{if(!selected.size){event.preventDefault();input.setCustomValidity('Choose a person from the list');input.reportValidity();input.focus();}});
+}
 const chat = document.querySelector('.chat');
 if (chat) {
   const roomId = Number(chat.dataset.roomId);

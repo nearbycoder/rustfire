@@ -3388,23 +3388,9 @@ async fn room_delete(
 }
 async fn direct_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
-    let db = pool(&s)?;
-    let mut q = db
-        .prepare("SELECT id,name FROM users WHERE status=0 AND id!=?1 ORDER BY lower(name)")
-        .map_err(db_err)?;
-    let users = q
-        .query_map([u.id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })
-        .map_err(db_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    let choices=users.iter().map(|(id,name)|format!("<label class='check'><input type='checkbox' name='user_ids' value='{id}'>{}</label>",esc(name))).collect::<String>();
     Ok(render(
         "New ping",
-        &format!(
-            "<section class='form-card'><h1>New ping</h1><form method='post' action='/rooms/directs'>{choices}<button class='button'>Start ping</button></form></section>"
-        ),
+        "<section class='form-card'><h1>New ping</h1><form id='ping-form' method='post' action='/rooms/directs'><label for='ping-search'>People to ping</label><div id='ping-selected' class='ping-selected' aria-live='polite'></div><input id='ping-search' name='user_ids_input' role='combobox' aria-autocomplete='list' aria-controls='ping-suggestions' aria-expanded='false' autocomplete='off' autocorrect='off' placeholder='Type a name' required><div id='ping-suggestions' class='ping-suggestions' role='listbox' aria-label='People' hidden></div><button class='button'>Start ping</button></form></section>",
         Some(&u),
     ))
 }
