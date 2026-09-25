@@ -3885,7 +3885,11 @@ async fn room_refresh(
         for message in &updated_messages {
             html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(&s, message, Some(&headers))));
         }
-        return Ok(([(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")], html).into_response());
+        return Ok((
+            [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")],
+            csrf_forms(&html, u.csrf_token.as_deref().unwrap_or("")),
+        )
+            .into_response());
     }
     let after = q.after.unwrap_or(0).max(0);
     let mut messages = messages_after_position(&s, rid, after, 101)?;

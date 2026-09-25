@@ -1,7 +1,7 @@
-"""Check room-refresh message selection against pinned Campfire on matched fixtures.
+"""Check room-refresh selection and parsed markup against pinned Campfire.
 
-Requires a release build, pinned Campfire checkout, its Ruby bundle, and Redis.
-The rendered message markup still differs, so latency is endpoint-only evidence.
+Requires a release build, pinned Campfire checkout, and its Ruby bundle.
+The script starts isolated Redis for Campfire and uses disposable databases.
 """
 
 import argparse
@@ -16,6 +16,8 @@ import tempfile
 import time
 
 from direct_lookup import ROOT, free_port, p95, start_server, stop_server
+from message_markup import check_message_markup
+from paired_banned_content import start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 
 
@@ -97,12 +99,13 @@ def measure(port, cookie, iterations):
                 samples.append(elapsed)
     finally:
         connection.close()
-    return statistics.median(samples), p95(samples), len(body.encode())
+    return statistics.median(samples), p95(samples), len(body.encode()), body
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iterations", type=int, default=30)
+    parser.add_argument("--sample-dir", type=pathlib.Path, help="save each app's first Turbo refresh response")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
@@ -117,28 +120,46 @@ def main():
     with tempfile.TemporaryDirectory(prefix="paired-room-refresh-") as scratch:
         temp = pathlib.Path(scratch)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
-        rust_port, camp_port = free_port(), free_port()
+        rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
+        camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         seed_messages(rust_db, camp_db)
-        rust = start_server(rust_db, rust_port)
+        with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust_db_conn:
+            people = camp.execute("SELECT id,name,updated_at FROM users WHERE id IN(1,2)").fetchall()
+            rust_db_conn.executemany("UPDATE users SET name=?2,updated_at=?3 WHERE id=?1", people)
+            room_name = camp.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]
+            rust_db_conn.execute("UPDATE rooms SET name=? WHERE id=1", [room_name])
+        redis, redis_log = start_redis(temp, redis_port)
+        rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
         try:
             rust_result = measure(rust_port, "session_token=benchmark-session", args.iterations)
         finally:
             stop_server(rust)
-        with open(temp / "puma.log", "w+") as log:
-            camp = subprocess.Popen([str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=repo, env=camp_env, stdout=log, stderr=log)
-            try:
-                wait_for_server(camp_port, camp)
-                cookie, _ = login_campfire(camp_port)
-                camp_result = measure(camp_port, cookie, args.iterations)
-            except Exception:
-                log.flush()
-                log.seek(0)
-                print(log.read()[-2000:])
-                raise
-            finally:
-                stop_server(camp)
+        try:
+            with open(temp / "puma.log", "w+") as log:
+                camp = subprocess.Popen([str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=repo, env=camp_env, stdout=log, stderr=log)
+                try:
+                    wait_for_server(camp_port, camp)
+                    cookie, _ = login_campfire(camp_port)
+                    camp_result = measure(camp_port, cookie, args.iterations)
+                except Exception:
+                    log.flush()
+                    log.seek(0)
+                    print(log.read()[-2000:])
+                    raise
+                finally:
+                    stop_server(camp)
+        finally:
+            redis.terminate()
+            redis.wait(timeout=10)
+            redis_log.close()
+        if args.sample_dir:
+            args.sample_dir.mkdir(parents=True, exist_ok=True)
+            (args.sample_dir / "rustfire-refresh.html").write_text(rust_result[3])
+            (args.sample_dir / "campfire-refresh.html").write_text(camp_result[3])
+        check_message_markup(camp_result[3].encode(), rust_result[3].encode(), 2)
+        print("PASS paired reconnect selection and parsed Turbo response markup")
         print(f"rustfire median/p95_ms={rust_result[0]:.3f}/{rust_result[1]:.3f} bytes={rust_result[2]}")
         print(f"campfire median/p95_ms={camp_result[0]:.3f}/{camp_result[1]:.3f} bytes={camp_result[2]}")
 

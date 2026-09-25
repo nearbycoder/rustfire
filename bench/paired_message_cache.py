@@ -6,7 +6,6 @@ Requires the pinned Campfire checkout, bundled Ruby, and a release Rustfire buil
 import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
-from html.parser import HTMLParser
 import http.client
 import json
 import pathlib
@@ -16,6 +15,7 @@ import subprocess
 import tempfile
 
 from direct_lookup import ROOT, free_port, start_server, stop_server
+from message_markup import check_message_markup
 from paired_banned_content import REPOSITORY, RUBY, BUNDLE, REVISION, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_room_refresh import seed_messages
@@ -37,56 +37,6 @@ def fetch(port, cookie, path, conditional=None):
 
 def get_header(headers, name):
     return next((value for key, value in headers.items() if key.lower() == name.lower()), None)
-
-
-class MessageMarkup(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.events = []
-        self.csrf_values = []
-
-    def handle_startendtag(self, tag, attrs):
-        self.handle_starttag(tag, attrs)
-
-    def handle_starttag(self, tag, attrs):
-        attributes = dict(attrs)
-        if tag == "input" and attributes.get("name") == "authenticity_token":
-            self.csrf_values.append(attributes.get("value"))
-            attributes["value"] = "<csrf>"
-        if tag == "img" and (attributes.get("src") or "").startswith("/users/"):
-            attributes["src"] = "<signed-avatar>"
-        if "data-copy-to-clipboard-content-value" in attributes:
-            attributes["data-copy-to-clipboard-content-value"] = re.sub(
-                r"^https?://[^/]+", "<origin>", attributes["data-copy-to-clipboard-content-value"]
-            )
-        if attributes.get("title") in ("Test Admin", "User 1"):
-            attributes["title"] = "<creator>"
-        self.events.append(("start", tag, tuple(sorted(attributes.items()))))
-
-    def handle_endtag(self, tag):
-        if tag not in ("img", "input"):
-            self.events.append(("end", tag))
-
-    def handle_data(self, data):
-        value = " ".join(data.split())
-        if value:
-            if value in ("Test Admin", "User 1"):
-                value = "<creator>"
-            elif value in ("All Talk", "Campfire"):
-                value = "<room>"
-            self.events.append(("text", value))
-
-
-def check_message_markup(camp_body, rust_body, messages):
-    camp, rust = MessageMarkup(), MessageMarkup()
-    camp.feed(camp_body.decode())
-    rust.feed(rust_body.decode())
-    assert len(camp.csrf_values) == len(rust.csrf_values) == messages * 8, (len(camp.csrf_values), len(rust.csrf_values))
-    assert all(camp.csrf_values) and set(rust.csrf_values) == {"benchmark-csrf"}
-    assert camp.events == rust.events, next(
-        ((index, left, right) for index, (left, right) in enumerate(zip(camp.events, rust.events)) if left != right),
-        (len(camp.events), len(rust.events)),
-    )
 
 
 def update_timestamp(database, rails, timestamp):
