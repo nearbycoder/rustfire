@@ -319,4 +319,16 @@ Rustfire's visible account forms now submit Campfire's nested account fields to 
 
 With `--users 1100`, the pinned Campfire `/account/edit` response rendered **all 1,100 users**, then included a lazy frame pointing to page 2. Its `/account/users.turbo_stream` endpoint returned 500 users on pages 1 and 2, 100 on page 3, and no users on page 4. Pages 1 and 2 replaced `next_page_container` and appended a new lazy frame; page 3 only replaced the frame. Rustfire now returns the same user IDs in the same order and the same stream action and next-page sequence. Browser checks on both apps showed 1,100 entries initially, 1,600 after scrolling to page 2, and 1,700 after page 3; the Rustfire forms delivered by the stream carried CSRF tokens.
 
-The initial all-user rendering is a behavior of the pinned source, despite its separate 500-user page endpoint. Loading later pages duplicates those users in the page. The apps' user-row HTML remains different and this behavior does not establish an account-page speed or scale advantage; a future optimization must preserve the intended user experience while the full parity target is evaluated.
+The initial all-user rendering is a behavior of the pinned source, despite its separate 500-user page endpoint. Loading later pages duplicates those users in the page. Rustfire now matches the parsed initial roster and all four sampled Turbo Stream responses: ordered elements, attribute names and values, and non-whitespace text were equal after normalizing per-session CSRF token values. The surrounding account page, CSS, serialization whitespace, and other user workflows still differ.
+
+### Matched account user-page read trial
+
+With the same 1,100-user fixture and signed avatar URLs, `bench/paired_account_users.py --users 1100 --clients 1 8 32 --seconds 2 --campfire-workers 22` ran each release server separately on the same 32-logical-CPU host. Every client used one keep-alive connection and two fully parsed warmup responses. Measured responses had status 200, 500 rows, and the expected first and last users; no errors occurred. Rustfire's serialized page-2 response was **874,855 bytes** and Campfire's was **1,003,862 bytes**. The difference includes formatting and masked CSRF tokens; the parsed DOM matched.
+
+| Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 278 | 7.8 | 4.19 ms | 193.70 ms |
+| 8 | 1,484 | 55.1 | 7.42 ms | 210.43 ms |
+| 32 | 1,589 | 88.9 | 29.94 ms | 650.26 ms |
+
+This is one short local read sweep, with the load generator sharing CPU and network stack with both servers. It supports a speed advantage for this aligned page response under these conditions. CPU and memory were not recorded, and it does not establish sustained capacity or a whole-app speed or scale advantage at full feature parity.

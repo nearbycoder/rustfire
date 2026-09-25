@@ -4627,47 +4627,53 @@ async fn search_clear(State(s): State<Arc<AppState>>, headers: HeaderMap) -> App
 }
 fn account_user_item(
     u: &User,
+    avatar_key: &[u8],
     id: i64,
     name: &str,
-    email: Option<&str>,
     role: i64,
     status: i64,
-) -> String {
+    updated_at: &str,
+) -> Result<String, StatusCode> {
+    let avatar = avatar_path(avatar_key, id, updated_at)?;
+    let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
     let controls = if is_admin(u) && status == 0 {
-        let role_control = if id == u.id {
-            "<span aria-label='Role: Administrator'>Administrator</span>".to_string()
+        let disabled = if id == u.id {
+            " disabled=\"disabled\""
         } else {
-            format!(
-                "<form class='inline-form' method='post' action='/account/users/{id}' data-auto-submit-role><input type='hidden' name='_method' value='patch'><select name='user[role]' aria-label='Role for {}'><option value='member' {}>Member</option><option value='administrator' {}>Administrator</option></select><button>Save</button></form>",
-                esc(name),
-                if role == 0 { "selected" } else { "" },
-                if role == 1 { "selected" } else { "" }
-            )
+            ""
         };
+        let checked = if role == 1 {
+            " checked=\"checked\""
+        } else {
+            ""
+        };
+        let role_name = if role == 1 { "Administrator" } else { "Member" };
+        let role_control = format!(
+            "<form data-controller=\"form\" action=\"/account/users/{id}\" accept-charset=\"UTF-8\" method=\"post\"><input type=\"hidden\" name=\"_method\" value=\"patch\" /><input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /><label class=\"btn txt-small flex-item-no-shrink\" for=\"role_user_{id}\"><span class=\"for-screen-reader\">Role: {role_name}</span><img aria-hidden=\"true\" src=\"/assets/crown-00d190cb.svg\" width=\"20\" height=\"20\" /><input name=\"user[role]\"{disabled} type=\"hidden\" value=\"member\" /><input data-action=\"form#submit\" hidden=\"hidden\" id=\"role_user_{id}\"{disabled} type=\"checkbox\" value=\"administrator\"{checked} name=\"user[role]\" /></label></form>"
+        );
         let deactivate_control = if id == u.id {
-            "<a href='/users/me/profile'>My settings</a>".to_string()
+            "".to_string()
         } else {
             format!(
-                "<form class='inline-form' method='post' action='/account/users/{id}'><input type='hidden' name='_method' value='delete'><button class='danger' aria-label='Delete {}'>Delete</button></form>",
-                esc(name)
+                "<form class=\"button_to\" method=\"post\" action=\"/account/users/{id}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn txt-small flex-item-no-shrink btn--negative\" data-turbo-confirm=\"Are you sure you want to permanently remove this person from the account? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/minus-b31a1093.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Delete {}</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /></form>",
+                esc(name),
             )
         };
         format!("{role_control}{deactivate_control}")
     } else {
         String::new()
     };
-    format!(
-        "<li><a href='/users/{id}'><strong>{}</strong></a> · {} {} {controls}</li>",
+    let profile = if id == u.id {
+        "<a class=\"btn txt-small flex-item-no-shrink\" target=\"_top\" href=\"/users/me/profile\"><img aria-hidden=\"true\" src=\"/assets/pencil-cf9d28aa.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">My settings</span></a>"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "<li class=\"flex align-center gap margin-none {}\"><figure class=\"avatar flex-item-no-shrink\" style=\"--avatar-size: 3.75ch;\"><a title=\"{}\" class=\"btn avatar\" data-turbo-frame=\"_top\" href=\"/users/{id}\"><img aria-hidden=\"true\" loading=\"lazy\" src=\"{avatar}\" width=\"48\" height=\"48\" /></a></figure><div class=\"min-width\"><div class=\"overflow-ellipsis fill-shade\"><strong>{}</strong></div></div><hr class=\"separator\" aria-hidden=\"true\">{controls}{profile}</li>",
+        if status == 2 { "banned" } else { "" },
         esc(name),
-        esc(email.unwrap_or("")),
-        if status == 2 {
-            "(banned)"
-        } else if role == 1 {
-            "(admin)"
-        } else {
-            ""
-        }
-    )
+        esc(name),
+    ))
 }
 fn account_next_page_container(page: i64) -> String {
     format!(
@@ -4686,26 +4692,30 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
     let mut members = String::new();
     let mut total_users = 0;
     let mut q = db
-        .prepare("SELECT id,name,email_address,role,status FROM users WHERE status=0 OR (?1 AND status=2) ORDER BY lower(name)")
+        .prepare("SELECT id,name,role,status,updated_at FROM users WHERE status=0 OR (?1 AND status=2) ORDER BY lower(name)")
         .map_err(db_err)?;
     for row in q
         .query_map([is_admin(&u)], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(2)?,
                 r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
+                r.get::<_, String>(4)?,
             ))
         })
         .map_err(db_err)?
     {
-        let (id, n, email, role, status) = row.map_err(db_err)?;
+        let (id, n, role, status, updated_at) = row.map_err(db_err)?;
         if role == 2 {
             continue;
         }
         total_users += 1;
-        let item = account_user_item(&u, id, &n, email.as_deref(), role, status);
+        let key = s
+            .imported_avatar_signing_key
+            .as_deref()
+            .unwrap_or(&s.avatar_signing_key);
+        let item = account_user_item(&u, key, id, &n, role, status, &updated_at)?;
         if role == 1 {
             administrators.push_str(&item);
         } else {
@@ -4713,7 +4723,7 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         }
     }
     let divider = if !administrators.is_empty() && !members.is_empty() {
-        "<hr class=\"separator full-width\">"
+        "<hr class=\"separator full-width\" style=\"--border-style: solid\">"
     } else {
         ""
     };
@@ -4723,7 +4733,7 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         String::new()
     };
     let list = format!(
-        "<turbo-frame id='account_users'><ul class='people-list'>{administrators}</ul>{divider}<ul class='people-list'>{members}</ul>{next_page}</turbo-frame>"
+        "<menu class=\"flex flex-column gap margin-none pad\"><turbo-frame id=\"account_users\">{administrators}{divider}{members}{next_page}</turbo-frame></menu>"
     );
     let restricted: bool = db
         .query_row(
@@ -4787,7 +4797,7 @@ async fn account_users_index(
     let page_count = (total.saturating_add(499) / 500).max(1);
     let offset = page.saturating_sub(1).saturating_mul(500);
     let mut q = db
-        .prepare("SELECT id,name,email_address,role,status FROM users WHERE status=0 AND role!=2 ORDER BY lower(name) LIMIT 500 OFFSET ?1")
+        .prepare("SELECT id,name,role,status,updated_at FROM users WHERE status=0 AND role!=2 ORDER BY lower(name) LIMIT 500 OFFSET ?1")
         .map_err(db_err)?;
     let mut rows = String::new();
     for row in q
@@ -4795,24 +4805,28 @@ async fn account_users_index(
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(db_err)?
     {
-        let (id, name, email, role, status) = row.map_err(db_err)?;
+        let (id, name, role, status, updated_at) = row.map_err(db_err)?;
+        let key = s
+            .imported_avatar_signing_key
+            .as_deref()
+            .unwrap_or(&s.avatar_signing_key);
         rows.push_str(&account_user_item(
             &u,
+            key,
             id,
             &name,
-            email.as_deref(),
             role,
             status,
-        ));
+            &updated_at,
+        )?);
     }
-    let rows = csrf_forms(&rows, u.csrf_token.as_deref().unwrap_or(""));
     let next = if page != page_count {
         format!(
             "\n\n<turbo-stream action=\"append\" target=\"account_users\"><template>{}</template></turbo-stream>",

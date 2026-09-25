@@ -524,9 +524,13 @@ document.addEventListener('change',event=>{
   if(control instanceof HTMLInputElement){
     if(control.matches('form[data-auto-submit-file] input[type=file]')&&control.files?.length)control.form.requestSubmit();
     if(control.matches('form[data-auto-submit-switch] input[type=checkbox]'))control.form.requestSubmit();
+    if(control.matches('#account_users input[data-action="form#submit"][name="user[role]"]'))control.form.requestSubmit();
   }
-  if(control instanceof HTMLSelectElement&&control.matches('form[data-auto-submit-role] select'))control.form.requestSubmit();
 });
+document.addEventListener('submit',event=>{
+  const confirmation=event.target instanceof HTMLFormElement?event.target.querySelector('button[data-turbo-confirm]'):null;
+  if(confirmation&&!window.confirm(confirmation.dataset.turboConfirm))event.preventDefault();
+},true);
 document.addEventListener('submit',async event=>{
   const form=event.target;
   if(!(form instanceof HTMLFormElement)||new URL(form.action).pathname!=='/session/logout'||!('serviceWorker' in navigator))return;

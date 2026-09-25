@@ -388,12 +388,12 @@ def main():
             assert code == 302
             code, _, page = request(admin, base, "/account")
             assert code == 200 and "Team Fire" in page
-            roster = page.split("<turbo-frame id='account_users'>", 1)[1].split("</turbo-frame>", 1)[0]
-            assert roster.index("<strong>Admin</strong>") < roster.index('<hr class="separator full-width">') < roster.index("<strong>Member Two</strong>")
+            roster = page.split('<turbo-frame id="account_users">', 1)[1].split("</turbo-frame>", 1)[0]
+            assert roster.index("<strong>Admin</strong>") < roster.index('<hr class="separator full-width"') < roster.index("<strong>Member Two</strong>")
             code, _, users_stream = request(admin, base, "/account/users.turbo_stream?page=1")
             assert code == 200 and 'action="replace" target="next_page_container"' in users_stream
             assert 'action="append" target="account_users"' not in users_stream
-            assert "name='authenticity_token'" in users_stream
+            assert 'name="authenticity_token"' in users_stream
             assert "name='account[name]'" in page and "name='account[logo]'" in page
             assert "name='account[settings][restrict_room_creation_to_administrators]'" in page
             assert request(admin, base, "/account", {"_method": "patch", "account[name]": "Team Fire"}, method="POST")[0] == 200
