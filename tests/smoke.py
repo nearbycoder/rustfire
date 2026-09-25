@@ -282,6 +282,9 @@ def main():
                 assert check_db.execute("SELECT user_id FROM memberships WHERE room_id=2").fetchall() == [(2,)]
             assert request(admin, base, "/rooms/2")[1].endswith("/rooms/1")
             assert request(member, base, "/rooms/2")[0] == 200
+            admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
+            assert "data-ping-user-id='2'" in admin_sidebar
+            assert f"name='authenticity_token' value='{CSRF[admin]}'" in admin_sidebar
             second_admin = client()
             assert request(second_admin, base, "/session/new")[0] == 200
             assert request(second_admin, base, "/session", {"email_address": "admin@example.com", "password": "password123"})[0] == 200
@@ -290,6 +293,8 @@ def main():
             code, direct_url, _ = creations[0]
             assert creations[1][0] == 200 and creations[1][1] == direct_url, creations
             assert code == 200 and "/rooms/3" in direct_url
+            assert "data-ping-user-id='2'" not in request(admin, base, "/users/me/sidebar")[2]
+            assert "data-ping-user-id='1'" not in request(member, base, "/users/me/sidebar")[2]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM rooms WHERE type='Rooms::Direct'").fetchone() == (1,)
                 assert check_db.execute("SELECT member_ids FROM direct_room_sets WHERE room_id=3").fetchone() == ("1,2",)

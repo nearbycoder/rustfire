@@ -31,6 +31,12 @@ body:has(.app-shell)>header { display: none; }
 .sidebar nav { align-items: flex-start; gap: 9px; }
 .sidebar .room-link { display: inline-block; width: auto; max-width: 100%; padding: 9px 18px; border: 1px solid var(--chat-border); border-radius: 999px; font-size: 16px; line-height: 1.2; background: transparent; }
 .sidebar .room-link.active, .sidebar .room-link:hover { border-color: var(--chat-pill); background: var(--chat-pill); color: var(--chat-pill-text); }
+.direct-placeholders { display: flex; flex-wrap: nowrap; gap: 8px; max-width: 100%; overflow-x: auto; padding: 8px 0; }
+.direct-placeholders form { flex: none; margin: 0; }
+.direct-placeholder { display: grid; justify-items: center; gap: 3px; min-width: 55px; max-width: 90px; padding: 4px; border: 0; background: transparent; color: inherit; font-size: 12px; cursor: pointer; }
+.direct-placeholder img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; }
+.direct-placeholder span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.direct-placeholder:hover,.direct-placeholder:focus-visible { background: var(--chat-bubble); border-radius: 8px; }
 .sidebar-close { display: none; }
 .chat { position: relative; grid-column: 1; grid-row: 1; height: 100%; min-height: 0; overflow: hidden; background: var(--chat-bg); }
 .return-to-latest { position: absolute; z-index: 3; left: 50%; bottom: 96px; transform: translateX(-50%); padding: 9px 15px; border: 1px solid var(--chat-border); border-radius: 999px; background: var(--chat-bg); color: var(--chat-text); box-shadow: 0 4px 16px #0002; }
