@@ -121,6 +121,21 @@ def stream_structure(sample_file):
     return parser.tags, parser.attribute_keys, parser.attributes, parser.text
 
 
+def stable_message_attributes(attributes):
+    generated_times = {"data-message-timestamp", "data-message-updated-at", "data-sort-value", "datetime"}
+    return [(tag, tuple((key, value) for key, value in attrs if key not in generated_times)) for tag, attrs in attributes]
+
+
+def check_message_times(attributes, sample_file):
+    root = next((dict(attrs) for tag, attrs in attributes if tag == "div" and "data-message-timestamp" in dict(attrs)), None)
+    if root is None:
+        raise RuntimeError(f"Message stream lacks timestamp fields: {sample_file}")
+    created = int(root["data-message-timestamp"])
+    updated = int(root["data-message-updated-at"])
+    if int(root["data-sort-value"]) != created or updated < created:
+        raise RuntimeError(f"Message stream timestamps are inconsistent: {sample_file}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
@@ -163,6 +178,7 @@ def main():
         rust = start_server(rust_db, rust_port, {
             "RUSTFIRE_DISABLE_PUSH": "0", "RUSTFIRE_DISABLE_WEBHOOKS": "0",
             "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"],
+            "RUSTFIRE_PUBLIC_URL": "http://127.0.0.1",
         })
         try:
             rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html")
@@ -200,12 +216,18 @@ def main():
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
-            rust_tags, rust_attributes, _, _ = stream_structure(output_dir / "rustfire.html")
-            camp_tags, camp_attributes, _, _ = stream_structure(output_dir / "campfire.html")
+            rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
+            camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
             if rust_tags != camp_tags:
                 raise RuntimeError("Message stream tag structure differs from Campfire")
             if rust_attributes != camp_attributes:
                 raise RuntimeError("Message stream attribute keys differ from Campfire")
+            check_message_times(rust_values, output_dir / "rustfire.html")
+            check_message_times(camp_values, output_dir / "campfire.html")
+            if stable_message_attributes(rust_values) != stable_message_attributes(camp_values):
+                raise RuntimeError("Message stream static attribute values differ from Campfire")
+            if rust_text != camp_text:
+                raise RuntimeError("Message stream text differs from Campfire")
         elif args.operation == "boosts":
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")

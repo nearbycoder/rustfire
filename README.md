@@ -22,7 +22,7 @@ Configuration:
 - `RUSTFIRE_DB` — SQLite file, default `data/rustfire.db`
 - `RUSTFIRE_UPLOAD_DIR` — uploaded files, default `data/uploads`
 - `RUSTFIRE_SECURE_COOKIES` — set to `true` when serving over HTTPS
-- `RUSTFIRE_PUBLIC_URL` — public origin for invite and device sign-in links, for example `https://chat.example.com`; otherwise request Host and the secure-cookie setting determine the origin
+- `RUSTFIRE_PUBLIC_URL` — public origin for invite, device sign-in, and message copy links, for example `https://chat.example.com`; otherwise request Host and the secure-cookie setting determine the origin, with the bind address as fallback when no request is available
 - `RUSTFIRE_DISABLE_WEBHOOKS` — set to `true` to suppress outbound bot webhook delivery
 - `RUSTFIRE_DISABLE_PUSH` — set to `true` to suppress outbound Web Push delivery
 - `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid.

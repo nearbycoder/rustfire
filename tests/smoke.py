@@ -102,6 +102,7 @@ def main():
             code, _, page = request(admin, base, f"/rooms/1/@{message['id']}")
             assert code == 200 and "hello from smoke" in page and "data-at-message='1'" in page and "id='composer'" in page, code
             assert f"<span class='message__room'><a href='/rooms/1/@{message['id']}' target='_top' data-reply-target='link'>Campfire</a></span>" in page
+            assert f"data-copy-to-clipboard-content-value='{base}/rooms/1/@{message['id']}'" in page
             assert "custom-boost-form" not in page
             code, _, boost_frame = request(admin, base, f"/messages/{message['id']}/boosts/new", headers={"Turbo-Frame": "new_boost_message_test-1"})
             assert code == 200 and "<turbo-frame id='new_boost_message_test-1'>" in boost_frame and "class='custom-boost-form boost__form" in boost_frame

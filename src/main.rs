@@ -40,7 +40,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     io::SeekFrom,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -931,15 +931,34 @@ fn public_url(headers: &HeaderMap, path: &str) -> String {
             return format!("{base}{path}");
         }
     }
-    let host = headers
+    let request_host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .filter(|v| {
             !v.is_empty()
                 && v.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b".:-[]".contains(&b))
-        })
-        .unwrap_or("127.0.0.1:3000");
+        });
+    let fallback_host = if request_host.is_none() {
+        env::var("RUSTFIRE_ADDR")
+            .ok()
+            .and_then(|value| value.parse::<SocketAddr>().ok())
+            .map(|address| {
+                let ip = if address.ip().is_unspecified() {
+                    match address.ip() {
+                        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    }
+                } else {
+                    address.ip()
+                };
+                SocketAddr::new(ip, address.port()).to_string()
+            })
+            .unwrap_or_else(|| "127.0.0.1:3000".to_string())
+    } else {
+        String::new()
+    };
+    let host = request_host.unwrap_or(&fallback_host);
     let scheme = if secure_cookie_suffix().is_empty() {
         "http"
     } else {
@@ -2201,7 +2220,14 @@ fn message_presentation_html(m: &ChatMessage) -> String {
         esc(&m.client_message_id)
     )
 }
-fn message_html(s: &AppState, m: &ChatMessage) -> String {
+fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMap>) -> String {
+    let fallback_headers = HeaderMap::new();
+    let request_headers = request_headers.unwrap_or(&fallback_headers);
+    let copy_url = html_escape::encode_single_quoted_attribute(&public_url(
+        request_headers,
+        &format!("/rooms/{}/@{}", m.room_id, m.id),
+    ))
+    .into_owned();
     let created =
         message_timestamp_ns(&m.created_at).map(chrono::DateTime::<Utc>::from_timestamp_nanos);
     let datetime = created
@@ -2228,7 +2254,7 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
         "<button class='btn message__action-btn center full-width' data-action='reply#reply' title='Reply' aria-label='Reply'><img class='colorize--black' aria-hidden='true' src='/assets/reply-edb77e33.svg' width='20' height='20'></button>".to_string()
     };
     let actions = format!(
-        "<details class='position-relative' data-controller='popup' data-action='keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn message__action-btn message__options-btn'><img class='colorize--black' aria-hidden='true' src='/assets/menu-dots-horizontal-f6a5d793.svg' width='20' height='20'><span class='for-screen-reader'>Message options</span></summary><div class='message__actions-menu border shadow' data-popup-target='menu'><div class='quick-boosts'>{quick_boosts}<a class='btn message__action-btn message__boost-btn' href='/messages/{message_id}/boosts/new' data-turbo-frame='new_boost_message_{client_id}' data-action='soft-keyboard#open popup#close'><img class='colorize--black' aria-hidden='true' src='/assets/boost-4a7bab66.svg' width='20' height='20'><span class='for-screen-reader'>New boost</span></a></div><div class='flex flex-wrap border-top margin-block-start-half pad-block-start-half message__actions-grid'>{content_action}<button class='btn message__action-btn center full-width' title='Copy link' aria-label='Copy link' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='/rooms/{room_id}/@{message_id}'><img class='colorize--black' aria-hidden='true' src='/assets/link-e546a5df.svg' width='20' height='20'></button><a class='btn message__action-btn center full-width message__edit-btn' href='/rooms/{room_id}/messages/{message_id}/edit' data-turbo-frame='edit_message_{client_id}' title='Edit' aria-label='Edit'><img class='colorize--black' aria-hidden='true' src='/assets/pencil-cf9d28aa.svg' width='20' height='20'></a></div></div></details>",
+        "<details class='position-relative' data-controller='popup' data-action='keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn message__action-btn message__options-btn'><img class='colorize--black' aria-hidden='true' src='/assets/menu-dots-horizontal-f6a5d793.svg' width='20' height='20'><span class='for-screen-reader'>Message options</span></summary><div class='message__actions-menu border shadow' data-popup-target='menu'><div class='quick-boosts'>{quick_boosts}<a class='btn message__action-btn message__boost-btn' href='/messages/{message_id}/boosts/new' data-turbo-frame='new_boost_message_{client_id}' data-action='soft-keyboard#open popup#close'><img class='colorize--black' aria-hidden='true' src='/assets/boost-4a7bab66.svg' width='20' height='20'><span class='for-screen-reader'>New boost</span></a></div><div class='flex flex-wrap border-top margin-block-start-half pad-block-start-half message__actions-grid'>{content_action}<button class='btn message__action-btn center full-width' title='Copy link' aria-label='Copy link' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{copy_url}'><img class='colorize--black' aria-hidden='true' src='/assets/link-e546a5df.svg' width='20' height='20'></button><a class='btn message__action-btn center full-width message__edit-btn' href='/rooms/{room_id}/messages/{message_id}/edit' data-turbo-frame='edit_message_{client_id}' title='Edit' aria-label='Edit'><img class='colorize--black' aria-hidden='true' src='/assets/pencil-cf9d28aa.svg' width='20' height='20'></a></div></div></details>",
         message_id = m.id,
         room_id = m.room_id
     );
@@ -2455,7 +2481,7 @@ async fn room_show_with_target(
         esc(&stream_token)
     ));
     for m in messages {
-        content.push_str(&message_html(&s, &m));
+        content.push_str(&message_html(&s, &m, Some(&headers)));
     }
     content.push_str(&format!("</div><div class='typing-indicator' id='typing-indicator' aria-live='polite' hidden></div><form class='composer' id='composer' method='post' enctype='multipart/form-data' action='/rooms/{rid}/messages'><a class='search-round' href='/searches' aria-label='Search'><img src='/static/icons/search.svg' alt=''></a><input type='hidden' id='message-body' name='message[body]'><input type='hidden' name='message[format]' value='html'><trix-editor input='message-body' aria-label='Write a message' aria-controls='mention-suggestions' placeholder='Write a message…'></trix-editor><div class='mention-suggestions' id='mention-suggestions' role='listbox' aria-label='Mention a person' hidden></div><label class='file-btn' title='Attach file'>📎<input type='file' name='message[attachment]'></label><button type='button' id='rich-toggle' class='rich-toggle' aria-label='Rich text toolbar' aria-expanded='false'>A</button><input type='hidden' name='message[client_message_id]' value='{}'><button class='button' aria-label='Send message'>↑</button></form></section></div>",Uuid::new_v4()));
     let mut response = render(&room.name, &content, Some(&u));
@@ -2499,7 +2525,7 @@ async fn room_refresh(
             let entries = |messages: &[ChatMessage]| {
                 messages
                     .iter()
-                    .map(|m| json!({"id":m.id,"html":message_html(&s, m)}))
+                    .map(|m| json!({"id":m.id,"html":message_html(&s, m, Some(&headers))}))
                     .collect::<Vec<_>>()
             };
             return Ok(Json(json!({
@@ -2512,12 +2538,15 @@ async fn room_refresh(
         }
         let mut html = String::new();
         if !new_messages.is_empty() {
-            let entries: String = new_messages.iter().map(|m| message_html(&s, m)).collect();
+            let entries: String = new_messages
+                .iter()
+                .map(|m| message_html(&s, m, Some(&headers)))
+                .collect();
             let target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
             html.push_str(&format!("<turbo-stream action='append' target='{target}'><template>{entries}</template></turbo-stream>"));
         }
         for message in &updated_messages {
-            html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(&s, message)));
+            html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(&s, message, Some(&headers))));
         }
         return Ok(([(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")], html).into_response());
     }
@@ -2529,7 +2558,7 @@ async fn room_refresh(
     if accept.contains("json") {
         let entries: Vec<Value> = messages
             .iter()
-            .map(|m| json!({"id":m.id,"html":message_html(&s, m)}))
+            .map(|m| json!({"id":m.id,"html":message_html(&s, m, Some(&headers))}))
             .collect();
         Ok(
             Json(json!({"messages":entries,"next_after":next_after,"has_more":has_more}))
@@ -2539,7 +2568,10 @@ async fn room_refresh(
         let html = if messages.is_empty() {
             String::new()
         } else {
-            let entries: String = messages.iter().map(|m| message_html(&s, m)).collect();
+            let entries: String = messages
+                .iter()
+                .map(|m| message_html(&s, m, Some(&headers)))
+                .collect();
             format!(
                 "<turbo-stream action='append' target='{}'><template>{entries}</template></turbo-stream>",
                 room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?
@@ -2836,7 +2868,7 @@ async fn messages_index(
     Ok(Html(
         messages
             .iter()
-            .map(|m| message_html(&s, m))
+            .map(|m| message_html(&s, m, Some(&headers)))
             .collect::<String>(),
     )
     .into_response())
@@ -2901,8 +2933,11 @@ fn insert_message(
     client_id: Option<String>,
     upload: Option<Upload>,
     rich: bool,
-    request_host: Option<&str>,
+    request_headers: Option<&HeaderMap>,
 ) -> Result<ChatMessage, StatusCode> {
+    let request_host = request_headers
+        .and_then(|headers| headers.get(header::HOST))
+        .and_then(|value| value.to_str().ok());
     let room = room_for(s, u.id, rid)?;
     let candidate_mentions = if rich {
         mention_ids(
@@ -2996,7 +3031,7 @@ fn insert_message(
         attachment,
         boosts: Vec::new(),
     };
-    let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"room_kind":m.room_kind,"message":message_json(s,&m,None)?,"html":message_html(&s, &m)}).to_string()});
+    let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"room_kind":m.room_kind,"message":message_json(s,&m,None)?,"html":message_html(&s, &m, request_headers)}).to_string()});
     for uid in newly_unread {
         s.unread_events.send(Event {
             room_id: uid,
@@ -3376,18 +3411,7 @@ async fn message_create(
             f.format.as_deref() == Some("html"),
         )
     };
-    let m = insert_message(
-        &s,
-        &u,
-        rid,
-        &body,
-        client_id,
-        upload,
-        rich,
-        headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok()),
-    )?;
+    let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers))?;
     if s.webhooks_enabled {
         if let Err(error) = enqueue_webhooks(&s, &m) {
             eprintln!("Rustfire webhook dispatch error: {error}");
@@ -3410,7 +3434,7 @@ async fn message_create(
                 "<turbo-stream action='append' target='{}'><template>{}</template></turbo-stream>",
                 room_messages_target(m.room_kind.as_deref().ok_or(StatusCode::NOT_FOUND)?, rid)
                     .ok_or(StatusCode::NOT_FOUND)?,
-                message_html(&s, &m)
+                message_html(&s, &m, Some(&headers))
             )),
         )
             .into_response())
@@ -3427,7 +3451,7 @@ async fn message_show(
     room_for(&s, u.id, rid)?;
     let m = message_by_id(&s, rid, mid)?;
     Ok(if headers.get("x-rustfire-fragment").is_some() {
-        Html(message_html(&s, &m)).into_response()
+        Html(message_html(&s, &m, Some(&headers))).into_response()
     } else if headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -3436,7 +3460,7 @@ async fn message_show(
     {
         Json(message_json(&s, &m, Some(&headers))?).into_response()
     } else {
-        render("Message", &message_html(&s, &m), Some(&u))
+        render("Message", &message_html(&s, &m, Some(&headers)), Some(&u))
     })
 }
 async fn message_edit(
@@ -5481,7 +5505,7 @@ async fn bot_messages_post(
             None,
         )
     };
-    let m = insert_message(&s, &u, rid, &body, None, attachment, false, None)?;
+    let m = insert_message(&s, &u, rid, &body, None, attachment, false, Some(&headers))?;
     let mut r = StatusCode::CREATED.into_response();
     r.headers_mut().insert(
         header::LOCATION,
