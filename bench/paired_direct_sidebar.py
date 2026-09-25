@@ -39,7 +39,7 @@ def request(port, path, cookie, csrf=None, user_ids=()):
         return response.status, response.url, response.read().decode()
 
 
-def run(port, cookie, csrf, capture_dir):
+def run(port, cookie, csrf, capture_dir, source=False):
     process = subprocess.Popen(
         ["node", "bench/capture_direct_sidebar.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", cookie, "--count", "4", "--output", str(capture_dir)],
         cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -50,6 +50,9 @@ def run(port, cookie, csrf, capture_dir):
             output, error = process.communicate(timeout=10)
             raise AssertionError(f"Direct-room capture did not start: {ready}\n{output}\n{error}")
         results = []
+        placeholder_counts = []
+        _, _, initial_sidebar = request(port, "/users/me/sidebar", cookie)
+        placeholder_counts.append(count_placeholders(initial_sidebar, source))
         for members in ((2,), (2, 3), (2, 3, 4), (2, 3, 4, 5, 6)):
             status, url, _ = request(port, "/rooms/directs", cookie, csrf, members)
             assert status == 200, (status, url)
@@ -57,12 +60,13 @@ def run(port, cookie, csrf, capture_dir):
             assert room_id == len(results) + 2, (room_id, results)
             _, _, sidebar = request(port, "/users/me/sidebar", cookie)
             results.append(direct_link(sidebar, room_id))
+            placeholder_counts.append(count_placeholders(sidebar, source))
         output, error = process.communicate(timeout=35)
         assert process.returncode == 0, (output, error)
         received = json.loads(output.strip().splitlines()[-1])
         assert received == {"received": 4, "unexpected": 0, "ids": [2, 3, 4, 5]}, received
         streams = [(capture_dir / f"{room_id}.html").read_text() for room_id in (2, 3, 4, 5)]
-        return results, streams
+        return results, streams, placeholder_counts
     finally:
         if process.poll() is None:
             process.kill()
@@ -73,6 +77,11 @@ def normalized(html):
     epoch = re.search(r'data-sorted-list-number="(\d+)"', html)
     assert epoch and abs(int(epoch.group(1)) - int(time.time() * 1000)) < 30_000, "Direct room sort time is not a current epoch millisecond value"
     return re.sub(r'data-sorted-list-number="\d+"', 'data-sorted-list-number="<epoch-ms>"', html)
+
+
+def count_placeholders(page, source):
+    pattern = r'class="direct borderless fill-transparent unpad"' if source else r'data-ping-user-id=\'\d+\''
+    return len(re.findall(pattern, page))
 
 
 def main():
@@ -95,7 +104,7 @@ def main():
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
-            rust_links, rust_streams = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
+            rust_links, rust_streams, rust_placeholders = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams")
         finally:
             stop_server(rust)
 
@@ -106,7 +115,7 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_links, camp_streams = run(camp_port, cookie, csrf, temp / "camp-streams")
+            camp_links, camp_streams, camp_placeholders = run(camp_port, cookie, csrf, temp / "camp-streams", source=True)
         finally:
             if camp is not None:
                 stop_server(camp)
@@ -125,6 +134,7 @@ def main():
         for index, (rust_link, camp_link) in enumerate(zip(rust_links, camp_links), 2):
             assert normalized(rust_link) == normalized(camp_link), f"Direct room {index} markup differs; use --sample-dir to inspect"
             assert normalized(rust_streams[index - 2]) == normalized(camp_streams[index - 2]), f"Direct room {index} Turbo event differs; use --sample-dir to inspect"
+        assert rust_placeholders == camp_placeholders == [19, 17, 16, 15, 13], (rust_placeholders, camp_placeholders)
         print("PASS paired direct sidebar links and Turbo events for one, two, three, and five peers; only room epoch milliseconds normalized")
 
 
