@@ -129,7 +129,7 @@ function initPingForm(){
   renderSelected();input.focus();
 }
 initPingForm();
-const newRoomPanel=document.querySelector('section.panel[style="view-transition-name: new-room"]');
+const newRoomPanel=document.querySelector('section.panel[style="view-transition-name: new-room"],section.panel[style^="view-transition-name: edit-room-"]');
 if(newRoomPanel){
   const nameInput=newRoomPanel.querySelector('#room_name');
   const savedName=sessionStorage.getItem('rustfire-new-room-name');

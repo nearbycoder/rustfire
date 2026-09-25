@@ -5180,15 +5180,30 @@ fn new_room_translation_button() -> String {
     let entries = translations.iter().map(|(flag, phrase)| format!("<dt>{flag}</dt><dd class=\"margin-none\">{phrase}</dd>")).collect::<String>();
     format!("<details class=\"position-relative\" data-controller=\"popup\" data-action=\"keydown.esc-&gt;popup#close toggle-&gt;popup#toggle click@document-&gt;popup#closeOnClickOutside\" data-popup-orientation-top-class=\"popup-orientation-top\"><summary class=\"btn\" tabindex=\"-1\"><img aria-hidden=\"true\" class=\"color-icon\" src=\"/assets/globe-8c54d23b.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Translate</span></summary><div class=\"language-list-menu shadow\" data-popup-target=\"menu\"><dl class=\"language-list\">{entries}</dl></div></details>")
 }
-fn new_room_user_row(id: i64, name: &str, bio: &str, updated_at: &str, closed: bool, current_id: i64, avatar_key: &[u8]) -> Result<String, StatusCode> {
+fn room_form_user_row(id: i64, name: &str, bio: &str, updated_at: &str, closed: bool, is_new: bool, selected: bool, current_id: i64, avatar_key: &[u8]) -> Result<String, StatusCode> {
     let avatar = avatar_path(avatar_key, id, updated_at)?;
     let title = if bio.trim().is_empty() { name.to_string() } else { format!("{name} – {bio}") };
-    let control = if !closed || id == current_id {
+    let control = if !closed || (is_new && id == current_id) {
         format!("{}<img class=\"colorize--black flex-item-no-shrink\" aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" />", if closed { format!("<input type=\"hidden\" name=\"user_ids[]\" value=\"{id}\" />") } else { String::new() })
     } else {
-        format!("<label class=\"switch flex-item-no-shrink\"><input type=\"checkbox\" name=\"user_ids[]\" value=\"{id}\" class=\"switch__input\" /><span class=\"switch__btn round\"></span><span class=\"for-screen-reader\">Give {} access to this room</span></label>", esc(name))
+        format!("<label class=\"switch flex-item-no-shrink\"><input type=\"checkbox\" name=\"user_ids[]\" value=\"{id}\" class=\"switch__input\"{} /><span class=\"switch__btn round\"></span><span class=\"for-screen-reader\">Give {} access to this room</span></label>", if selected { " checked=\"checked\"" } else { "" }, esc(name))
     };
     Ok(format!("<li class=\"flex align-center gap margin-none\" data-value=\"{}\"><figure class=\"avatar flex-item-no-shrink\" style=\"--avatar-size: 4ch;\"><a title=\"{}\" class=\"btn avatar\" data-turbo-frame=\"_top\" href=\"/users/{id}\"><img aria-hidden=\"true\" loading=\"lazy\" src=\"{avatar}\" width=\"48\" height=\"48\" /></a></figure><div class=\"min-width\"><div class=\"overflow-ellipsis fill-shade\"><strong>{}</strong></div></div><hr class=\"separator\" aria-hidden=\"true\" />{control}</li>", esc(&name.to_lowercase()), esc(&title), esc(name)))
+}
+fn room_form_panel(kind: &str, room_id: Option<i64>, name: &str, csrf_token: &str, rows: &str, user_count: usize) -> String {
+    let closed = kind == "closeds";
+    let other_kind = if closed { "opens" } else { "closeds" };
+    let type_change_path = if let Some(id) = room_id { format!("/rooms/{other_kind}/{id}/edit") } else { format!("/rooms/{other_kind}/new") };
+    let type_description = if closed { "Give everyone access to this room" } else { "Give only some access to this room" };
+    let checked = if closed { "" } else { " checked=\"checked\"" };
+    let search = if user_count > 20 { "<input type=\"search\" id=\"search\" autocorrect=\"off\" autocomplete=\"off\" data-1p-ignore=\"true\" class=\"input input--transparent full-width\" placeholder=\"Filter…\" data-action=\"input-&gt;filter#filter\">" } else { "" };
+    let everyone = format!("<li class=\"flex align-center gap margin-none\"><figure class=\"avatar flex-item-no-shrink\" style=\"--avatar-border-radius: 0; --avatar-size: 4ch;\"><img aria-hidden=\"true\" class=\"colorize--black\" style=\"background-color: transparent\" src=\"/assets/everyone-4ca1d460.svg\" /><span class=\"for-screen-reader\">Everyone</span></figure><div class=\"min-width\"><div class=\"overflow-ellipsis fill-shade\"><strong>Everyone</strong></div></div><hr class=\"separator\" aria-hidden=\"true\"><a class=\"btn--faux flex-inline\" tabindex=\"-1\" data-turbo-action=\"replace\" href=\"{type_change_path}\"><label for=\"room_type\" class=\"switch\"><input type=\"checkbox\" id=\"room_type\" class=\"switch__input\"{checked}><span class=\"switch__btn round\"></span><span class=\"for-screen-reader\">{type_description}</span></label></a></li><hr class=\"separator full-width\" style=\"--border-style: solid\">");
+    let style = room_id.map(|id| format!("edit-room-{id}")).unwrap_or_else(|| "new-room".to_string());
+    let action = room_id.map(|id| format!("/rooms/{kind}/{id}")).unwrap_or_else(|| format!("/rooms/{kind}"));
+    let method = if room_id.is_some() { "<input type=\"hidden\" name=\"_method\" value=\"patch\" />" } else { "" };
+    let back = room_id.map(|id| format!("/rooms/{id}")).unwrap_or_else(|| "/".to_string());
+    let csrf = esc(csrf_token);
+    format!("<nav class=\"new-room-back\"><a class=\"btn\" href=\"{back}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Go Back</span></a></nav><section class=\"panel txt-align-center\" style=\"view-transition-name: {style}\"><form action=\"{action}\" accept-charset=\"UTF-8\" method=\"post\">{method}<input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /><div class=\"flex align-center gap\">{}<label class=\"flex-item-grow txt-large\"><input name=\"room[name]\" id=\"room_name\" class=\"input full-width\" required=\"required\" autofocus=\"autofocus\" placeholder=\"Name the room\" data-turbo-permanent=\"true\" data-action=\"keydown.enter-&gt;form#submit:prevent\" type=\"text\" value=\"{}\" /><span class=\"for-screen-reader\">Name this room</span></label></div><hr class=\"margin-block borderless\"><section class=\"room-access margin-block pad-inline fill-shade border-radius\"><menu class=\"flex flex-column gap margin-none pad overflow-y constrain-height\" data-controller=\"filter\" data-filter-active-class=\"filter--active\" data-filter-selected-class=\"selected\">{everyone}{search}<div data-filter-target=\"list\" contents>{rows}</div></menu></section><button name=\"button\" type=\"submit\" class=\"btn btn--reversed txt-large center\"><img aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Save</span></button></form></section>", new_room_translation_button(), esc(name))
 }
 async fn new_room(
     State(s): State<Arc<AppState>>,
@@ -5211,14 +5226,8 @@ async fn new_room(
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
-    let rows = users.iter().map(|(id,name,bio,updated_at)| new_room_user_row(*id,name,bio,updated_at,closed,u.id,avatar_key)).collect::<Result<String, _>>()?;
-    let type_change_path = if closed { "/rooms/opens/new" } else { "/rooms/closeds/new" };
-    let type_description = if closed { "Give everyone access to this room" } else { "Give only some access to this room" };
-    let checked = if closed { "" } else { " checked=\"checked\"" };
-    let search = if users.len() > 20 { "<input type=\"search\" id=\"search\" autocorrect=\"off\" autocomplete=\"off\" data-1p-ignore=\"true\" class=\"input input--transparent full-width\" placeholder=\"Filter…\" data-action=\"input-&gt;filter#filter\">" } else { "" };
-    let everyone = format!("<li class=\"flex align-center gap margin-none\"><figure class=\"avatar flex-item-no-shrink\" style=\"--avatar-border-radius: 0; --avatar-size: 4ch;\"><img aria-hidden=\"true\" class=\"colorize--black\" style=\"background-color: transparent\" src=\"/assets/everyone-4ca1d460.svg\" /><span class=\"for-screen-reader\">Everyone</span></figure><div class=\"min-width\"><div class=\"overflow-ellipsis fill-shade\"><strong>Everyone</strong></div></div><hr class=\"separator\" aria-hidden=\"true\"><a class=\"btn--faux flex-inline\" tabindex=\"-1\" data-turbo-action=\"replace\" href=\"{type_change_path}\"><label for=\"room_type\" class=\"switch\"><input type=\"checkbox\" id=\"room_type\" class=\"switch__input\"{checked}><span class=\"switch__btn round\"></span><span class=\"for-screen-reader\">{type_description}</span></label></a></li><hr class=\"separator full-width\" style=\"--border-style: solid\">");
-    let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
-    let panel = format!("<nav class=\"new-room-back\"><a class=\"btn\" href=\"/\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Go Back</span></a></nav><section class=\"panel txt-align-center\" style=\"view-transition-name: new-room\"><form action=\"/rooms/{kind}\" accept-charset=\"UTF-8\" method=\"post\"><input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /><div class=\"flex align-center gap\">{}<label class=\"flex-item-grow txt-large\"><input name=\"room[name]\" id=\"room_name\" class=\"input full-width\" required=\"required\" autofocus=\"autofocus\" placeholder=\"Name the room\" data-turbo-permanent=\"true\" data-action=\"keydown.enter-&gt;form#submit:prevent\" type=\"text\" value=\"New room\" /><span class=\"for-screen-reader\">Name this room</span></label></div><hr class=\"margin-block borderless\"><section class=\"room-access margin-block pad-inline fill-shade border-radius\"><menu class=\"flex flex-column gap margin-none pad overflow-y constrain-height\" data-controller=\"filter\" data-filter-active-class=\"filter--active\" data-filter-selected-class=\"selected\">{everyone}{search}<div data-filter-target=\"list\" contents>{rows}</div></menu></section><button name=\"button\" type=\"submit\" class=\"btn btn--reversed txt-large center\"><img aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Save</span></button></form></section>", new_room_translation_button());
+    let rows = users.iter().map(|(id,name,bio,updated_at)| room_form_user_row(*id,name,bio,updated_at,closed,true,*id==u.id,u.id,avatar_key)).collect::<Result<String, _>>()?;
+    let panel = room_form_panel(&kind, None, "New room", u.csrf_token.as_deref().unwrap_or(""), &rows, users.len());
     Ok(render(
         "New chat room",
         &panel,
@@ -5331,6 +5340,12 @@ async fn room_edit(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let r = room_for(&s, u.id, rid)?;
+    let kind = if r.kind == "Rooms::Closed" { "closeds" } else { "opens" };
+    render_room_edit(s, headers, rid, kind).await
+}
+async fn render_room_edit(s: Arc<AppState>, headers: HeaderMap, rid: i64, kind: &str) -> AppResult {
+    let u = user(&s, &headers)?;
+    let r = room_for(&s, u.id, rid)?;
     if !can_admin(&u, &r) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -5338,21 +5353,33 @@ async fn room_edit(
         return Err(StatusCode::FORBIDDEN);
     }
     let db = pool(&s)?;
-    let mut q=db.prepare("SELECT u.id,u.name,EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.room_id=?1) FROM users u WHERE u.status=0 ORDER BY lower(u.name)").map_err(db_err)?;
-    let choices=q.query_map([rid],|x|Ok((x.get::<_,i64>(0)?,x.get::<_,String>(1)?,x.get::<_,bool>(2)?))).map_err(db_err)?.collect::<Result<Vec<_>,_>>().map_err(db_err)?.iter().map(|(id,name,yes)|format!("<label class='check'><input type='checkbox' name='user_ids' value='{id}' {}>{}</label>",if *yes{"checked"}else{""},esc(name))).collect::<String>();
-    let kind = if r.kind == "Rooms::Open" {
-        "opens"
+    let mut q=db.prepare("SELECT u.id,u.name,COALESCE(u.bio,''),u.updated_at,EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.room_id=?1) FROM users u WHERE u.status=0 ORDER BY lower(u.name)").map_err(db_err)?;
+    let users=q.query_map([rid],|x|Ok((x.get::<_,i64>(0)?,x.get::<_,String>(1)?,x.get::<_,String>(2)?,x.get::<_,String>(3)?,x.get::<_,bool>(4)?))).map_err(db_err)?.collect::<Result<Vec<_>,_>>().map_err(db_err)?;
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    let mut rows = String::new();
+    if kind == "closeds" {
+        let (selected, unselected): (Vec<_>, Vec<_>) = users.iter().partition(|user| user.4);
+        for (id,name,bio,updated_at,_) in &selected {
+            rows.push_str(&room_form_user_row(*id,name,bio,updated_at,true,false,true,u.id,avatar_key)?);
+        }
+        if !selected.is_empty() && !unselected.is_empty() {
+            rows.push_str("<hr class=\"separator full-width\" style=\"--border-style: solid\">");
+        }
+        for (id,name,bio,updated_at,_) in &unselected {
+            rows.push_str(&room_form_user_row(*id,name,bio,updated_at,true,false,false,u.id,avatar_key)?);
+        }
     } else {
-        "closeds"
-    };
+        for (id,name,bio,updated_at,_) in &users {
+            rows.push_str(&room_form_user_row(*id,name,bio,updated_at,false,false,true,u.id,avatar_key)?);
+        }
+    }
+    let csrf = u.csrf_token.as_deref().unwrap_or("");
+    let mut panels = room_form_panel(kind, Some(rid), &r.name, csrf, &rows, users.len());
+    let delete_url = public_url(&headers, &format!("/rooms/{rid}"));
+    panels.push_str(&format!("<section class=\"panel txt-align-center\"><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative max-width\" aria-label=\"Delete {}\" data-turbo-confirm=\"Are you sure you want to delete this room and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" width=\"20\" height=\"20\" /><span class=\"overflow-ellipsis\">{}</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></section>", esc(&r.name), esc(&r.name), esc(csrf)));
     Ok(render(
-        "Room settings",
-        &format!(
-            "<section class='form-card'><h1>Room settings</h1><form method='post' action='/rooms/{rid}/update'><label>Name<input name='name' value='{}' required></label><label>Access<select name='kind'><option value='opens' {}>Everyone</option><option value='closeds' {}>Selected members</option></select></label><div class='member-choices'>{choices}</div><button class='button'>Save</button></form><form method='post' action='/rooms/{rid}/delete'><button class='danger'>Delete room</button></form></section>",
-            esc(&r.name),
-            if kind == "opens" { "selected" } else { "" },
-            if kind == "closeds" { "selected" } else { "" }
-        ),
+        &format!("Edit settings for {}", r.name),
+        &panels,
         Some(&u),
     ))
 }
@@ -5483,9 +5510,11 @@ async fn room_kind_show(
 async fn room_kind_edit(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(rid): Path<i64>,
 ) -> AppResult {
-    room_edit(State(s), headers, Path(rid)).await
+    let kind = if uri.path().starts_with("/rooms/opens/") { "opens" } else { "closeds" };
+    render_room_edit(s, headers, rid, kind).await
 }
 async fn room_kind_update(
     State(s): State<Arc<AppState>>,
@@ -5503,7 +5532,33 @@ async fn room_kind_update(
     let (values, user_ids) = fields(&raw);
     let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     update_room_values(&s, &u, rid, kind, name, user_ids)?;
-    Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+    Ok(found_redirect(&format!("/rooms/{rid}")))
+}
+async fn room_kind_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    Path(rid): Path<i64>,
+    RawForm(raw): RawForm,
+) -> AppResult {
+    let (values, _) = fields(&raw);
+    match values.get("_method").map(String::as_str) {
+        Some("patch" | "put") => room_kind_update(State(s), headers, OriginalUri(uri), Path(rid), RawForm(raw)).await,
+        Some("delete") => room_kind_delete(State(s), headers, Path(rid)).await,
+        _ => Err(StatusCode::METHOD_NOT_ALLOWED),
+    }
+}
+async fn room_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(rid): Path<i64>,
+    RawForm(raw): RawForm,
+) -> AppResult {
+    let (values, _) = fields(&raw);
+    if values.get("_method").map(String::as_str) != Some("delete") {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    room_delete(State(s), headers, Path(rid)).await
 }
 async fn room_kind_delete(
     State(s): State<Arc<AppState>>,
@@ -9593,7 +9648,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms", get(rooms_index))
         .route(
             "/rooms/{id}",
-            get(room_show).post(create_room).delete(room_delete),
+            get(room_show).post(room_post_override).delete(room_delete),
         )
         .route("/rooms/{id}/refresh", get(room_refresh))
         .route("/rooms/{id}/settings", get(room_edit))
@@ -9628,6 +9683,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/rooms/opens/{id}",
             get(room_kind_show)
+                .post(room_kind_post_override)
                 .patch(room_kind_update)
                 .put(room_kind_update)
                 .delete(room_kind_delete),
@@ -9635,6 +9691,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/rooms/closeds/{id}",
             get(room_kind_show)
+                .post(room_kind_post_override)
                 .patch(room_kind_update)
                 .put(room_kind_update)
                 .delete(room_kind_delete),

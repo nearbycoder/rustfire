@@ -215,7 +215,7 @@ def main():
             code, _, page = request(admin, base, "/rooms/1")
             assert code == 200 and "hello edited" in page
             code, _, page = request(admin, base, "/rooms/1/settings")
-            assert code == 200 and "Room settings" in page
+            assert code == 200 and 'style="view-transition-name: edit-room-1"' in page
             code, _, page = request(admin, base, "/account")
             assert code == 200, (code, page[:500])
             assert "/static/account.css" in page and "/account/custom_styles.css" not in page
@@ -355,9 +355,12 @@ def main():
             with member.open(base + "/users/me/sidebar?active=2") as sidebar_response:
                 assert sidebar_response.headers["x-rustfire-active-room-accessible"] == "0"
             code, _, page = request(admin, base, "/rooms/closeds/2/edit")
-            assert code == 200 and "Room settings" in page
+            assert code == 200 and 'Edit settings for Private' in page
+            assert 'style="view-transition-name: edit-room-2"' in page
+            assert 'action="/rooms/closeds/2"' in page and 'name="_method" value="patch"' in page
+            assert re.search(r'action="https?://[^" ]+/rooms/2"', page) and 'name="_method" value="delete"' in page
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "1"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             code, _, page = request(admin, base, "/rooms/2")
             assert code == 200 and "Private Two" in page and "id='messages_rooms_closed_2'" in page
             assert request(admin, base, "/")[1].endswith("/rooms/2")
@@ -365,7 +368,7 @@ def main():
             assert request(admin, base, "/")[1].endswith("/rooms/1")
             assert request(admin, base, "/rooms")[1].endswith("/rooms/2")
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": ["1", "2"]}, method="PATCH")
-            assert code == 303
+            assert code == 302
             assert request(member, base, "/rooms/2")[0] == 200
             assert request(member, base, "/rooms/2/involvement", {"involvement": "everything"})[0] == 200
             assert request(admin, base, "/rooms/2/messages", {"message[body]": "private unread"}, headers={"Accept": "application/json"})[0] == 201
@@ -373,11 +376,11 @@ def main():
                 membership_before = check_db.execute("SELECT id,involvement,unread_at FROM memberships WHERE room_id=2 AND user_id=2").fetchone()
             assert membership_before[1] == "everything" and membership_before[2]
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two Renamed", "user_ids[]": ["1", "2"]}, method="PATCH")
-            assert code == 303
+            assert code == 302
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT id,involvement,unread_at FROM memberships WHERE room_id=2 AND user_id=2").fetchone() == membership_before
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "1"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             assert "private unread" not in request(member, base, "/searches?q=private")[2]
             assert "private unread" in request(admin, base, "/searches?q=private")[2]
             code, redirected, _ = request(member, base, "/rooms/2")
@@ -400,7 +403,7 @@ def main():
             assert admin_suggestion["sgid"]
             admin_mention_sgid = admin_suggestion["sgid"]
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "2"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT user_id FROM memberships WHERE room_id=2").fetchall() == [(2,)]
             assert request(admin, base, "/rooms/2")[1].endswith("/rooms/1")
@@ -898,12 +901,12 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 original_membership = check_db.execute("SELECT id FROM memberships WHERE room_id=? AND user_id=1", (converted_room,)).fetchone()[0]
             assert request(admin, base, f"/rooms/{converted_room}/involvement", {"involvement": "everything"})[0] == 200
-            assert request(admin, base, f"/rooms/opens/{converted_room}", {"room[name]": "Opened"}, method="PATCH")[0] == 303
+            assert request(admin, base, f"/rooms/opens/{converted_room}", {"room[name]": "Opened"}, method="PATCH")[0] == 302
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT type FROM rooms WHERE id=?", (converted_room,)).fetchone()[0] == "Rooms::Open"
                 assert check_db.execute("SELECT id,involvement FROM memberships WHERE room_id=? AND user_id=1", (converted_room,)).fetchone() == (original_membership, "everything")
                 assert check_db.execute("SELECT count(*) FROM memberships WHERE room_id=? AND user_id=2", (converted_room,)).fetchone()[0] == 1
-            assert request(admin, base, f"/rooms/closeds/{converted_room}", {"room[name]": "Closed again", "user_ids[]": ["1", "2"]}, method="PATCH")[0] == 303
+            assert request(admin, base, f"/rooms/closeds/{converted_room}", {"room[name]": "Closed again", "user_ids[]": ["1", "2"]}, method="PATCH")[0] == 302
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT type FROM rooms WHERE id=?", (converted_room,)).fetchone()[0] == "Rooms::Closed"
                 assert check_db.execute("SELECT id,involvement FROM memberships WHERE room_id=? AND user_id=1", (converted_room,)).fetchone() == (original_membership, "everything")
