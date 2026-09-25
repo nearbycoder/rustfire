@@ -169,6 +169,8 @@ struct ChatMessage {
     #[serde(skip_serializing)]
     room_kind: Option<String>,
     #[serde(skip_serializing)]
+    room_name: String,
+    #[serde(skip_serializing)]
     mention_ids: Vec<i64>,
     creator_id: i64,
     creator_name: String,
@@ -1936,6 +1938,16 @@ fn message_list(
     before: Option<i64>,
     after: Option<i64>,
 ) -> Result<Vec<ChatMessage>, StatusCode> {
+    message_list_with_room_name(s, rid, limit, before, after, true)
+}
+fn message_list_with_room_name(
+    s: &AppState,
+    rid: i64,
+    limit: i64,
+    before: Option<i64>,
+    after: Option<i64>,
+    include_room_name: bool,
+) -> Result<Vec<ChatMessage>, StatusCode> {
     let db = pool(s)?;
     let (predicate, order, cursor) = if let Some(id) = after {
         if id > 0 {
@@ -1971,18 +1983,23 @@ fn message_list(
     if after.is_none() {
         v.reverse()
     }
+    if include_room_name {
+        set_message_room_names(&db, rid, &mut v)?;
+    }
     Ok(v)
 }
 fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
     let db = pool(s)?;
-    db.query_row(
+    let mut message = db.query_row(
         "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
         params![rid, mid],
         chat_message_from_row,
     )
     .optional()
     .map_err(db_err)?
-    .ok_or(StatusCode::NOT_FOUND)
+    .ok_or(StatusCode::NOT_FOUND)?;
+    message.room_name = message_room_display_name(&db, rid)?;
+    Ok(message)
 }
 fn messages_after_position(
     s: &AppState,
@@ -2004,20 +2021,23 @@ fn messages_after_position(
         i64::MIN
     };
     let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
-    query
+    let mut messages = query
         .query_map(
             params![rid, cursor_time, after, limit],
             chat_message_from_row,
         )
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)
+        .map_err(db_err)?;
+    set_message_room_names(&db, rid, &mut messages)?;
+    Ok(messages)
 }
 fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     Ok(ChatMessage {
         id: r.get(0)?,
         room_id: r.get(1)?,
         room_kind: None,
+        room_name: String::new(),
         mention_ids: Vec::new(),
         creator_id: r.get(2)?,
         creator_name: r.get(3)?,
@@ -2069,7 +2089,49 @@ fn messages_since(
     if updated {
         messages.reverse();
     }
+    set_message_room_names(&db, rid, &mut messages)?;
     Ok(messages)
+}
+fn message_room_display_name(db: &rusqlite::Connection, rid: i64) -> Result<String, StatusCode> {
+    let (name, kind): (Option<String>, String) = db
+        .query_row("SELECT name,type FROM rooms WHERE id=?1", [rid], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(db_err)?;
+    if kind != "Rooms::Direct" {
+        return Ok(name.unwrap_or_default());
+    }
+    let mut query = db
+        .prepare("SELECT u.name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.room_id=?1 ORDER BY m.id")
+        .map_err(db_err)?;
+    let names = query
+        .query_map([rid], |row| row.get::<_, String>(0))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    Ok(match names.as_slice() {
+        [] => name.unwrap_or_default(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        _ => format!(
+            "{}, and {}",
+            names[..names.len() - 1].join(", "),
+            names.last().unwrap()
+        ),
+    })
+}
+fn set_message_room_names(
+    db: &rusqlite::Connection,
+    rid: i64,
+    messages: &mut [ChatMessage],
+) -> Result<(), StatusCode> {
+    if !messages.is_empty() {
+        let name = message_room_display_name(db, rid)?;
+        for message in messages {
+            message.room_name = name.clone();
+        }
+    }
+    Ok(())
 }
 fn boost_html(
     s: &AppState,
@@ -2192,9 +2254,10 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
         m.id, m.id
     );
     let metadata = format!(
-        "<div class='message-meta message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-datetime data-local-time-target='time'>{timestamp}</time></a></h3><div class='message-actions message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
+        "<div class='message-meta message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-datetime data-local-time-target='time'>{timestamp}</time></a><span class='message__room'><a href='/rooms/{room_id}/@{message_id}' target='_top' data-reply-target='link'>{room_name}</a></span></h3><div class='message-actions message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
         room_id = m.room_id,
         message_id = m.id,
+        room_name = esc(&m.room_name),
     );
     format!(
         "<div id='message_{client_id}' class='message' data-stream-message data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-creator-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-datetime data-local-time-target='date'>{date_label}</time></h2><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message-main message__body'><div class='message__body-content'>{metadata}<div class='message-body'>{presentation}</div>{boost_area}</div></div></turbo-frame></div>",
@@ -2738,16 +2801,16 @@ async fn messages_index(
             return Err(StatusCode::NOT_FOUND);
         }
     }
-    let messages = message_list(&s, rid, 40, q.before, q.after)?;
-    if messages.is_empty() {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
-    if headers
+    let wants_json = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .contains("application/json")
-    {
+        .contains("application/json");
+    let messages = message_list_with_room_name(&s, rid, 40, q.before, q.after, !wants_json)?;
+    if messages.is_empty() {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    if wants_json {
         return Ok(Json(
             messages
                 .iter()
@@ -2900,10 +2963,12 @@ fn insert_message(
     } else {
         None
     };
+    let room_name = message_room_display_name(&db, rid)?;
     let m = ChatMessage {
         id,
         room_id: rid,
         room_kind: Some(room.kind),
+        room_name,
         mention_ids: valid_mentions,
         creator_id: u.id,
         creator_name: u.name.clone(),
@@ -5297,7 +5362,7 @@ async fn bot_messages_get(
             return Err(StatusCode::NOT_FOUND);
         }
     }
-    let messages = message_list(&s, rid, 40, q.before, q.after)?;
+    let messages = message_list_with_room_name(&s, rid, 40, q.before, q.after, false)?;
     let db = pool(&s)?;
     let count: i64 = db
         .query_row(

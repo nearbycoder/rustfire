@@ -77,6 +77,14 @@ def check_message_targets(sample_file):
         raise RuntimeError(f"Message stream lacks its day heading: {sample_file}")
 
 
+def message_room_label(sample_file):
+    sample = sample_file.read_text()
+    matched = re.search(r"<span\b[^>]*class=['\"]message__room['\"][^>]*>\s*<a\b[^>]*>([^<]*)</a>", sample)
+    if not matched:
+        raise RuntimeError(f"Message stream lacks its room link: {sample_file}")
+    return html.unescape(matched.group(1))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
@@ -109,6 +117,8 @@ def main():
             camp.execute("DELETE FROM sqlite_sequence WHERE name='messages'")
             people = camp.execute("SELECT id,name,updated_at FROM users WHERE id IN(1,2)").fetchall()
             rust.executemany("UPDATE users SET name=?2,updated_at=?3 WHERE id=?1", people)
+            room_name = camp.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]
+            rust.execute("UPDATE rooms SET name=? WHERE id=1", [room_name])
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers)
         if args.operation == "boosts":
             seed_boost_message(rust_db, camp_db)
@@ -149,6 +159,10 @@ def main():
         if args.operation == "messages":
             check_message_targets(output_dir / "rustfire.html")
             check_message_targets(output_dir / "campfire.html")
+            rust_room_label = message_room_label(output_dir / "rustfire.html")
+            camp_room_label = message_room_label(output_dir / "campfire.html")
+            if rust_room_label != camp_room_label:
+                raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
         print(f"{args.operation}_identity_match=true")
 
 

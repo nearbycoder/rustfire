@@ -101,6 +101,7 @@ def main():
             assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", message["created_at"])
             code, _, page = request(admin, base, f"/rooms/1/@{message['id']}")
             assert code == 200 and "hello from smoke" in page and "data-at-message='1'" in page and "id='composer'" in page, code
+            assert f"<span class='message__room'><a href='/rooms/1/@{message['id']}' target='_top' data-reply-target='link'>Campfire</a></span>" in page
             browser_visitor = client()
             code, login_url, _ = request(browser_visitor, base, f"/rooms/1/@{message['id']}", headers={"Accept": "text/html"})
             assert code == 200 and login_url.endswith("/session/new")
@@ -612,6 +613,9 @@ def main():
             assert code == 200
             code, _, payload = request(admin, base, "/rooms/3/messages", data=multipart, method="POST", headers={"Accept":"application/json", "Content-Type":f"multipart/form-data; boundary={boundary}"})
             assert code == 201
+            direct_message_id = json.loads(payload)["id"]
+            direct_page = request(admin, base, "/rooms/3")[2]
+            assert f"<span class='message__room'><a href='/rooms/3/@{direct_message_id}' target='_top' data-reply-target='link'>Admin and Member Two</a></span>" in direct_page
             room_attachment_id = sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 room_stored_name = check_db.execute("SELECT stored_name FROM attachments WHERE id=?", (room_attachment_id,)).fetchone()[0]
