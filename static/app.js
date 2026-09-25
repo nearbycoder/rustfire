@@ -3,6 +3,18 @@ const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
+document.querySelectorAll('[data-controller~="upload-preview"]').forEach(control=>{
+  const input=control.querySelector('[data-upload-preview-target="input"]');
+  const image=control.querySelector('[data-upload-preview-target="image"]');
+  if(!input||!image)return;
+  let objectUrl;
+  input.addEventListener('change',()=>{
+    if(objectUrl)URL.revokeObjectURL(objectUrl);
+    objectUrl=input.files?.[0]&&input.files[0].type.startsWith('image/')?URL.createObjectURL(input.files[0]):undefined;
+    if(objectUrl)image.src=objectUrl;
+  });
+  window.addEventListener('pagehide',()=>{if(objectUrl)URL.revokeObjectURL(objectUrl)},{once:true});
+});
 const pingForm=document.getElementById('ping-form');
 if(pingForm){
   const input=document.getElementById('ping-search');

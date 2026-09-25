@@ -5583,20 +5583,105 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
     Ok(render(
         "Bots",
         &format!(
-            "<section class='form-card'><h1>Bots</h1><ul>{list}</ul><form method='post' action='/account/bots'><label>Name<input name='name' required></label><label>Webhook URL<input type='url' name='webhook_url'></label><button class='button'>Create bot</button></form></section>"
+            "<section class='form-card'><h1>Chat bots</h1><p>With Chat bots, other sites and services can post updates directly to Campfire.</p><p><a class='button' href='/account/bots/new' aria-label='Add a chat bot'>Add a chat bot</a></p><ul>{list}</ul></section>"
         ),
         Some(&u),
     ))
 }
-async fn bot_create(
-    State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(f): Form<HashMap<String, String>>,
-) -> AppResult {
+async fn bot_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
+    Ok(render(
+        "New chat bot",
+        &format!(
+            "<p><a href='/account/bots' aria-label='Back to chat bots'>Back</a></p><section class='panel form-card'>{}</section>",
+            bot_form_html(
+                "/account/bots",
+                "",
+                "",
+                "/static/icons/default-bot-avatar.svg",
+                false
+            )
+        ),
+        Some(&u),
+    ))
+}
+fn bot_form_html(action: &str, name: &str, webhook_url: &str, avatar: &str, edit: bool) -> String {
+    let method = if edit {
+        "<input type='hidden' name='_method' value='patch'>"
+    } else {
+        ""
+    };
+    format!(
+        "<form action='{}' method='post' enctype='multipart/form-data' class='bot-form flex flex-column gap'>{method}<h1 class='for-screen-reader'>Chat Bot Setup</h1><label class='align-center center avatar__form gap' data-controller='upload-preview'><span class='btn input--file'><img src='/static/icons/camera.svg' alt='' aria-hidden='true' width='20' height='20'><input type='file' name='user[avatar]' class='input' accept='image/*' data-upload-preview-target='input' data-action='upload-preview#previewImage'><span class='for-screen-reader'>Upload bot avatar</span></span><span class='avatar input--file txt-xx-large' style='--avatar-size: var(--btn-size);'><img src='{}' alt='Bot avatar' width='48' height='48' data-upload-preview-target='image'></span></label><div class='flex align-center gap'><label class='flex align-center gap flex-item-grow txt-large input input--actor'><input type='text' name='user[name]' class='input' autocomplete='name' placeholder='Name the bot' autofocus required data-1p-ignore='true' value='{}'><img src='/static/icons/bot.svg' alt='' aria-hidden='true' width='24' height='24'></label></div><div class='flex align-center gap'><label class='flex align-center gap flex-item-grow txt-large input input--actor'><input type='url' name='user[webhook_url]' class='input' placeholder='Webhook URL' value='{}'><img src='/static/icons/web.svg' alt='' aria-hidden='true' width='24' height='24'></label></div><button class='btn btn--reversed center txt-large' type='submit' aria-label='Save changes'><img src='/static/icons/check.svg' alt='' aria-hidden='true' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></form>",
+        esc(action),
+        esc(avatar),
+        esc(name),
+        esc(webhook_url)
+    )
+}
+async fn bot_fields(
+    s: &Arc<AppState>,
+    headers: &HeaderMap,
+    req: Request,
+) -> Result<(HashMap<String, String>, Option<(Vec<u8>, String)>), StatusCode> {
+    let mut avatar = None;
+    let f = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .starts_with("multipart/form-data")
+    {
+        let mut multipart = Multipart::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut values = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
+            let field_name = field.name().unwrap_or("").to_string();
+            if field_name == "user[avatar]" || field_name == "avatar" {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                if !bytes.is_empty() {
+                    if !safe_inline_image(&content_type) || bytes.len() > 5 * 1024 * 1024 {
+                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                    }
+                    avatar = Some((bytes.to_vec(), content_type));
+                }
+            } else if field_name == "name"
+                || field_name == "user[name]"
+                || field_name == "webhook_url"
+                || field_name == "user[webhook_url]"
+            {
+                values.insert(
+                    field_name,
+                    field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?,
+                );
+            }
+        }
+        values
+    } else {
+        let RawForm(raw) = RawForm::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        fields(&raw).0
+    };
+    Ok((f, avatar))
+}
+async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Request) -> AppResult {
+    let u = user(&s, &headers)?;
+    if !is_admin(&u) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let (f, avatar) = bot_fields(&s, &headers, req).await?;
     let name = form_value(&f, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -5625,6 +5710,13 @@ async fn bot_create(
         .map_err(db_err)?;
     }
     db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) SELECT id,?1,'mentions',?2 FROM rooms WHERE type='Rooms::Open'",params![id,t]).map_err(db_err)?;
+    if let Some((bytes, content_type)) = avatar {
+        if let Err(error) = save_avatar(&s, id, bytes, content_type) {
+            db.execute("DELETE FROM users WHERE id=?1", [id])
+                .map_err(db_err)?;
+            return Err(error);
+        }
+    }
     Ok(Redirect::to("/account/bots").into_response())
 }
 async fn bot_edit(
@@ -5646,10 +5738,15 @@ async fn bot_edit(
     Ok(render(
         "Edit bot",
         &format!(
-            "<section class='form-card'><h1>Edit bot</h1><img class='avatar-large' src='/users/{id}/avatar' alt='Bot avatar'><form method='post' action='/account/bots/{id}/update'><label>Name<input name='name' value='{}' required></label><label>Webhook URL<input type='url' name='webhook_url' value='{}'></label><button class='button'>Save</button></form><form method='post' action='/account/bots/{id}/avatar' enctype='multipart/form-data'><label>Bot avatar<input type='file' name='avatar' accept='image/png,image/jpeg,image/gif,image/webp,image/avif' required></label><button>Upload avatar</button></form><form method='post' action='/account/bots/{id}/avatar/delete'><button>Remove avatar</button></form><p>Key: <code>{}</code></p><form method='post' action='/account/bots/{id}/key'><button>Generate a new key</button></form><form method='post' action='/account/bots/{id}/delete'><button class='danger'>Delete bot</button></form><p><a href='/account/bots'>Back to bots</a></p></section>",
-            esc(&name),
-            esc(&webhook_url),
-            esc(&key)
+            "<p><a href='/account/bots' aria-label='Back to chat bots'>Back</a></p><section class='panel form-card' style='view-transition-name: chat-bot-{id}'>{}<hr class='separator full-width margin-block-double'><div class='flex align-center gap justify-space-between'><form method='post' action='/account/bots/{id}'><input type='hidden' name='_method' value='delete'><button class='btn txt--small btn--negative' aria-label='Delete this chat bot'>Delete this chat bot</button></form><form method='post' action='/account/bots/{id}/key'><input type='hidden' name='_method' value='put'><button class='btn full-width txt--small btn--negative' aria-label='Generate a new key'>Generate a new key</button></form></div><p>Key: <code>{}</code></p></section>",
+            bot_form_html(
+                &format!("/account/bots/{id}"),
+                &name,
+                &webhook_url,
+                &format!("/users/{id}/avatar"),
+                true
+            ),
+            esc(&key),
         ),
         Some(&u),
     ))
@@ -5658,12 +5755,13 @@ async fn bot_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Form(f): Form<HashMap<String, String>>,
+    req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let (f, avatar) = bot_fields(&s, &headers, req).await?;
     let name = form_value(&f, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -5688,7 +5786,46 @@ async fn bot_update(
             db.execute("INSERT INTO webhooks(user_id,url) VALUES(?1,?2) ON CONFLICT(user_id) DO UPDATE SET url=excluded.url",params![id,url]).map_err(db_err)?;
         }
     }
+    if let Some((bytes, content_type)) = avatar {
+        save_avatar(&s, id, bytes, content_type)?;
+    }
     Ok(Redirect::to("/account/bots").into_response())
+}
+async fn bot_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    req: Request,
+) -> AppResult {
+    let multipart = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .starts_with("multipart/form-data");
+    if multipart {
+        return bot_update(State(s), headers, Path(id), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = to_bytes(body, 256 * 1024)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    let (form, _) = fields(&bytes);
+    if form.get("_method").map(String::as_str) == Some("delete") {
+        return bot_delete(State(s), headers, Path(id)).await;
+    }
+    if matches!(
+        form.get("_method").map(String::as_str),
+        Some("patch" | "put")
+    ) {
+        return bot_update(
+            State(s),
+            headers,
+            Path(id),
+            Request::from_parts(parts, Body::from(bytes)),
+        )
+        .await;
+    }
+    Err(StatusCode::METHOD_NOT_ALLOWED)
 }
 fn active_bot(s: &AppState, id: i64) -> Result<(), StatusCode> {
     let found: bool = pool(s)?.query_row(
@@ -7181,9 +7318,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/users/{id}/ban/delete", post(user_unban))
         .route("/autocompletable/users", get(autocomplete))
         .route("/account/bots", get(bots_get).post(bot_create))
+        .route("/account/bots/new", get(bot_new))
         .route(
             "/account/bots/{id}",
-            patch(bot_update).put(bot_update).delete(bot_delete),
+            post(bot_post_override)
+                .patch(bot_update)
+                .put(bot_update)
+                .delete(bot_delete),
         )
         .route("/account/bots/{id}/edit", get(bot_edit))
         .route("/account/bots/{id}/update", post(bot_update))

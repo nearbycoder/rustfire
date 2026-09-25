@@ -420,9 +420,27 @@ def main():
             code, _, _ = request(client(), base, f"/join/{join}")
             assert code == 404
             code, _, page = request(admin, base, "/account/bots")
-            assert code == 200
+            assert code == 200 and "href='/account/bots/new'" in page
+            code, _, page = request(admin, base, "/account/bots/new")
+            assert code == 200 and "name='user[avatar]'" in page and "name='user[name]'" in page and "name='user[webhook_url]'" in page
+            assert request(client(), base, "/account/bots/new")[0] == 401
             code, _, page = request(admin, base, "/account/bots", {"name": "Robot"})
             key = re.search(r"key: <code>([\w-]+)</code>", page).group(1)
+            bot_create_body=(b"--bot-create\r\nContent-Disposition: form-data; name=\"user[name]\"\r\n\r\nPicture Bot\r\n"
+                             b"--bot-create\r\nContent-Disposition: form-data; name=\"user[webhook_url]\"\r\n\r\nhttps://example.com/hook\r\n"
+                             b"--bot-create\r\nContent-Disposition: form-data; name=\"user[avatar]\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--bot-create--\r\n")
+            code, _, page = request(admin, base, "/account/bots", data=bot_create_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=bot-create"})
+            assert code == 200 and "Picture Bot" in page
+            with sqlite3.connect(f"{tmp}/test.db") as db:
+                picture_bot_id, picture_webhook = db.execute("SELECT u.id,w.url FROM users u JOIN webhooks w ON w.user_id=u.id WHERE u.name='Picture Bot'").fetchone()
+            assert picture_webhook == "https://example.com/hook"
+            with admin.open(base+f"/users/{picture_bot_id}/avatar") as res:
+                image = res.read()
+                assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF"
+            invalid_bot_body=bot_create_body.replace(b"Content-Type: image/png", b"Content-Type: text/plain").replace(b"Picture Bot", b"Invalid Bot")
+            assert request(admin, base, "/account/bots", data=invalid_bot_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=bot-create"})[0] == 422
+            with sqlite3.connect(f"{tmp}/test.db") as db:
+                assert db.execute("SELECT COUNT(*) FROM users WHERE name='Invalid Bot'").fetchone()[0] == 0
             code, _, page = request(admin, base, "/account/bots/3/edit")
             assert code == 200 and "Robot" in page and key in page
             code, _, _ = request(admin, base, "/account/bots/3/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
@@ -432,10 +450,18 @@ def main():
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF" and image[8:12]==b"WEBP"
             code, _, _ = request(admin, base, "/account/bots/3/avatar/delete", {})
             assert code == 200
+            bot_update_body=(b"--bot-create\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\npatch\r\n"
+                             +bot_create_body.replace(b"Picture Bot", b"Updated Robot"))
+            code, _, page = request(admin, base, "/account/bots/3", data=bot_update_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=bot-create"})
+            assert code == 200 and "Updated Robot" in page
+            with admin.open(base+"/users/3/avatar") as res:
+                assert res.status==200 and res.headers.get_content_type()=="image/webp" and res.read()[:4]==b"RIFF"
             code, _, _ = request(client(), base, "/account/bots/3/key", {})
             assert code == 401
             code, _, page = request(admin, base, "/account/bots/3/update", {"name": "Rust Robot"})
             assert code == 200 and "Rust Robot" in page
+            code, _, page = request(admin, base, f"/account/bots/{picture_bot_id}", {"_method":"delete"}, method="POST")
+            assert code == 200 and "Picture Bot" not in page
             code, _, payload = request(client(), base, f"/rooms/1/{key}/messages", data=b"from bot", method="POST")
             assert code == 201 and payload == "", code
             code, _, payload = request(client(), base, f"/rooms/1/{key}/messages")
