@@ -827,8 +827,10 @@ def main():
             assert code == 201
             code, _, page = request(admin, base, "/users/2")
             assert code == 200 and "Private sign-in link" in page and "ban" in page
+            with sqlite3.connect(f"{tmp}/test.db") as ban_db:
+                ban_db.execute("UPDATE sessions SET ip_address='8.8.8.8' WHERE user_id=2")
             code, _, _ = request(admin, base, "/users/2/ban", {})
-            assert code == 200
+            assert code == 200, code
             banned_ip = client()
             assert request(banned_ip, base, "/session/new")[0] == 200
             assert request(banned_ip, base, "/session", {"email_address": "none@example.com", "password": "bad"}, headers={"X-Forwarded-For": "8.8.8.8"})[0] == 429
@@ -838,7 +840,7 @@ def main():
             assert request(moved, base, transfer, {}, method="PUT", headers={"X-CSRF-Token": transfer_csrf})[0] == 400
             assert "ban removes this message" not in request(admin, base, "/rooms/1")[2]
             code, _, _ = request(admin, base, "/users/2/ban", method="DELETE")
-            assert code == 303
+            assert code == 302
             assert request(banned_ip, base, "/session", {"email_address": "none@example.com", "password": "bad"}, headers={"X-Forwarded-For": "8.8.8.8"})[0] == 401
             assert "unban" not in request(admin, base, "/users/2")[2]
             assert request(member, base, "/session/new")[0] == 200

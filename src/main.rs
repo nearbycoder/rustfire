@@ -7124,20 +7124,17 @@ async fn user_ban(
     if !is_admin(&admin) {
         return Err(StatusCode::FORBIDDEN);
     }
-    if admin.id == id {
-        return Err(StatusCode::CONFLICT);
-    }
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
     let status: Option<i64> = tx
         .query_row(
-            "SELECT status FROM users WHERE id=?1 AND role!=2",
+            "SELECT status FROM users WHERE id=?1",
             [id],
             |r| r.get(0),
         )
         .optional()
         .map_err(db_err)?;
-    if status != Some(0) {
+    if status.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
     let mut st = tx
@@ -7167,13 +7164,14 @@ async fn user_ban(
         .map_err(db_err)?;
     drop(ip_stmt);
     for ip in ips {
-        if ip.parse::<IpAddr>().map(public_ip).unwrap_or(false) {
-            tx.execute(
-                "INSERT INTO bans(user_id,ip_address) VALUES(?1,?2)",
-                params![id, ip],
-            )
-            .map_err(db_err)?;
+        if !ip.parse::<IpAddr>().map(public_ip).unwrap_or(false) {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
+        tx.execute(
+            "INSERT INTO bans(user_id,ip_address) VALUES(?1,?2)",
+            params![id, ip],
+        )
+        .map_err(db_err)?;
     }
     let inline_blobs = inline_blob_ids(&tx, "SELECT DISTINCT e.blob_id FROM inline_embeds e JOIN messages m ON m.id=e.message_id WHERE m.creator_id=?1", id)?;
     tx.execute("DELETE FROM messages WHERE creator_id=?1", [id])
@@ -7196,7 +7194,7 @@ async fn user_ban(
             payload: json!({"type":"message_deleted","room_id":rid,"id":mid,"client_message_id":client_message_id}).to_string(),
         });
     }
-    Ok(Redirect::to(&format!("/users/{id}")).into_response())
+    Ok(found_redirect(&format!("/users/{id}")))
 }
 async fn user_unban(
     State(s): State<Arc<AppState>>,
@@ -7210,10 +7208,7 @@ async fn user_unban(
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
     let changed = tx
-        .execute(
-            "UPDATE users SET status=0,updated_at=?1 WHERE id=?2 AND status=2 AND role!=2",
-            params![now(), id],
-        )
+        .execute("UPDATE users SET status=0,updated_at=?1 WHERE id=?2", params![now(), id])
         .map_err(db_err)?;
     if changed == 0 {
         return Err(StatusCode::NOT_FOUND);
@@ -7221,7 +7216,7 @@ async fn user_unban(
     tx.execute("DELETE FROM bans WHERE user_id=?1", [id])
         .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
-    Ok(Redirect::to(&format!("/users/{id}")).into_response())
+    Ok(found_redirect(&format!("/users/{id}")))
 }
 async fn autocomplete(
     State(s): State<Arc<AppState>>,
