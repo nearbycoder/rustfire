@@ -383,9 +383,9 @@ def main():
             code, _, _ = request(member, base, "/account/update", {"name": "Nope"})
             assert code == 403
             code, _, page = request(admin, base, "/account/update", {"name": "Team Fire"})
-            assert code == 200 and "Team Fire" in page
+            assert code == 200 and "Team Fire" in page, (code, page[:300])
             code, _, page = request(admin, base, "/account", {"account[name]": "Team Fire"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             code, _, page = request(admin, base, "/account")
             assert code == 200 and "Team Fire" in page
             code, _, page = request(admin, base, "/account/custom_styles/edit")
@@ -401,16 +401,38 @@ def main():
             code, _, _ = request(member, base, "/rooms/opens", {"name": "Not allowed"})
             assert code == 403
             code, _, _ = request(admin, base, "/account", {"account[settings][restrict_room_creation_to_administrators]": "false"}, method="PUT")
-            assert code == 303
+            assert code == 302
             code, _, _ = request(admin, base, "/account/update", {"name": "Team Fire", "restrict_room_creation": "off"})
             assert code == 200
+            with client().open(base+"/account/logo") as res:
+                stock = res.read()
+                assert res.status==200 and res.headers.get_content_type()=="image/png" and stock[:8]==b"\x89PNG\r\n\x1a\n" and int.from_bytes(stock[16:20],"big")==512
+            with client().open(base+"/account/logo?size=small") as res:
+                stock_small = res.read()
+                assert res.status==200 and res.headers.get_content_type()=="image/png" and int.from_bytes(stock_small[16:20],"big")==192
             logo_body=(b"--logo-test\r\nContent-Disposition: form-data; name=\"logo\"; filename=\"logo.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--logo-test--\r\n")
             code, _, _ = request(admin, base, "/account/logo", data=logo_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=logo-test"})
             assert code == 200
             with client().open(base+"/account/logo") as res:
-                assert res.status==200 and res.read()==png
+                image=res.read()
+                assert res.status==200 and res.headers.get_content_type()=="image/png" and image[:8]==b"\x89PNG\r\n\x1a\n" and int.from_bytes(image[16:20],"big")==1
             code, _, _ = request(admin, base, "/account/logo/delete", {})
             assert code == 200
+            account_body=(b"--account-test\r\nContent-Disposition: form-data; name=\"account[name]\"\r\n\r\nTeam Fire\r\n"
+                          b"--account-test\r\nContent-Disposition: form-data; name=\"account[settings][restrict_room_creation_to_administrators]\"\r\n\r\ntrue\r\n"
+                          b"--account-test\r\nContent-Disposition: form-data; name=\"account[logo]\"; filename=\"logo.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--account-test--\r\n")
+            code, _, page = request(admin, base, "/account", data=account_body, method="PATCH", headers={"Content-Type":"multipart/form-data; boundary=account-test"})
+            assert code == 302
+            assert "Team Fire" in request(admin,base,"/account/edit")[2]
+            with sqlite3.connect(f"{tmp}/test.db") as db:
+                assert db.execute("SELECT restrict_room_creation FROM account_settings WHERE id=1").fetchone()[0] == 1
+            with client().open(base+"/account/logo") as res:
+                image=res.read()
+                assert res.status==200 and int.from_bytes(image[16:20],"big")==1
+            assert request(admin,base,"/account/logo",method="DELETE")[0]==303
+            with client().open(base+"/account/logo") as res:
+                assert res.read()==stock
+            assert request(admin,base,"/account/update",{"restrict_room_creation":"off"})[0]==200
             code, _, _ = request(admin, base, "/account/users/1/role", {"role": "member"})
             assert code == 409
             code, _, _ = request(admin, base, "/account/users/2/role", {"role": "administrator"})

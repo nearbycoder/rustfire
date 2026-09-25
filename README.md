@@ -48,7 +48,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Mention autocomplete with Campfire's response fields and Rails-format signed mention IDs, verified Trix mention attachments, and bot webhook dispatch for selected bot mentions in regular rooms (plain `@name` text does not trigger a bot); older Rustfire IDs remain readable, and original Campfire IDs can be verified when its secret key base is configured
 - Rails-format signed avatar URLs in autocomplete, including Campfire's timestamp version; signed routes verify their purpose and signature. Missing human avatars render the upstream initials and color pattern, missing bot avatars use the upstream asset, and uploaded avatars serve cached 512-pixel WebP variants.
 - Boosts with signed booster avatars and names, owner-only reveal/delete controls, individually addressable markup, and append/remove live events. Paired boost append samples match Campfire's parsed element, attribute, and text content when given the same boost.
-- Profile name/email/password/bio and avatar editing, account logos and custom CSS, administrator role changes, deactivation and bans, four-hour session transfer links, and live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
+- Profile name/email/password/bio and avatar editing, account logo upload and deletion through the source account routes, 512/192-pixel PNG logo variants, custom CSS, administrator role changes, deactivation and bans, four-hour session transfer links, and live message delivery over `/cable`; deactivation preserves direct-room history while revoking sessions and sockets
 - Session and room access control
 - CSRF checks for authenticated writes and public setup, sign-in, join, and device sign-in forms; same-origin WebSocket handshakes; sign-in limited to 10 attempts per IP over three minutes
 - Room-scoped WebSocket fanout and message catch-up after reconnect, so sockets do not process events for unrelated rooms and missed messages can be recovered; timestamp-based room refresh also replaces edited messages missed while disconnected
@@ -83,4 +83,4 @@ The smoke tests start isolated servers and databases, then check setup, chat, at
 
 ## License
 
-Upstream SVG icons, `campfire-icon.png`, and sound audio and images are copied from ONCE Campfire under its MIT license; see `LICENSE.upstream`. The Trix editor assets come from the upstream-locked MIT-licensed `action_text-trix` 2.1.19 gem; see `LICENSE.trix`. Rustfire's own code is distributed under the MIT license in `LICENSE`.
+Upstream SVG icons, `campfire-icon.png`, `app-icon.png`, `app-icon-192.png`, and sound audio and images are copied from ONCE Campfire under its MIT license; see `LICENSE.upstream`. The Trix editor assets come from the upstream-locked MIT-licensed `action_text-trix` 2.1.19 gem; see `LICENSE.trix`. Rustfire's own code is distributed under the MIT license in `LICENSE`.

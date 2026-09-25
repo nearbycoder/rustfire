@@ -4706,42 +4706,141 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
 async fn account_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Form(f): Form<HashMap<String, String>>,
+    req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let mut logo = None;
+    let f = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .starts_with("multipart/form-data")
+    {
+        let mut multipart = Multipart::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut values = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
+            let field_name = field.name().unwrap_or("").to_string();
+            if field_name == "account[logo]" || field_name == "logo" {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                if !bytes.is_empty() {
+                    if bytes.len() > 5 * 1024 * 1024 {
+                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                    }
+                    logo = Some((bytes.to_vec(), content_type));
+                }
+            } else if matches!(
+                field_name.as_str(),
+                "name"
+                    | "account[name]"
+                    | "restrict_room_creation"
+                    | "account[settings][restrict_room_creation_to_administrators]"
+            ) {
+                values.insert(
+                    field_name,
+                    field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?,
+                );
+            }
+        }
+        values
+    } else {
+        let RawForm(raw) = RawForm::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        fields(&raw).0
+    };
     let name = form_value(&f, "name", "account[name]");
     let restricted = form_value(
         &f,
         "restrict_room_creation",
         "account[settings][restrict_room_creation_to_administrators]",
     );
-    if name.is_none() && restricted.is_none() {
+    if name.is_none() && restricted.is_none() && logo.is_none() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     if let Some(name) = name {
         if name.trim().is_empty() {
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
-        pool(&s)?
-            .execute(
+    }
+    let new_logo = if let Some((bytes, content_type)) = logo {
+        let dir = std::path::PathBuf::from(
+            env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+        )
+        .join("logos");
+        std::fs::create_dir_all(&dir).map_err(db_err)?;
+        let stored = Uuid::new_v4().to_string();
+        std::fs::write(dir.join(&stored), bytes).map_err(db_err)?;
+        Some((stored, content_type))
+    } else {
+        None
+    };
+    let mut db = match pool(&s) {
+        Ok(db) => db,
+        Err(error) => {
+            if let Some((stored, _)) = &new_logo {
+                remove_logo_files(stored);
+            }
+            return Err(error);
+        }
+    };
+    let result = (|| -> Result<Option<String>, StatusCode> {
+        let tx = db.transaction().map_err(db_err)?;
+        if let Some(name) = name {
+            tx.execute(
                 "UPDATE accounts SET name=?1,updated_at=?2",
                 params![name.trim(), now()],
             )
             .map_err(db_err)?;
-    }
-    if let Some(restricted) = restricted {
-        let value = matches!(restricted, "1" | "true" | "on");
-        pool(&s)?
-            .execute(
+        } else if new_logo.is_some() || restricted.is_some() {
+            tx.execute("UPDATE accounts SET updated_at=?1", [now()])
+                .map_err(db_err)?;
+        }
+        if let Some(restricted) = restricted {
+            tx.execute(
                 "UPDATE account_settings SET restrict_room_creation=?1 WHERE id=1",
-                [value],
+                [matches!(restricted, "1" | "true" | "on")],
             )
             .map_err(db_err)?;
+        }
+        let old = if let Some((stored, content_type)) = &new_logo {
+            let old = tx
+                .query_row(
+                    "SELECT stored_name FROM account_logos WHERE id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(db_err)?;
+            tx.execute("INSERT INTO account_logos(id,stored_name,content_type) VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET stored_name=excluded.stored_name,content_type=excluded.content_type",params![stored,content_type]).map_err(db_err)?;
+            old
+        } else {
+            None
+        };
+        tx.commit().map_err(db_err)?;
+        Ok(old)
+    })();
+    if result.is_err() {
+        if let Some((stored, _)) = &new_logo {
+            remove_logo_files(stored)
+        }
     }
-    Ok(Redirect::to("/account").into_response())
+    if let Some(old) = result? {
+        remove_logo_files(&old)
+    }
+    Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
@@ -4806,7 +4905,11 @@ async fn custom_styles_css(State(s): State<Arc<AppState>>) -> AppResult {
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     Ok(response)
 }
-async fn logo_get(State(s): State<Arc<AppState>>) -> AppResult {
+async fn logo_get(
+    State(s): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> AppResult {
+    let small = query.get("size").is_some_and(|size| size == "small");
     let db = pool(&s)?;
     let row: Option<(String, String)> = db
         .query_row(
@@ -4816,21 +4919,111 @@ async fn logo_get(State(s): State<Arc<AppState>>) -> AppResult {
         )
         .optional()
         .map_err(db_err)?;
-    if let Some((stored, content_type)) = row {
-        let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-        let data = tokio::fs::read(std::path::Path::new(&dir).join("logos").join(stored))
-            .await
-            .map_err(|_| StatusCode::NOT_FOUND)?;
-        let mut r = data.into_response();
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, content_type.parse().map_err(db_err)?);
-        r.headers_mut()
-            .insert("x-content-type-options", "nosniff".parse().unwrap());
-        r.headers_mut()
-            .insert("content-security-policy", "sandbox".parse().unwrap());
-        Ok(r)
+    let bytes = if let Some((stored, content_type)) = row {
+        if safe_inline_image(&content_type) {
+            logo_png_variant(&s, &stored, small).await
+        } else {
+            None
+        }
     } else {
-        Ok(Redirect::to("/static/icons/campfire-icon.png").into_response())
+        None
+    }
+    .unwrap_or_else(|| {
+        if small {
+            include_bytes!("../static/icons/app-icon-192.png").to_vec()
+        } else {
+            include_bytes!("../static/icons/app-icon.png").to_vec()
+        }
+    });
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "public, max-age=300, stale-while-revalidate=604800"
+            .parse()
+            .unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert("x-content-type-options", "nosniff".parse().unwrap());
+    Ok(response)
+}
+async fn logo_png_variant(s: &AppState, stored: &str, small: bool) -> Option<Vec<u8>> {
+    if Uuid::parse_str(stored).is_err() {
+        return None;
+    }
+    let dir = std::path::PathBuf::from(
+        env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+    )
+    .join("logos");
+    let cache = dir.join("variants");
+    tokio::fs::create_dir_all(&cache).await.ok()?;
+    let size = if small { 192 } else { 512 };
+    let output = cache.join(format!("{stored}-{size}.png"));
+    if tokio::fs::metadata(&output).await.is_err() {
+        let _permit = s.variant_slots.acquire().await.ok()?;
+        if tokio::fs::metadata(&output).await.is_err() {
+            let nonce = Uuid::new_v4();
+            let stage = cache.join(format!("{stored}-{size}-{nonce}.v"));
+            let temporary = cache.join(format!("{stored}-{size}-{nonce}.png"));
+            let resized = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::process::Command::new("vips")
+                    .arg("thumbnail")
+                    .arg(dir.join(stored))
+                    .arg(&stage)
+                    .arg(size.to_string())
+                    .args(["--height", &size.to_string(), "--size", "down"])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .is_some_and(|result| result.status.success());
+            let sharpened = resized
+                && tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tokio::process::Command::new("vips")
+                        .arg("conv")
+                        .arg(&stage)
+                        .arg(&temporary)
+                        .arg("static/vips-sharpen-mask.txt")
+                        .args(["--precision", "integer"])
+                        .kill_on_drop(true)
+                        .output(),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .is_some_and(|result| result.status.success());
+            let _ = tokio::fs::remove_file(&stage).await;
+            if sharpened {
+                if tokio::fs::rename(&temporary, &output).await.is_err() {
+                    let _ = tokio::fs::remove_file(&temporary).await;
+                    return None;
+                }
+            } else {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                return None;
+            }
+        }
+    }
+    tokio::fs::read(output).await.ok()
+}
+fn remove_logo_files(stored: &str) {
+    if Uuid::parse_str(stored).is_err() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(
+        env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+    )
+    .join("logos");
+    let _ = std::fs::remove_file(dir.join(stored));
+    for size in [192, 512] {
+        let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-{size}.png")));
     }
 }
 async fn logo_post(
@@ -4853,9 +5046,6 @@ async fn logo_post(
                 .content_type()
                 .unwrap_or("application/octet-stream")
                 .to_string();
-            if !safe_inline_image(&content_type) {
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
-            }
             let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
             if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
                 return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -4882,9 +5072,9 @@ async fn logo_post(
         .map_err(db_err)?;
     db.execute("INSERT INTO account_logos(id,stored_name,content_type) VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET stored_name=excluded.stored_name,content_type=excluded.content_type",params![stored,content_type]).map_err(db_err)?;
     if let Some(old) = old {
-        let _ = std::fs::remove_file(dir.join(old));
+        remove_logo_files(&old);
     }
-    Ok(Redirect::to("/account").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn logo_delete(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
@@ -4903,10 +5093,9 @@ async fn logo_delete(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
     db.execute("DELETE FROM account_logos WHERE id=1", [])
         .map_err(db_err)?;
     if let Some(old) = old {
-        let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-        let _ = std::fs::remove_file(std::path::Path::new(&dir).join("logos").join(old));
+        remove_logo_files(&old);
     }
-    Ok(Redirect::to("/account").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn join_code_create(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;

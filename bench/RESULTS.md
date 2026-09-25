@@ -294,3 +294,17 @@ With 10,000 seeded messages and the latest 40 returned, `bench/paired_bot_messag
 | 22 | 128 | 3 s | 3,850 | 1,225 | 53.6 ms | 151.0 ms |
 
 All listed runs had zero HTTP errors. Under a 100 ms p95 threshold for **this read endpoint**, Rustfire met the threshold at every tested concurrency through 128 clients; the 22-worker Campfire run met it through 32 and exceeded it at 64 and 128. A longer trial, independent load generator, more routes, and full feature parity are still required before claiming a general speed or scale advantage for the application.
+
+## Account logo parity and cached PNG reads
+
+`bench/paired_account_logo.py` used the pinned Campfire checkout and matching disposable accounts. A multipart PATCH of account name, room-creation setting, and `moon.jpg` produced the same stored values and HTTP 302 redirect to `/account/edit`. Both apps returned byte-identical stock PNGs at 512 and 192 pixels, byte-identical 512 and 192 pixel PNG variants for the JPEG, and the stock PNGs again after deletion. Both fell back to stock PNGs when the uploaded image was BMP. The probe asserts all of these values and the decoded pixel hashes; it checks this workflow and these fixtures, not every upload format or account screen interaction.
+
+The timed run fetched the cached, **byte-identical 74,720-byte** 512-pixel JPEG variant. A release Rustfire process and packaged 22-worker Campfire each ran separately on the same 32-logical-CPU host; the Python load generator shared that host. Each client used a persistent HTTP connection and two warmup GETs. Three-second trials produced zero errors and verified each response body against the expected PNG:
+
+| Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 10,462 | 433 | 0.136 ms | 6.558 ms |
+| 8 | 12,427 | 4,208 | 1.622 ms | 3.156 ms |
+| 32 | 12,411 | 5,174 | 6.373 ms | 9.822 ms |
+
+This is an exact-response comparison for one warm logo-read endpoint. It does not include uploads or variant generation in the measured interval. The load generator was local, CPU and memory use were not recorded, and the three-second runs do not establish a sustained capacity limit. Full-app speed and scale remain unproven while other routes and behavior differ.
