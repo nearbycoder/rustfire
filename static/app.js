@@ -370,7 +370,7 @@ if (chat) {
       if(response.ok){const article=remove.closest('.message');(article.closest('[data-stream-message]')||article).remove();formatMessageGroups()}else alert('Could not delete message');return;
     }
     const customBoost=e.target.closest('[data-custom-boost]');
-    if(customBoost){const form=customBoost.nextElementSibling;form.hidden=false;form.querySelector('input').focus();return;}
+    if(customBoost){e.preventDefault();const form=customBoost.nextElementSibling;form.hidden=false;form.querySelector('[name="boost[content]"]')?.focus();return;}
     const lightbox=e.target.closest('[data-lightbox]');
     if(lightbox){e.preventDefault();let dialog=document.querySelector('.image-lightbox');if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});document.body.append(dialog)}dialog.querySelector('img').src=lightbox.href;dialog.showModal();return;}
     const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }
@@ -387,8 +387,9 @@ if (chat) {
       typingInput.editor.loadHTML(block.outerHTML+cite.outerHTML+'<br>');typingInput.focus();reply.closest('details').open=false;return;
     }
     const copy=e.target.closest('[data-copy-link]');
-    if(copy){try{await navigator.clipboard.writeText(new URL(copy.dataset.copyLink,location.origin).href);copy.textContent='Copied';setTimeout(()=>copy.textContent='Copy link',1500);}catch{}return;}
+    if(copy){try{await navigator.clipboard.writeText(new URL(copy.dataset.copyLink,location.origin).href);copy.setAttribute('aria-label','Copied');copy.title='Copied';setTimeout(()=>{copy.setAttribute('aria-label','Copy link');copy.title='Copy link';},1500);}catch{}return;}
     const button=e.target.closest('[data-boost]'); if(!button) return;
+    e.preventDefault();
     const res=await fetch(`/messages/${button.dataset.boost}/boosts`,{method:'POST',body:new URLSearchParams({content:button.dataset.emoji||'👍'}),headers:{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrfToken}});
     if(!res.ok) alert('Could not boost message');
     else button.closest('details').open=false;

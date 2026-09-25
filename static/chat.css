@@ -74,11 +74,17 @@ body:has(.app-shell)>header { display: none; }
 .message-options summary img { width: 22px; }
 .message-options-menu { position: absolute; z-index: 9; top: 42px; right: 0; min-width: 250px; padding: 10px; border: 1px solid var(--chat-border); border-radius: 12px; background: var(--chat-bg); box-shadow: 0 8px 24px #0002; }
 .quick-boosts { display: grid; grid-template-columns: repeat(4,1fr); gap: 4px; }
+.quick-boosts form { margin: 0; }
 .quick-boosts button { border: 0; border-radius: 8px; background: transparent; font-size: 23px; padding: 7px; }
+.quick-boosts form button { width: 100%; }
+.quick-boosts .boost-character { margin: 0; }
 .quick-boosts button:hover,.message-options-links :is(a,button):hover { background: var(--chat-bubble); }
 .custom-boost-link { display: block; width: 100%; margin-top: 6px; padding: 6px; border: 0; border-radius: 7px; background: transparent; color: var(--chat-text); font-size: 13px; text-align: center; cursor: pointer; }
+.quick-boosts .custom-boost-link { display: grid; place-items: center; margin: 0; }
+.custom-boost-link img,.message-options-links img { width: 20px; height: 20px; }
 .custom-boost-link:hover { background: var(--chat-bubble); }
 .custom-boost-form:not([hidden]) { display: flex; gap: 5px; margin-top: 5px; }
+.quick-boosts .custom-boost-form:not([hidden]) { grid-column: 1 / -1; }
 .custom-boost-form input { min-width: 0; flex: 1; border: 1px solid var(--chat-border); border-radius: 7px; padding: 6px; background: var(--chat-bg); color: var(--chat-text); }
 .custom-boost-form button { border: 0; border-radius: 7px; padding: 6px 10px; background: var(--chat-bubble); color: var(--chat-text); cursor: pointer; }
 .message-options-links { display: flex; gap: 4px; border-top: 1px solid var(--chat-border); margin-top: 8px; padding-top: 8px; }
