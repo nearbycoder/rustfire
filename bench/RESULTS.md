@@ -524,6 +524,17 @@ The open and private room creation pages now have matching parsed panel tags, at
 
 The paired probe now also compares four source-shaped edit pages: an open and a private edit route for each created room. Both the edit and delete panels matched in parsed tags, attributes, and non-whitespace text after normalizing only CSRF tokens and absolute form origins. Source-style POST forms with PATCH override converted the open room to private membership `[1, 42]` and the private room to open membership for all 51 active users, with the same 302 redirects and database state in both apps. The shared-room delete form returned 302 to `/`, and room 6 and its memberships were gone in both databases. In a Rustfire browser check, switching a private room to open preserved the edited name; saving landed on the room and gave it all 51 memberships. This checks selected workflows on one fixture, not all authorization and validation cases, full-page visual parity, or performance.
 
+The paired edit probe also renamed the open and private rooms, then converted each to the other type, while subscribed to the signed global and per-user sidebar streams. Both apps emitted the same four `replace` events, byte for byte: open room 6 on the global stream, private room 7 on the user stream, converted private room 6 on the user stream, and converted open room 7 on the global stream. A separate `--operation update` fanout trial renamed one 51-member open room ten times after warmup, with 1,000 or 5,000 sockets subscribed to the global stream. It ran each app serially on one host with 22 Puma workers for Campfire and one release Rustfire process. The sampled `replace` event was **448 bytes** and byte-identical. Both trial orders at each socket count delivered every expected event, with zero missed, unexpected, or early-closed deliveries:
+
+| Subscribed sockets | Expected deliveries per app | Trial order | Rustfire elapsed / p95 | Campfire elapsed / p95 |
+| ---: | ---: | --- | ---: | ---: |
+| 1,000 | 10,000 | Rustfire first | 137 / 21 ms | 757 / 109 ms |
+| 1,000 | 10,000 | Campfire first | 132 / 20 ms | 694 / 100 ms |
+| 5,000 | 50,000 | Rustfire first | 511 / 81 ms | 1,230 / 155 ms |
+| 5,000 | 50,000 | Campfire first | 471 / 74 ms | 987 / 193 ms |
+
+The interval covers ten sequential PATCH-override POSTs and delivery to the final socket, after two HTTP warmups, two subscribed-stream warmups, and a 500 ms settling interval. Socket setup is excluded. The final name and all 51 memberships matched in both databases. This establishes a faster matched update/sidebar-replacement burst on this fixture, not sustained capacity or whole-app superiority.
+
 A fresh paired 1,000-socket, ten-room open-room creation burst after the form and redirect changes delivered **10,000/10,000** expected signed sidebar frames in each app with identical sampled payloads and no missed, unexpected, or early-closed deliveries. Rustfire measured **142 ms elapsed / 21 ms p95** and Campfire **579 ms / 100 ms p95**. This is a short localhost regression trial with one account, not a sustained capacity comparison.
 
 With the source-shaped sidebar frame in the release build, a fresh reverse-order 1,000-socket direct-room creation burst delivered all **10,000/10,000** frames on each app. Rustfire measured **136 ms elapsed / 21 ms p95** and Campfire **733 ms / 115 ms p95**. Both received the same 815-byte average event payload and had zero missed, unexpected, or early-closed deliveries. The burst has the same short local scope described above.

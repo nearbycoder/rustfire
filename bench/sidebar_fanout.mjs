@@ -1,4 +1,4 @@
-// Paired shared-room creation and signed sidebar Turbo fanout probe.
+// Paired shared-room creation or update and signed sidebar Turbo fanout probe.
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -12,6 +12,7 @@ const args = Object.fromEntries(entries.reduce((pairs, value, index) => {
 const base = new URL(args.base);
 const cookie = args.cookie;
 const csrf = args.csrf;
+const operation = args.operation ?? 'create';
 const sockets = Number(args.sockets ?? 200);
 const rooms = Number(args.rooms ?? 10);
 const warmupRooms = Number(args['warmup-rooms'] ?? 2);
@@ -19,7 +20,7 @@ const socketWarmupRooms = Number(args['socket-warmup-rooms'] ?? 2);
 const settleMs = Number(args['settle-ms'] ?? 500);
 const timeout = Number(args.timeout ?? 30000);
 const runId = args['run-id'] ?? crypto.randomUUID();
-if (base.protocol !== 'http:' || !cookie || !csrf || !Number.isSafeInteger(sockets) || sockets < 1 || !Number.isSafeInteger(rooms) || rooms < 1 || !Number.isSafeInteger(warmupRooms) || warmupRooms < 0 || !Number.isSafeInteger(socketWarmupRooms) || socketWarmupRooms < 0 || !Number.isFinite(settleMs) || settleMs < 0) {
+if (base.protocol !== 'http:' || !cookie || !csrf || !['create', 'update'].includes(operation) || !Number.isSafeInteger(sockets) || sockets < 1 || !Number.isSafeInteger(rooms) || rooms < 1 || !Number.isSafeInteger(warmupRooms) || warmupRooms < 0 || !Number.isSafeInteger(socketWarmupRooms) || socketWarmupRooms < 0 || !Number.isFinite(settleMs) || settleMs < 0) {
   throw new Error('Use --base http://host:port --cookie name=value --csrf token --sockets 200 --rooms 10');
 }
 const sidebarResponse = await fetch(new URL('/users/me/sidebar', base), { headers: { Cookie: cookie } });
@@ -44,6 +45,7 @@ let unexpected = 0;
 let closedEarly = 0;
 let sample;
 let warmReceived = 0;
+let updateRoomId;
 
 function frame(value) {
   const payload = Buffer.from(value);
@@ -111,7 +113,8 @@ function connect(index) {
           }
           const match = html.match(/sidebar-fanout-([a-f\d-]+)-(\d+)/);
           const roomIndex = match && match[1] === runId ? Number(match[2]) : NaN;
-          if (!html.includes('action="prepend"') || !html.includes('target="shared_rooms"') || !html.includes('list_rooms_open_') || !Number.isInteger(roomIndex) || roomIndex < 0 || roomIndex >= rooms || seen[index].has(roomIndex) || !sent.has(roomIndex)) {
+          const expectedTarget = operation === 'create' ? 'target="shared_rooms"' : `target="list_rooms_open_${updateRoomId}"`;
+          if (!html.includes(`action="${operation === 'create' ? 'prepend' : 'replace'}"`) || !html.includes(expectedTarget) || !html.includes('list_rooms_open_') || !Number.isInteger(roomIndex) || roomIndex < 0 || roomIndex >= rooms || seen[index].has(roomIndex) || !sent.has(roomIndex)) {
             unexpected++;
             continue;
           }
@@ -135,14 +138,31 @@ async function createRoom(name) {
     body: new URLSearchParams({ 'room[name]': name, authenticity_token: csrf }),
   });
   if (![302, 303].includes(response.status)) throw new Error(`Create room ${name} returned ${response.status}: ${(await response.text()).slice(0, 250)}`);
+  return Number(new URL(response.headers.get('location'), base).pathname.match(/^\/rooms\/(\d+)$/)?.[1]);
+}
+
+async function updateRoom(name) {
+  const response = await fetch(new URL(`/rooms/opens/${updateRoomId}`, base), {
+    method: 'POST', redirect: 'manual',
+    headers: { Cookie: cookie, 'X-CSRF-Token': csrf, 'Content-Type': 'application/x-www-form-urlencoded', Connection: 'close' },
+    body: new URLSearchParams({ _method: 'patch', 'room[name]': name, authenticity_token: csrf }),
+  });
+  if (response.status !== 302 || new URL(response.headers.get('location'), base).pathname !== `/rooms/${updateRoomId}`) {
+    throw new Error(`Update room ${name} returned ${response.status}: ${(await response.text()).slice(0, 250)}`);
+  }
 }
 
 try {
-  for (let index = 0; index < warmupRooms; index++) await createRoom(`sidebar-warmup-${runId}-${index}`);
+  if (operation === 'update') {
+    updateRoomId = await createRoom(`sidebar-update-fixture-${runId}`);
+    if (!Number.isSafeInteger(updateRoomId) || updateRoomId < 1) throw new Error('Update fixture room ID missing');
+  }
+  const mutate = operation === 'create' ? createRoom : updateRoom;
+  for (let index = 0; index < warmupRooms; index++) await mutate(`sidebar-warmup-${runId}-${index}`);
   for (let start = 0; start < sockets; start += 50) {
     await Promise.all(Array.from({ length: Math.min(50, sockets - start) }, (_, index) => connect(start + index)));
   }
-  for (let index = 0; index < socketWarmupRooms; index++) await createRoom(`sidebar-socket-warmup-${runId}-${index}`);
+  for (let index = 0; index < socketWarmupRooms; index++) await mutate(`sidebar-socket-warmup-${runId}-${index}`);
   const warmBegin = performance.now();
   while (warmReceived < sockets * socketWarmupRooms && performance.now() - warmBegin < timeout) await new Promise(resolve => setTimeout(resolve, 20));
   if (warmReceived !== sockets * socketWarmupRooms) throw new Error(`Socket warmup received ${warmReceived}/${sockets * socketWarmupRooms}`);
@@ -150,7 +170,7 @@ try {
   const begin = performance.now();
   for (let index = 0; index < rooms; index++) {
     sent.set(index, performance.now());
-    await createRoom(`sidebar-fanout-${runId}-${index}`);
+    await mutate(`sidebar-fanout-${runId}-${index}`);
     requestMs.push(Math.round(performance.now() - sent.get(index)));
   }
   const expected = sockets * rooms;
@@ -158,7 +178,7 @@ try {
   latencies.sort((a, b) => a - b);
   if (args['sample-file'] && sample) fs.writeFileSync(args['sample-file'], sample);
   const result = {
-    sockets, rooms, warmup_rooms: warmupRooms, socket_warmup_rooms: socketWarmupRooms, settle_ms: settleMs, expected, received, missed: expected - received, unexpected, closed_early: closedEarly,
+    operation, sockets, rooms, warmup_rooms: warmupRooms, socket_warmup_rooms: socketWarmupRooms, settle_ms: settleMs, expected, received, missed: expected - received, unexpected, closed_early: closedEarly,
     elapsed_ms: Math.round(performance.now() - begin), average_event_bytes: received ? Math.round(bytes / received) : 0,
     p50_ms: latencies.length ? Math.round(latencies[Math.floor((latencies.length - 1) * .5)]) : null,
     p95_ms: latencies.length ? Math.round(latencies[Math.floor((latencies.length - 1) * .95)]) : null,

@@ -131,12 +131,30 @@ def run(port, cookie, csrf, capture_dir, database):
         created_state = created_room_state(database)
         room_edit_paths = ("/rooms/opens/6/edit", "/rooms/closeds/6/edit", "/rooms/closeds/7/edit", "/rooms/opens/7/edit")
         room_edit_pages = [request(port, path, cookie)[2] for path in room_edit_paths]
-        updated_rooms = [update_room_from_form(port, "closeds", 6, cookie, csrf, "Restricted public room", (1, 42)), update_room_from_form(port, "opens", 7, cookie, csrf, "Open former private room")]
+        updates = subprocess.Popen(
+            ["node", "bench/capture_room_updates.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", cookie, "--count", "2"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            ready = updates.stdout.readline().strip()
+            if ready != "READY":
+                output, error = updates.communicate(timeout=10)
+                raise AssertionError(f"Shared-room update capture did not start: {ready}\n{output}\n{error}")
+            renamed_rooms = [update_room_from_form(port, "opens", 6, cookie, csrf, "Renamed public room"), update_room_from_form(port, "closeds", 7, cookie, csrf, "Renamed private room", (1, 42))]
+            updated_rooms = [update_room_from_form(port, "closeds", 6, cookie, csrf, "Restricted public room", (1, 42)), update_room_from_form(port, "opens", 7, cookie, csrf, "Open former private room")]
+            output, error = updates.communicate(timeout=35)
+            assert updates.returncode == 0, (output, error)
+            update_events = json.loads(output.strip().splitlines()[-1])
+        finally:
+            if updates.poll() is None:
+                updates.kill()
+                updates.communicate()
+        assert renamed_rooms == [(302, "/rooms/6"), (302, "/rooms/7")], renamed_rooms
         updated_state = updated_room_state(database)
         shared_delete = delete_room_form(port, "/rooms/6", cookie, csrf)
         with sqlite3.connect(database) as db:
             shared_delete_state = (db.execute("SELECT COUNT(*) FROM rooms WHERE id=6").fetchone()[0], db.execute("SELECT COUNT(*) FROM memberships WHERE room_id=6").fetchone()[0])
-        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, delete_result, delete_stream, deleted_sidebar, new_room_pages, created_rooms, created_state, room_edit_pages, updated_rooms, updated_state, shared_delete, shared_delete_state
+        return results, streams, placeholder_counts, placeholder_users, placeholder_html, sidebar_pages, new_ping_page, edit_pages, delete_result, delete_stream, deleted_sidebar, new_room_pages, created_rooms, created_state, room_edit_pages, update_events, updated_rooms, updated_state, shared_delete, shared_delete_state
     finally:
         if process.poll() is None:
             process.kill()
@@ -257,7 +275,7 @@ def main():
 
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": SECRET})
         try:
-            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_delete, rust_delete_stream, rust_deleted_sidebar, rust_new_room_pages, rust_created_rooms, rust_created_state, rust_room_edit_pages, rust_updated_rooms, rust_updated_state, rust_shared_delete, rust_shared_delete_state = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams", rust_db)
+            rust_links, rust_streams, rust_placeholders, rust_placeholder_users, rust_placeholder_html, rust_sidebars, rust_new_ping, rust_edit_pages, rust_delete, rust_delete_stream, rust_deleted_sidebar, rust_new_room_pages, rust_created_rooms, rust_created_state, rust_room_edit_pages, rust_update_events, rust_updated_rooms, rust_updated_state, rust_shared_delete, rust_shared_delete_state = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", temp / "rust-streams", rust_db)
         finally:
             stop_server(rust)
 
@@ -268,7 +286,7 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_delete, camp_delete_stream, camp_deleted_sidebar, camp_new_room_pages, camp_created_rooms, camp_created_state, camp_room_edit_pages, camp_updated_rooms, camp_updated_state, camp_shared_delete, camp_shared_delete_state = run(camp_port, cookie, csrf, temp / "camp-streams", camp_db)
+            camp_links, camp_streams, camp_placeholders, camp_placeholder_users, camp_placeholder_html, camp_sidebars, camp_new_ping, camp_edit_pages, camp_delete, camp_delete_stream, camp_deleted_sidebar, camp_new_room_pages, camp_created_rooms, camp_created_state, camp_room_edit_pages, camp_update_events, camp_updated_rooms, camp_updated_state, camp_shared_delete, camp_shared_delete_state = run(camp_port, cookie, csrf, temp / "camp-streams", camp_db)
         finally:
             if camp is not None:
                 stop_server(camp)
@@ -302,6 +320,11 @@ def main():
             for label, rust_page, camp_page in zip(("open-6", "closed-6", "closed-7", "open-7"), rust_room_edit_pages, camp_room_edit_pages):
                 (args.sample_dir / f"rustfire-edit-{label}.html").write_text(rust_page)
                 (args.sample_dir / f"campfire-edit-{label}.html").write_text(camp_page)
+            for stream in ("global", "user"):
+                for index, event in enumerate(rust_update_events.get(stream, []), 1):
+                    (args.sample_dir / f"rustfire-update-{stream}-{index}.html").write_text(event)
+                for index, event in enumerate(camp_update_events.get(stream, []), 1):
+                    (args.sample_dir / f"campfire-update-{stream}-{index}.html").write_text(event)
         for index, (rust_link, camp_link) in enumerate(zip(rust_links, camp_links), 2):
             assert normalized(rust_link) == normalized(camp_link), f"Direct room {index} markup differs; use --sample-dir to inspect"
             assert normalized(rust_streams[index - 2]) == normalized(camp_streams[index - 2]), f"Direct room {index} Turbo event differs; use --sample-dir to inspect"
@@ -328,12 +351,19 @@ def main():
         assert rust_created_rooms == camp_created_rooms == [(302, "/rooms/6"), (302, "/rooms/7")], (rust_created_rooms, camp_created_rooms)
         expected_created = [("New public room", "Rooms::Open", list(range(1, 52))), ("New private room", "Rooms::Closed", [1, 42])]
         assert rust_created_state == camp_created_state == expected_created
+        assert rust_update_events == camp_update_events, (rust_update_events, camp_update_events)
+        assert set(rust_update_events) == {"global", "user"}, rust_update_events
+        assert [len(rust_update_events[stream]) for stream in ("global", "user")] == [2, 2], rust_update_events
+        assert rust_update_events["global"][0].startswith('<turbo-stream action="replace" target="list_rooms_open_6"><template>')
+        assert rust_update_events["user"][0].startswith('<turbo-stream action="replace" target="list_rooms_closed_7"><template>')
+        assert rust_update_events["user"][1].startswith('<turbo-stream action="replace" target="list_rooms_closed_6"><template>')
+        assert rust_update_events["global"][1].startswith('<turbo-stream action="replace" target="list_rooms_open_7"><template>')
         assert rust_updated_rooms == camp_updated_rooms == [(302, "/rooms/6"), (302, "/rooms/7")], (rust_updated_rooms, camp_updated_rooms)
         expected_updated = [(6, "Restricted public room", "Rooms::Closed", [1, 42]), (7, "Open former private room", "Rooms::Open", list(range(1, 52)))]
         assert rust_updated_state == camp_updated_state == expected_updated, (rust_updated_state, camp_updated_state)
         assert rust_shared_delete == camp_shared_delete == (302, "/"), (rust_shared_delete, camp_shared_delete)
         assert rust_shared_delete_state == camp_shared_delete_state == (0, 0), (rust_shared_delete_state, camp_shared_delete_state)
-        print("PASS paired direct links, create and delete Turbo events, 80 shortcut forms, six sidebar frames, new-ping frame, four direct settings panels, delete form, two new-room panels, four edit-room panel pairs, and open/private room create/convert/delete flows; only room epoch milliseconds, form CSRF tokens, and origins normalized")
+        print("PASS paired direct links, create/delete/update Turbo events, 80 shortcut forms, six sidebar frames, new-ping frame, four direct settings panels, delete form, two new-room panels, four edit-room panel pairs, and open/private room create/convert/delete flows; only room epoch milliseconds, form CSRF tokens, and origins normalized")
 
 
 if __name__ == "__main__":

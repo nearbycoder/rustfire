@@ -1,4 +1,4 @@
-"""Compare matched open-room creation and signed sidebar Turbo fanout.
+"""Compare matched open-room creation or update and signed sidebar Turbo fanout.
 
 Requires the pinned Campfire checkout and bundled Ruby. Uses disposable SQLite
 databases, an isolated Campfire checkout, and an isolated Redis server.
@@ -20,11 +20,11 @@ from paired_banned_content import REPOSITORY, RUBY, BUNDLE, REVISION, isolated_c
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 
 
-def capture(port, cookie, csrf, sockets, rooms, run_id, sample_file):
+def capture(port, cookie, csrf, sockets, rooms, run_id, sample_file, operation):
     command = [
         "node", "bench/sidebar_fanout.mjs", "--base", f"http://127.0.0.1:{port}",
         "--cookie", cookie, "--csrf", csrf, "--sockets", str(sockets),
-        "--rooms", str(rooms), "--run-id", run_id, "--sample-file", str(sample_file),
+        "--rooms", str(rooms), "--run-id", run_id, "--sample-file", str(sample_file), "--operation", operation,
     ]
     result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=180)
     if result.returncode:
@@ -47,12 +47,22 @@ def created_state(database, run_id, expected_rooms):
     return {"rooms": len(rows), "memberships_per_room": users}
 
 
-def sample_structure(path):
+def updated_state(database, run_id, rooms):
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT r.id,r.name,COUNT(m.id) FROM rooms r LEFT JOIN memberships m ON m.room_id=r.id WHERE r.name LIKE ? GROUP BY r.id", (f"sidebar-fanout-{run_id}-%",)).fetchall()
+        users = db.execute("SELECT COUNT(*) FROM users WHERE status=0").fetchone()[0]
+    assert len(rows) == 1 and rows[0][1] == f"sidebar-fanout-{run_id}-{rooms - 1}" and rows[0][2] == users, (rows, users)
+    return {"rooms": 1, "memberships_per_room": users, "last_update": rooms - 1}
+
+
+def sample_structure(path, operation):
     html = path.read_text()
-    assert re.search(r'<turbo-stream\b[^>]*action="prepend"[^>]*target="shared_rooms"', html), html[:300]
+    action = "prepend" if operation == "create" else "replace"
+    target = "shared_rooms" if operation == "create" else r"list_rooms_open_\d+"
+    assert re.search(rf'<turbo-stream\b[^>]*action="{action}"[^>]*target="{target}"', html), html[:300]
     assert re.search(r"\bid=['\"]list_rooms_open_\d+['\"]", html), html[:300]
     assert "sidebar-fanout-" in html
-    return {"stream_action": "prepend", "target": "shared_rooms", "room_id_prefix": "list_rooms_open_", "bytes": len(html.encode())}
+    return {"stream_action": action, "target": "shared_rooms" if operation == "create" else "list_rooms_open_ID", "room_id_prefix": "list_rooms_open_", "bytes": len(html.encode())}
 
 
 def main():
@@ -61,6 +71,7 @@ def main():
     parser.add_argument("--rooms", type=int, default=10)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--campfire-first", action="store_true")
+    parser.add_argument("--operation", choices=("create", "update"), default="create")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="Copy one delivered Turbo event from each app")
     args = parser.parse_args()
     if min(args.sockets, args.rooms, args.campfire_workers) < 1:
@@ -81,8 +92,9 @@ def main():
         def run_rustfire():
             process = start_server(rust_db, rust_port)
             try:
-                metrics = capture(rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.rooms, run_id, temp / "rust-sidebar.html")
-                return metrics, created_state(rust_db, run_id, args.rooms)
+                metrics = capture(rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.rooms, run_id, temp / "rust-sidebar.html", args.operation)
+                state = created_state(rust_db, run_id, args.rooms) if args.operation == "create" else updated_state(rust_db, run_id, args.rooms)
+                return metrics, state
             finally:
                 stop_server(process)
 
@@ -94,8 +106,9 @@ def main():
                 process = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=camp_env, stdout=log, stderr=log)
                 wait_for_server(camp_port, process)
                 cookie, csrf = login_campfire(camp_port)
-                metrics = capture(camp_port, cookie, csrf, args.sockets, args.rooms, run_id, temp / "camp-sidebar.html")
-                return metrics, created_state(camp_db, run_id, args.rooms)
+                metrics = capture(camp_port, cookie, csrf, args.sockets, args.rooms, run_id, temp / "camp-sidebar.html", args.operation)
+                state = created_state(camp_db, run_id, args.rooms) if args.operation == "create" else updated_state(camp_db, run_id, args.rooms)
+                return metrics, state
             finally:
                 if process is not None:
                     stop_server(process)
@@ -112,15 +125,15 @@ def main():
             camp_result, rust_result = run_campfire(), run_rustfire()
         else:
             rust_result, camp_result = run_rustfire(), run_campfire()
-        rust_sample = sample_structure(temp / "rust-sidebar.html")
-        camp_sample = sample_structure(temp / "camp-sidebar.html")
+        rust_sample = sample_structure(temp / "rust-sidebar.html", args.operation)
+        camp_sample = sample_structure(temp / "camp-sidebar.html", args.operation)
         assert (temp / "rust-sidebar.html").read_bytes() == (temp / "camp-sidebar.html").read_bytes(), "Matched shared-room Turbo samples differ"
         if args.sample_dir:
             args.sample_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(temp / "rust-sidebar.html", args.sample_dir / "rustfire.html")
             shutil.copy2(temp / "camp-sidebar.html", args.sample_dir / "campfire.html")
         assert rust_result[1] == camp_result[1], (rust_result[1], camp_result[1])
-        print("PASS paired shared-room creation and signed sidebar Turbo delivery")
+        print(f"PASS paired shared-room {args.operation} and signed sidebar Turbo delivery")
         print(json.dumps({
             "campfire_workers": args.campfire_workers,
             "campfire_first": args.campfire_first,
