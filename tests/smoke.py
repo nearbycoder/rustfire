@@ -90,6 +90,8 @@ def main():
             assert code == 200 and "notificationclick" in worker
             admin = client()
             assert request(admin, base, "/")[1].endswith("/first_run")
+            with client().open(base + "/account/logo") as logo:
+                assert logo.status == 200 and logo.read(8) == b"\x89PNG\r\n\x1a\n"
             assert request(admin, base, "/first_run", {"name": "Forged", "email_address": "forged@example.com", "password": "password123"}, headers={"X-CSRF-Token": "wrong"})[0] == 403
             code, url, _ = request(admin, base, "/first_run", {"name": "Admin", "email_address": "admin@example.com", "password": "password123"})
             assert code == 200 and "/rooms/1" in url, (code, url)

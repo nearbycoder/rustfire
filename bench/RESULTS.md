@@ -324,6 +324,18 @@ The timed run fetched the cached, **byte-identical 74,720-byte** 512-pixel JPEG 
 
 This is an exact-response comparison for one warm logo-read endpoint. It does not include uploads or variant generation in the measured interval. The load generator was local, CPU and memory use were not recorded, and the three-second runs do not establish a sustained capacity limit. Full-app speed and scale remain unproven while other routes and behavior differ.
 
+The logo endpoint now sends Campfire-style weak ETags. On both apps, the large and small variants share the same validator; a matching conditional GET returns 304 with an empty body and `Cache-Control: no-cache`. Uploading a JPEG, deleting it, and uploading a BMP each change the validator, so an older validator gets the current 200 response. The paired logo probe checked those transitions alongside the byte-identical PNGs.
+
+With the packaged 22 Campfire workers, two-second local trials of the **same conditional 304 request** had zero errors:
+
+| Clients | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 26,659.7 | 1,243.5 | 0.050 ms | 1.893 ms |
+| 8 | 19,663.4 | 8,287.4 | 1.301 ms | 1.696 ms |
+| 32 | 15,475.1 | 7,945.2 | 6.328 ms | 8.395 ms |
+
+The same run's full 74,720-byte PNG reads reached 10,749.4 / 506.9 requests/s at one client, 14,116.4 / 3,889.7 at eight, and 11,858.2 / 5,178.3 at 32 for Rustfire / Campfire. The 304 responses had the same status and empty body but server-specific ETag values. These short same-host reads do not establish sustained capacity or full application parity.
+
 ## Account administration route and roster behavior
 
 Rustfire's visible account forms now submit Campfire's nested account fields to `/account.1` with Rails-style `_method` values; `/account` remains supported for direct requests. The visible user controls submit role changes and deletion to `/account/users/:id`. A browser check confirmed that changing the account name, toggling the room-creation restriction, selecting a JPEG logo, deleting it, and promoting a member all returned to `/account/edit` with updated controls and no detected browser errors.

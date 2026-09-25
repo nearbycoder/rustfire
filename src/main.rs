@@ -6117,10 +6117,15 @@ async fn custom_styles_update(
 }
 async fn logo_get(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     let small = query.get("size").is_some_and(|size| size == "small");
     let db = pool(&s)?;
+    let account_version: Option<String> = db
+        .query_row("SELECT updated_at FROM accounts WHERE id=1", [], |r| r.get(0))
+        .optional()
+        .map_err(db_err)?;
     let row: Option<(String, String)> = db
         .query_row(
             "SELECT stored_name,content_type FROM account_logos WHERE id=1",
@@ -6129,6 +6134,35 @@ async fn logo_get(
         )
         .optional()
         .map_err(db_err)?;
+    let tag_input = format!(
+        "{}:{}",
+        account_version.as_deref().unwrap_or(""),
+        row.as_ref().map_or("", |(stored, _)| stored)
+    );
+    let digest = openssl::hash::hash(MessageDigest::md5(), tag_input.as_bytes()).map_err(db_err)?;
+    let etag = format!(
+        "W/\"{}\"",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*"
+                    || candidate.trim_start_matches("W/") == etag.trim_start_matches("W/")
+            })
+        })
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+        response.headers_mut().insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+        return Ok(response);
+    }
     let bytes = if let Some((stored, content_type)) = row {
         if safe_inline_image(&content_type) {
             logo_png_variant(&s, &stored, small).await
@@ -6149,6 +6183,7 @@ async fn logo_get(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+    response.headers_mut().insert(header::ETAG, etag.parse().unwrap());
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         "public, max-age=300, stale-while-revalidate=604800"

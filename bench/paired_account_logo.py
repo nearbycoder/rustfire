@@ -27,6 +27,32 @@ def png_summary(body):
     return int.from_bytes(body[16:20], "big"), int.from_bytes(body[20:24], "big"), hashlib.sha256(body).hexdigest()
 
 
+def logo_response(port, path, if_none_match=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    headers = {"If-None-Match": if_none_match} if if_none_match else {}
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def cached_logo(port, path, previous_etag=None):
+    status, headers, body = logo_response(port, path)
+    assert status == 200 and body[:8] == b"\x89PNG\r\n\x1a\n"
+    etag = headers.get("etag")
+    assert etag and etag.startswith('W/"') and etag.endswith('"'), headers
+    assert headers.get("cache-control", "").find("max-age=300") >= 0
+    status, conditional, cached_body = logo_response(port, path, etag)
+    assert status == 304 and not cached_body and conditional.get("etag") == etag
+    assert conditional.get("cache-control") == "no-cache"
+    if previous_etag:
+        status, _, old_body = logo_response(port, path, previous_etag)
+        assert status == 200 and old_body == body, (path, status)
+    return etag, body
+
+
 def multipart(jpeg):
     boundary = b"account-logo-probe"
     body = (
@@ -38,10 +64,12 @@ def multipart(jpeg):
     return body, "multipart/form-data; boundary=" + boundary.decode()
 
 
-def measure_concurrent(port, expected, clients, seconds):
+def measure_concurrent(port, expected, clients, seconds, etag=None):
     ready = threading.Barrier(clients + 1, timeout=30)
     start = threading.Event()
     clock = {}
+    headers = {"If-None-Match": etag} if etag else {}
+    expected_status = 304 if etag else 200
 
     def worker():
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
@@ -49,19 +77,19 @@ def measure_concurrent(port, expected, clients, seconds):
         errors = 0
         try:
             for _ in range(2):
-                connection.request("GET", "/account/logo")
+                connection.request("GET", "/account/logo", headers=headers)
                 response = connection.getresponse()
-                if response.status != 200 or response.read() != expected:
+                if response.status != expected_status or response.read() != expected:
                     raise AssertionError("Logo warmup differs from the verified PNG")
             ready.wait()
             start.wait()
             while time.perf_counter() < clock["deadline"]:
                 begun = time.perf_counter()
                 try:
-                    connection.request("GET", "/account/logo")
+                    connection.request("GET", "/account/logo", headers=headers)
                     response = connection.getresponse()
                     body = response.read()
-                    if response.status == 200 and body == expected:
+                    if response.status == expected_status and body == expected:
                         samples.append((time.perf_counter() - begun) * 1000)
                     else:
                         errors += 1
@@ -91,10 +119,13 @@ def workflow(port, cookie, csrf, database, campfire, jpeg, bmp, sample_dir, clie
     result = {}
     performance = {}
     sample_dir.mkdir()
+    stock_tags = []
     for size, path in (("large", "/account/logo"), ("small", "/account/logo?size=small")):
-        status, _, body = request(port, "GET", path, "", "")
-        assert status == 200
+        etag, body = cached_logo(port, path)
+        stock_tags.append(etag)
         result[f"stock_{size}"] = png_summary(body)
+    assert stock_tags[0] == stock_tags[1]
+    result["stock_cache"] = True
 
     body, content_type = multipart(jpeg)
     status, location, payload = request(port, "PATCH", "/account", cookie, csrf, body, content_type)
@@ -110,31 +141,41 @@ def workflow(port, cookie, csrf, database, campfire, jpeg, bmp, sample_dir, clie
             restricted = bool(db.execute("SELECT restrict_room_creation FROM account_settings WHERE id=1").fetchone()[0])
             count = db.execute("SELECT COUNT(*) FROM account_logos WHERE id=1").fetchone()[0]
         result["persisted"] = name, restricted, count
+    custom_tags = []
     for size, path in (("large", "/account/logo"), ("small", "/account/logo?size=small")):
-        status, _, body = request(port, "GET", path, "", "")
-        assert status == 200
+        etag, body = cached_logo(port, path, stock_tags[0])
+        custom_tags.append(etag)
         result[f"custom_{size}"] = png_summary(body)
         (sample_dir / f"{size}.png").write_bytes(body)
         if size == "large":
             for count in clients:
                 performance[count] = measure_concurrent(port, body, count, seconds)
+                performance[f"conditional_{count}"] = measure_concurrent(port, b"", count, seconds, etag)
+    assert custom_tags[0] == custom_tags[1] and custom_tags[0] != stock_tags[0]
+    result["custom_cache"] = True
 
     status, location, payload = request(port, "DELETE", "/account/logo", cookie, csrf)
     assert status in (302, 303), (status, payload[:300])
     result["delete"] = status, urllib.parse.urlsplit(location).path
+    restored_tags = []
     for size, path in (("large", "/account/logo"), ("small", "/account/logo?size=small")):
-        status, _, body = request(port, "GET", path, "", "")
-        assert status == 200
+        etag, body = cached_logo(port, path, custom_tags[0])
+        restored_tags.append(etag)
         result[f"restored_{size}"] = png_summary(body)
+    assert restored_tags[0] == restored_tags[1] and restored_tags[0] != custom_tags[0]
+    result["restored_cache"] = True
     boundary = b"account-bmp-probe"
     bmp_body = b"--" + boundary + b"\r\nContent-Disposition: form-data; name=\"account[logo]\"; filename=\"pixel.bmp\"\r\nContent-Type: image/bmp\r\n\r\n" + bmp + b"\r\n--" + boundary + b"--\r\n"
     status, location, payload = request(port, "PATCH", "/account", cookie, csrf, bmp_body, "multipart/form-data; boundary=" + boundary.decode())
     assert status in (302,303), (status,payload[:300])
     result["bmp_update"] = status, urllib.parse.urlsplit(location).path
+    bmp_tags = []
     for size, path in (("large", "/account/logo"), ("small", "/account/logo?size=small")):
-        status, _, body = request(port, "GET", path, "", "")
-        assert status == 200
+        etag, body = cached_logo(port, path, restored_tags[0])
+        bmp_tags.append(etag)
         result[f"bmp_fallback_{size}"] = png_summary(body)
+    assert bmp_tags[0] == bmp_tags[1] and bmp_tags[0] != restored_tags[0]
+    result["bmp_cache"] = True
     return result, performance
 
 
@@ -201,6 +242,11 @@ def main():
             print(f"clients={count} seconds={args.seconds:g} campfire_workers={args.campfire_workers} logo_bytes={(temp / 'rust' / 'large.png').stat().st_size} "
                   f"rustfire_rps={rust_performance[count][0]:.1f} rustfire_median_ms={rust_performance[count][1]:.3f} rustfire_p95_ms={rust_performance[count][2]:.3f} rustfire_errors={rust_performance[count][3]} "
                   f"campfire_rps={camp_performance[count][0]:.1f} campfire_median_ms={camp_performance[count][1]:.3f} campfire_p95_ms={camp_performance[count][2]:.3f} campfire_errors={camp_performance[count][3]}")
+            rust_conditional = rust_performance[f"conditional_{count}"]
+            camp_conditional = camp_performance[f"conditional_{count}"]
+            print(f"conditional_logo clients={count} seconds={args.seconds:g} campfire_workers={args.campfire_workers} "
+                  f"rustfire_rps={rust_conditional[0]:.1f} rustfire_median_ms={rust_conditional[1]:.3f} rustfire_p95_ms={rust_conditional[2]:.3f} rustfire_errors={rust_conditional[3]} "
+                  f"campfire_rps={camp_conditional[0]:.1f} campfire_median_ms={camp_conditional[1]:.3f} campfire_p95_ms={camp_conditional[2]:.3f} campfire_errors={camp_conditional[3]}")
         if args.sample_dir:
             args.sample_dir.mkdir(parents=True,exist_ok=True)
             for app in ("rust","camp"):
