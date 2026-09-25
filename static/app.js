@@ -336,6 +336,16 @@ if (chat) {
     const content=event.target.closest('[data-boost-reveal]');
     if(content&&(event.key==='Enter'||event.key===' ')){event.preventDefault();revealBoost(content);}
   });
+  messages.addEventListener('click',event=>{
+    const summary=event.target.closest('.message-options summary');
+    if(!summary)return;
+    requestAnimationFrame(()=>{
+      const details=summary.parentElement;
+      if(!details.open){details.classList.remove('opens-up');return;}
+      const menu=details.querySelector('.message-options-menu');
+      details.classList.toggle('opens-up',menu.getBoundingClientRect().bottom>messages.getBoundingClientRect().bottom-8);
+    });
+  });
   messages.addEventListener('click', async e => {
     const boostDelete=e.target.closest('[data-delete-boost]');
     if(boostDelete){
