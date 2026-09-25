@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 const listener=net.createServer();await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));const port=listener.address().port;await new Promise(resolve=>listener.close(resolve));
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'rustfire-ws-'));
-const child=spawn('target/debug/rustfire',[],{env:{...process.env,RUSTFIRE_ADDR:`127.0.0.1:${port}`,RUSTFIRE_DB:path.join(temp,'test.db'),RUSTFIRE_UPLOAD_DIR:path.join(temp,'uploads')},stdio:'ignore'});
+const child=spawn('target/debug/rustfire',[],{env:{...process.env,RUSTFIRE_ADDR:`127.0.0.1:${port}`,RUSTFIRE_DB:path.join(temp,'test.db'),RUSTFIRE_UPLOAD_DIR:path.join(temp,'uploads'),RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE:'test-secret-key-base'},stdio:'ignore'});
 const base=`http://127.0.0.1:${port}`;
 try{
   let ready=false;for(let i=0;i<100;i++){try{ready=(await fetch(base+'/up')).ok;if(ready)break}catch{}await new Promise(r=>setTimeout(r,50))}assert(ready,'server started');
@@ -19,15 +19,21 @@ try{
   const setup=await fetch(base+'/first_run',{method:'POST',headers:{Cookie:setupCookie,'X-CSRF-Token':setupCsrf,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({name:'Socket',email_address:'socket@example.com',password:'socketpass123'}),redirect:'manual'});
   assert.equal(setup.status,303);const cookie=setup.headers.get('set-cookie').split(';')[0];
   const csrfPage=await fetch(base+'/rooms/1',{headers:{Cookie:cookie}});
-  const csrf=(await csrfPage.text()).match(/<meta name='csrf-token' content='([^']+)'/)[1];
+  const roomHtml=await csrfPage.text();
+  const csrf=roomHtml.match(/<meta name='csrf-token' content='([^']+)'/)[1];
+  const streamToken='IloybGtPaTh2WTJGdGNHWnBjbVV2VW05dmJYTTZPazl3Wlc0dk1ROm1lc3NhZ2VzIg==--dcc17cfeecb1f593debdd6f13d526df3c6d3b2fe59ab972a8fe1e7c038384efd';
+  const signedStream=(kind,id)=>{const gid=Buffer.from(`gid://campfire/${kind}/${id}`).toString('base64url');const encoded=Buffer.from(JSON.stringify(`${gid}:messages`)).toString('base64');const key=crypto.pbkdf2Sync('test-secret-key-base','turbo/signed_stream_verifier_key',1000,64,'sha256');return `${encoded}--${crypto.createHmac('sha256',key).update(encoded).digest('hex')}`;};
+  assert.equal(signedStream('Rooms::Open',1),streamToken);
+  assert(roomHtml.includes(`signed-stream-name='${streamToken}'`));
   const deniedOrigin=await new Promise((resolve,reject)=>{const probe=net.createConnection({host:'127.0.0.1',port});probe.on('connect',()=>probe.write(`GET /cable HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: https://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nCookie: ${cookie}\r\n\r\n`));probe.once('data',data=>{resolve(data.toString().split('\r\n')[0]);probe.destroy()});probe.once('error',reject)});
   assert.match(deniedOrigin,/403/);
   const socket=net.createConnection({host:'127.0.0.1',port});
-  const frames=[];let handshake=false;let buffer=Buffer.alloc(0);let resolveFrame;let rejectFrame;
-  const nextFrame=()=>new Promise((resolve,reject)=>{if(frames.length)resolve(frames.shift());else{resolveFrame=resolve;rejectFrame=reject;}});
+  const frames=[];let handshake=false;let buffer=Buffer.alloc(0);let resolveFrame;let rejectFrame;let pingCount=0;
+  const nextRawFrame=()=>new Promise((resolve,reject)=>{if(frames.length)resolve(frames.shift());else{resolveFrame=resolve;rejectFrame=reject;}});
+  const nextFrame=async()=>{for(;;){const frame=await nextRawFrame();if(frame.type!=='ping')return frame;}};
   socket.on('data',chunk=>{
     buffer=Buffer.concat([buffer,chunk]);if(!handshake){const end=buffer.indexOf('\r\n\r\n');if(end<0)return;const head=buffer.subarray(0,end).toString();assert(head.startsWith('HTTP/1.1 101'),head);buffer=buffer.subarray(end+4);handshake=true;}
-    while(buffer.length>=2){let length=buffer[1]&127;let offset=2;if(length===126){if(buffer.length<4)return;length=buffer.readUInt16BE(2);offset=4}else if(length===127){if(buffer.length<10)return;length=Number(buffer.readBigUInt64BE(2));offset=10}if(buffer.length<offset+length)return;const opcode=buffer[0]&15;const payload=buffer.subarray(offset,offset+length).toString();buffer=buffer.subarray(offset+length);if(opcode===1){const value=JSON.parse(payload);if(resolveFrame){resolveFrame(value);resolveFrame=null}else frames.push(value)}}
+    while(buffer.length>=2){let length=buffer[1]&127;let offset=2;if(length===126){if(buffer.length<4)return;length=buffer.readUInt16BE(2);offset=4}else if(length===127){if(buffer.length<10)return;length=Number(buffer.readBigUInt64BE(2));offset=10}if(buffer.length<offset+length)return;const opcode=buffer[0]&15;const payload=buffer.subarray(offset,offset+length).toString();buffer=buffer.subarray(offset+length);if(opcode===1){const value=JSON.parse(payload);if(value.type==='ping'){assert.equal(typeof value.message,'number');pingCount++;}if(resolveFrame){resolveFrame(value);resolveFrame=null}else frames.push(value)}}
   });
   socket.on('error',e=>{if(rejectFrame)rejectFrame(e)});
   const key=crypto.randomBytes(16).toString('base64');socket.write(`GET /cable HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${cookie}\r\n\r\n`);
@@ -36,6 +42,38 @@ try{
   const identifier=JSON.stringify({channel:'RoomMessagesChannel',room_id:1});
   sendCommand({command:'subscribe',identifier});
   const confirmation=await nextFrame();assert.equal(confirmation.type,'confirm_subscription');
+  const signedIdentifier=JSON.stringify({channel:'RoomMessagesChannel',signed_stream_name:streamToken});
+  sendCommand({command:'subscribe',identifier:signedIdentifier});
+  assert.equal((await nextFrame()).type,'confirm_subscription');
+  sendCommand({command:'subscribe',identifier:JSON.stringify({channel:'RoomMessagesChannel',signed_stream_name:streamToken+'x'})});
+  assert.equal((await nextFrame()).type,'reject_subscription');
+  sendCommand({command:'subscribe',identifier:JSON.stringify({channel:'RoomMessagesChannel',signed_stream_name:signedStream('Rooms::Closed',1)})});
+  assert.equal((await nextFrame()).type,'reject_subscription');
+  sendCommand({command:'subscribe',identifier:JSON.stringify({channel:'RoomMessagesChannel',signed_stream_name:signedStream('Rooms::Open',999)})});
+  assert.equal((await nextFrame()).type,'reject_subscription');
+  const heartbeatIdentifier=JSON.stringify({channel:'HeartbeatChannel'});
+  sendCommand({command:'subscribe',identifier:heartbeatIdentifier});
+  assert.equal((await nextFrame()).type,'confirm_subscription');
+  const streamPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream test'})});
+  assert.equal(streamPost.status,201);
+  const streamEvents=[await nextFrame(),await nextFrame()];
+  assert(streamEvents.some(frame=>frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='signed stream test'));
+  assert(streamEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="append" target="messages">')&&frame.message.includes('signed stream test')));
+  const streamMessageId=(await streamPost.json()).id;
+  const streamEdit=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream edited'})});
+  assert.equal(streamEdit.status,200);
+  const editEvents=[await nextFrame(),await nextFrame()];
+  assert(editEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="replace" target="message-${streamMessageId}">`)&&frame.message.includes('signed stream edited')));
+  const streamBoost=await fetch(base+`/messages/${streamMessageId}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});
+  assert.equal(streamBoost.status,303);
+  const boostEvents=[await nextFrame(),await nextFrame()];
+  assert(boostEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="replace"')&&frame.message.includes('🔥')));
+  const streamDelete=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'DELETE',headers:{Cookie:cookie,Accept:'text/vnd.turbo-stream.html','X-CSRF-Token':csrf},redirect:'manual'});
+  assert.equal(streamDelete.status,200);
+  const deleteEvents=[await nextFrame(),await nextFrame()];
+  assert(deleteEvents.some(frame=>frame.identifier===signedIdentifier&&frame.message===`<turbo-stream action="remove" target="message-${streamMessageId}"></turbo-stream>`));
+  sendCommand({command:'unsubscribe',identifier:signedIdentifier});
+  sendCommand({command:'unsubscribe',identifier:heartbeatIdentifier});
   const typingIdentifier=JSON.stringify({channel:'TypingNotificationsChannel',room_id:1});
   sendCommand({command:'subscribe',identifier:typingIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
@@ -166,6 +204,8 @@ try{
   const deactivate=await fetch(base+'/account/users/2',{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf},redirect:'manual'});
   assert.equal(deactivate.status,303);
   await Promise.race([deactivatedClosed,new Promise((_,reject)=>setTimeout(()=>reject(new Error('deactivated user socket remained open')),3000))]);
+  for(let i=0;i<80&&pingCount===0;i++)await new Promise(r=>setTimeout(r,50));
+  assert(pingCount>0,'ActionCable heartbeat delivered');
   const closed=new Promise(resolve=>socket.once('close',resolve));
   const signout=await fetch(base+'/session',{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf},redirect:'manual'});assert.equal(signout.status,303);
   await Promise.race([closed,new Promise((_,reject)=>setTimeout(()=>reject(new Error('socket remained open after sign out')),3000))]);

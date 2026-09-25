@@ -51,6 +51,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - Session and room access control
 - CSRF checks for authenticated writes and public setup, sign-in, join, and device sign-in forms; same-origin WebSocket handshakes; sign-in limited to 10 attempts per IP over three minutes
 - Room-scoped WebSocket fanout and message catch-up after reconnect, so sockets do not process events for unrelated rooms and missed messages can be recovered; timestamp-based room refresh also replaces edited messages missed while disconnected
+- Campfire-format signed room stream names for `RoomMessagesChannel`, verified against room type and current membership; signed subscriptions receive Turbo stream actions, while the existing Rustfire room-ID subscriptions remain available. ActionCable welcome and three-second ping frames and `HeartbeatChannel` subscriptions are supported. The message markup inside Turbo streams still differs from Campfire.
 - Room-scoped typing notifications, presence connection tracking, and live read/unread sidebar updates across sessions
 - Web app manifest and service-worker endpoints, VAPID key management, browser push opt-in, subscription management, and delivery for disconnected users based on notification preference
 

@@ -13,7 +13,7 @@ use axum::{
 };
 use base64::{
     Engine as _,
-    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{Duration, Utc};
@@ -77,6 +77,8 @@ struct AppState {
     imported_mention_signing_key: Option<Vec<u8>>,
     avatar_signing_key: Vec<u8>,
     imported_avatar_signing_key: Option<Vec<u8>>,
+    turbo_stream_signing_key: Vec<u8>,
+    imported_turbo_stream_signing_key: Option<Vec<u8>>,
     push_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
@@ -518,6 +520,51 @@ fn rails_sgid_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::Erro
 }
 fn rails_avatar_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
     rails_verifier_key(secret_key_base, b"active_record/signed_id")
+}
+fn rails_turbo_stream_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    rails_verifier_key(secret_key_base, b"turbo/signed_stream_verifier_key")
+}
+fn room_stream_token(
+    key: &[u8],
+    room_kind: &str,
+    room_id: i64,
+) -> Result<String, openssl::error::ErrorStack> {
+    let gid = URL_SAFE_NO_PAD.encode(format!("gid://campfire/{room_kind}/{room_id}"));
+    let encoded = STANDARD.encode(json!(format!("{gid}:messages")).to_string());
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{signature}"))
+}
+fn room_from_stream_token(key: &[u8], token: &str) -> Option<(i64, String)> {
+    if token.len() > 4096 {
+        return None;
+    }
+    let (encoded, signature) = token.split_once("--")?;
+    if signature.len() != 64 {
+        return None;
+    }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha256())
+        .ok()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let json_bytes = STANDARD.decode(encoded).ok()?;
+    let stream: String = serde_json::from_slice(&json_bytes).ok()?;
+    let gid = stream.strip_suffix(":messages")?;
+    let gid_bytes = URL_SAFE_NO_PAD.decode(gid).ok()?;
+    let gid = std::str::from_utf8(&gid_bytes).ok()?;
+    let path = gid.strip_prefix("gid://campfire/")?;
+    let (kind, id) = path.rsplit_once('/')?;
+    if !matches!(kind, "Rooms::Open" | "Rooms::Closed" | "Rooms::Direct") {
+        return None;
+    }
+    let id = id.parse::<i64>().ok().filter(|id| *id > 0)?;
+    Some((id, kind.to_string()))
 }
 fn avatar_token(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
     let payload = json!({"_rails":{"data":id,"pur":"user/avatar"}}).to_string();
@@ -2213,6 +2260,15 @@ async fn room_show_with_target(
         rid,
         rid
     );
+    let stream_key = s
+        .imported_turbo_stream_signing_key
+        .as_deref()
+        .unwrap_or(&s.turbo_stream_signing_key);
+    let stream_token = room_stream_token(stream_key, &room.kind, rid).map_err(db_err)?;
+    content.push_str(&format!(
+        "<turbo-cable-stream-source channel='RoomMessagesChannel' signed-stream-name='{}'></turbo-cable-stream-source>",
+        esc(&stream_token)
+    ));
     for m in messages {
         content.push_str(&message_html(&m));
     }
@@ -3285,10 +3341,12 @@ async fn message_update(
             }
         }
     }
+    drop(db);
+    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
-            json!({"type":"message_updated","room_id":rid,"id":mid,"body":plain,"html":body_html})
+            json!({"type":"message_updated","room_id":rid,"id":mid,"body":plain,"html":body_html,"presentation_html":presentation_html})
                 .to_string(),
     });
     if headers
@@ -5243,11 +5301,13 @@ async fn bot_message_update(
     touch_room(&db, rid)?;
     db.execute("DELETE FROM message_mentions WHERE message_id=?1", [mid])
         .map_err(db_err)?;
+    drop(db);
+    let m = message_by_id(&s, rid, mid)?;
+    let presentation_html = message_html(&m);
     let _ = s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"message_updated","room_id":rid,"id":mid,"body":body}).to_string(),
+        payload: json!({"type":"message_updated","room_id":rid,"id":mid,"body":body,"presentation_html":presentation_html}).to_string(),
     });
-    let m = message_by_id(&s, rid, mid)?;
     Ok(Json(message_json(&s, &m, Some(&headers))?).into_response())
 }
 async fn bot_message_delete(
@@ -5570,10 +5630,12 @@ async fn boost_create(
     )
     .map_err(db_err)?;
     touch_message(&db, mid, rid)?;
+    drop(db);
+    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
-            json!({"type":"boost","room_id":rid,"message_id":mid,"content":content,"user_id":u.id})
+            json!({"type":"boost","room_id":rid,"message_id":mid,"content":content,"user_id":u.id,"presentation_html":presentation_html})
                 .to_string(),
     });
     Ok(Redirect::to(&format!("/messages/{mid}/boosts")).into_response())
@@ -5678,7 +5740,9 @@ async fn boost_delete(
     db.execute("DELETE FROM boosts WHERE id=?1", [bid])
         .map_err(db_err)?;
     touch_message(&db, mid, rid)?;
-    s.events.send(Event{room_id:rid,payload:json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content}).to_string()});
+    drop(db);
+    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
+    s.events.send(Event{room_id:rid,payload:json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content,"presentation_html":presentation_html}).to_string()});
     if headers
         .get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
@@ -5726,9 +5790,11 @@ async fn bot_boost_create(
     .map_err(db_err)?;
     let id = db.last_insert_rowid();
     touch_message(&db, mid, rid)?;
+    drop(db);
+    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
     s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"boost","room_id":rid,"message_id":mid,"content":content,"user_id":bot.id})
+        payload: json!({"type":"boost","room_id":rid,"message_id":mid,"content":content,"user_id":bot.id,"presentation_html":presentation_html})
             .to_string(),
     });
     let created_at = chrono::DateTime::parse_from_rfc3339(&created)
@@ -5765,11 +5831,37 @@ async fn bot_boost_delete(
         return Err(StatusCode::NOT_FOUND);
     }
     touch_message(&db, mid, rid)?;
+    drop(db);
+    let presentation_html = message_html(&message_by_id(&s, rid, mid)?);
     s.events.send(Event {
         room_id: rid,
-        payload: json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content}).to_string(),
+        payload: json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content,"presentation_html":presentation_html}).to_string(),
     });
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+fn turbo_room_event(payload: &Value) -> Option<String> {
+    match payload.get("type")?.as_str()? {
+        "message" => Some(format!(
+            "<turbo-stream action=\"append\" target=\"messages\"><template>{}</template></turbo-stream>",
+            payload.get("html")?.as_str()?
+        )),
+        "message_updated" | "boost" | "boost_deleted" => {
+            let mid = if payload.get("type")?.as_str()? == "message_updated" {
+                payload.get("id")?.as_i64()?
+            } else {
+                payload.get("message_id")?.as_i64()?
+            };
+            Some(format!(
+                "<turbo-stream action=\"replace\" target=\"message-{mid}\"><template>{}</template></turbo-stream>",
+                payload.get("presentation_html")?.as_str()?
+            ))
+        }
+        "message_deleted" => Some(format!(
+            "<turbo-stream action=\"remove\" target=\"message-{}\"></turbo-stream>",
+            payload.get("id")?.as_i64()?
+        )),
+        _ => None,
+    }
 }
 async fn ws_upgrade(
     State(s): State<Arc<AppState>>,
@@ -5796,7 +5888,7 @@ async fn ws_upgrade(
 }
 async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
-    let (event_tx, mut event_rx) = mpsc::channel::<(String, i64, String)>(256);
+    let (event_tx, mut event_rx) = mpsc::channel::<(String, i64, String, bool)>(256);
     let mut revoked_rx = s.revoked_users.subscribe();
     if sender
         .send(WsMessage::Text(
@@ -5809,8 +5901,14 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     }
     let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut presence_rooms: HashSet<i64> = HashSet::new();
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(3),
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _=heartbeat.tick()=>{if sender.send(WsMessage::Text(json!({"type":"ping","message":Utc::now().timestamp()}).to_string().into())).await.is_err(){break}},
             revoked=revoked_rx.recv()=>{if revoked==Ok(u.id){break}},
             incoming=receiver.next()=>{
                 let text=match incoming {Some(Ok(WsMessage::Text(text)))=>text,Some(Ok(WsMessage::Close(_)))|None|Some(Err(_))=>break,_=>continue};
@@ -5818,22 +5916,26 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                 let action=cmd.get("command").and_then(Value::as_str).unwrap_or("");
                 let ident=cmd.get("identifier").and_then(Value::as_str).unwrap_or("");
                 let details:Value=serde_json::from_str(ident).unwrap_or(Value::Null);
-                let rid=details.get("room_id").and_then(Value::as_i64).unwrap_or(0);
                 let channel=details.get("channel").and_then(Value::as_str).unwrap_or("");
+                let signed_name=if channel=="RoomMessagesChannel" {details.get("signed_stream_name").and_then(Value::as_str)} else {None};
+                let signed_room=signed_name.and_then(|token|room_from_stream_token(&s.turbo_stream_signing_key,token).or_else(||s.imported_turbo_stream_signing_key.as_deref().and_then(|key|room_from_stream_token(key,token))));
+                let rid=if signed_name.is_some() {signed_room.as_ref().map(|(id,_)|*id).unwrap_or(0)} else {details.get("room_id").and_then(Value::as_i64).unwrap_or(0)};
+                let signed_valid=signed_name.is_none() || signed_room.as_ref().is_some_and(|(_,kind)|room_for(&s,u.id,rid).is_ok_and(|room|room.kind==*kind));
                 if action=="subscribe" {
-                    let user_channel=channel=="UnreadRoomsChannel" || channel=="ReadRoomsChannel" || channel=="RoomListChannel";
+                    let user_channel=channel=="UnreadRoomsChannel" || channel=="ReadRoomsChannel" || channel=="RoomListChannel" || channel=="HeartbeatChannel";
                     let hub=match channel {"RoomMessagesChannel"=>Some(&s.events),"TypingNotificationsChannel"=>Some(&s.typing_events),"UnreadRoomsChannel"=>Some(&s.unread_events),"ReadRoomsChannel"=>Some(&s.read_events),"RoomListChannel"=>Some(&s.room_list_events),_=>None};
-                    let accepted=(hub.is_some() || channel=="PresenceChannel") && (user_channel || (rid>0 && room_for(&s,u.id,rid).is_ok()));
+                    let accepted=signed_valid && (hub.is_some() || channel=="PresenceChannel" || channel=="HeartbeatChannel") && (user_channel || (rid>0 && room_for(&s,u.id,rid).is_ok()));
                     if accepted {
                         if channel=="PresenceChannel" {
                             if presence_rooms.insert(rid) { let _=presence_update(&s,u.id,rid,"present"); }
-                        } else if let std::collections::hash_map::Entry::Vacant(entry)=subscriptions.entry(ident.to_string()) {
-                            let mut room_events=hub.unwrap().channel(if user_channel {u.id} else {rid}).subscribe();
+                        } else if let Some(hub)=hub { if let std::collections::hash_map::Entry::Vacant(entry)=subscriptions.entry(ident.to_string()) {
+                            let mut room_events=hub.channel(if user_channel {u.id} else {rid}).subscribe();
                             let tx=event_tx.clone();
                             let identifier=ident.to_string();
                             let event_rid=if user_channel {0} else {rid};
-                            entry.insert(tokio::spawn(async move {loop {match room_events.recv().await {Ok(payload)=>{if tx.send((identifier.clone(),event_rid,payload)).await.is_err(){break}},Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}}}));
-                        }
+                            let turbo=signed_name.is_some();
+                            entry.insert(tokio::spawn(async move {loop {match room_events.recv().await {Ok(payload)=>{if tx.send((identifier.clone(),event_rid,payload,turbo)).await.is_err(){break}},Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}}}));
+                        }}
                     }
                     let response=if accepted {"confirm_subscription"} else {"reject_subscription"};
                     if sender.send(WsMessage::Text(json!({"identifier":ident,"type":response}).to_string().into())).await.is_err(){break}
@@ -5854,7 +5956,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     }
                 }
             },
-            event=event_rx.recv()=>{if let Some((identifier,rid,payload))=event{if rid==0 || room_for(&s,u.id,rid).is_ok(){if sender.send(WsMessage::Text(json!({"identifier":identifier,"message":serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null)}).to_string().into())).await.is_err(){break}}}}
+            event=event_rx.recv()=>{if let Some((identifier,rid,payload,turbo))=event{if rid==0 || room_for(&s,u.id,rid).is_ok(){let message=if turbo {serde_json::from_str::<Value>(&payload).ok().and_then(|value|turbo_room_event(&value)).map(Value::String)} else {serde_json::from_str::<Value>(&payload).ok()};if let Some(message)=message {if sender.send(WsMessage::Text(json!({"identifier":identifier,"message":message}).to_string().into())).await.is_err(){break}}}}}
         }
     }
     for (_, task) in subscriptions {
@@ -5901,6 +6003,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS app_secrets(name TEXT PRIMARY KEY,value BLOB NOT NULL);
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('mention_sgid',randomblob(32));
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('avatar_signed_id',randomblob(32));
+        INSERT OR IGNORE INTO app_secrets(name,value) VALUES('turbo_stream',randomblob(32));
         CREATE TABLE IF NOT EXISTS account_custom_styles(id INTEGER PRIMARY KEY CHECK(id=1),css TEXT NOT NULL DEFAULT '');
         INSERT OR IGNORE INTO account_custom_styles(id,css) VALUES(1,'');
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT NOT NULL,email_address TEXT UNIQUE,password_digest TEXT,role INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 0,bot_token TEXT UNIQUE,bio TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -6048,6 +6151,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |row| row.get(0),
     )?;
+    let turbo_stream_signing_key: Vec<u8> = db.get()?.query_row(
+        "SELECT value FROM app_secrets WHERE name='turbo_stream'",
+        [],
+        |row| row.get(0),
+    )?;
     let campfire_secret = env::var("RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE")
         .ok()
         .filter(|base| !base.is_empty());
@@ -6056,6 +6164,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let imported_avatar_signing_key = campfire_secret
         .as_deref()
         .map(rails_avatar_key)
+        .transpose()?;
+    let imported_turbo_stream_signing_key = campfire_secret
+        .as_deref()
+        .map(rails_turbo_stream_key)
         .transpose()?;
     let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
@@ -6090,6 +6202,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         imported_mention_signing_key,
         avatar_signing_key,
         imported_avatar_signing_key,
+        turbo_stream_signing_key,
+        imported_turbo_stream_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
@@ -6315,6 +6429,22 @@ mod tests {
             super::message_timestamp_ns("2026-01-01 00:00:00.123456"),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn room_stream_signature_matches_pinned_campfire() {
+        let key = super::rails_turbo_stream_key("test-secret-key-base").unwrap();
+        let expected = "IloybGtPaTh2WTJGdGNHWnBjbVV2VW05dmJYTTZPazl3Wlc0dk1ROm1lc3NhZ2VzIg==--dcc17cfeecb1f593debdd6f13d526df3c6d3b2fe59ab972a8fe1e7c038384efd";
+        assert_eq!(
+            super::room_stream_token(&key, "Rooms::Open", 1).unwrap(),
+            expected
+        );
+        assert_eq!(
+            super::room_from_stream_token(&key, expected),
+            Some((1, "Rooms::Open".into()))
+        );
+        assert!(super::room_from_stream_token(&key, &format!("{expected}x")).is_none());
+        assert!(super::room_from_stream_token(&[7; 64], expected).is_none());
     }
     use web_push::{
         ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder,
