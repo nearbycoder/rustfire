@@ -189,6 +189,9 @@ def main():
                 assert search_db.execute("SELECT count(*) FROM searches WHERE user_id=1").fetchone() == (10,)
             code, _, page = request(admin, base, "/searches/clear", {})
             assert code == 200 and "href='/searches?q=hello'" not in page
+            assert request(admin, base, "/unfurl_link", {"url": "http://127.0.0.1/private"})[0] == 204
+            assert request(admin, base, "/unfurl_link", json.dumps({"url": "http://127.0.0.1/private"}).encode(), headers={"Content-Type": "application/json"})[0] == 204
+            assert request(admin, base, "/unfurl_link", {"url": ""})[0] == 400
             refresh_since = int(time.time() * 1000)
             time.sleep(.02)
             code, _, page = request(admin, base, f"/rooms/1/messages/{message['id']}", {"message[body]": "hello edited"}, method="PATCH")

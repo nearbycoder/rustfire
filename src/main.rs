@@ -1624,13 +1624,38 @@ async fn unfurl_url(input: &str) -> Option<Value> {
 struct UnfurlInput {
     url: String,
 }
+fn unfurl_input(headers: &HeaderMap, body: &[u8]) -> Result<String, StatusCode> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let url = match content_type {
+        "application/json" => serde_json::from_slice::<UnfurlInput>(body)
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+            .url,
+        "application/x-www-form-urlencoded" => form_urlencoded::parse(body)
+            .find(|(key, _)| key == "url")
+            .map(|(_, value)| value.into_owned())
+            .ok_or(StatusCode::BAD_REQUEST)?,
+        _ => return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    };
+    if url.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(url)
+}
 async fn unfurl_link(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(input): Json<UnfurlInput>,
+    body: axum::body::Bytes,
 ) -> AppResult {
     let _ = user(&s, &headers)?;
-    match unfurl_url(&input.url).await {
+    let url = unfurl_input(&headers, &body)?;
+    match unfurl_url(&url).await {
         Some(value) => Ok(Json(value).into_response()),
         None => Ok(StatusCode::NO_CONTENT.into_response()),
     }
@@ -8454,6 +8479,16 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn unfurl_link_accepts_editor_json_and_form_posts() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        assert_eq!(super::unfurl_input(&headers, br#"{"url":"https://example.com/a"}"#).unwrap(), "https://example.com/a");
+        headers.insert(axum::http::header::CONTENT_TYPE, "application/x-www-form-urlencoded; charset=UTF-8".parse().unwrap());
+        assert_eq!(super::unfurl_input(&headers, b"url=https%3A%2F%2Fexample.com%2Fa").unwrap(), "https://example.com/a");
+        assert_eq!(super::unfurl_input(&headers, b"url=").unwrap_err(), axum::http::StatusCode::BAD_REQUEST);
+    }
 
     #[test]
     fn search_index_migrates_to_campfire_porter_tokenizer() {
