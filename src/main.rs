@@ -4335,13 +4335,11 @@ async fn messages_index(
         )
         .into_response()
     } else {
-        Html(
-            messages
-                .iter()
-                .map(|m| message_html(&s, m, Some(&headers)))
-                .collect::<String>(),
-        )
-        .into_response()
+        let html = messages
+            .iter()
+            .map(|m| message_html(&s, m, Some(&headers)))
+            .collect::<String>();
+        Html(csrf_forms(&html, u.csrf_token.as_deref().unwrap_or(""))).into_response()
     };
     message_page_cache_headers(&mut response, &etag, &modified);
     Ok(response)

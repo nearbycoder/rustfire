@@ -6,6 +6,7 @@ Requires the pinned Campfire checkout, bundled Ruby, and a release Rustfire buil
 import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
+from html.parser import HTMLParser
 import http.client
 import json
 import pathlib
@@ -36,6 +37,56 @@ def fetch(port, cookie, path, conditional=None):
 
 def get_header(headers, name):
     return next((value for key, value in headers.items() if key.lower() == name.lower()), None)
+
+
+class MessageMarkup(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.events = []
+        self.csrf_values = []
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "input" and attributes.get("name") == "authenticity_token":
+            self.csrf_values.append(attributes.get("value"))
+            attributes["value"] = "<csrf>"
+        if tag == "img" and (attributes.get("src") or "").startswith("/users/"):
+            attributes["src"] = "<signed-avatar>"
+        if "data-copy-to-clipboard-content-value" in attributes:
+            attributes["data-copy-to-clipboard-content-value"] = re.sub(
+                r"^https?://[^/]+", "<origin>", attributes["data-copy-to-clipboard-content-value"]
+            )
+        if attributes.get("title") in ("Test Admin", "User 1"):
+            attributes["title"] = "<creator>"
+        self.events.append(("start", tag, tuple(sorted(attributes.items()))))
+
+    def handle_endtag(self, tag):
+        if tag not in ("img", "input"):
+            self.events.append(("end", tag))
+
+    def handle_data(self, data):
+        value = " ".join(data.split())
+        if value:
+            if value in ("Test Admin", "User 1"):
+                value = "<creator>"
+            elif value in ("All Talk", "Campfire"):
+                value = "<room>"
+            self.events.append(("text", value))
+
+
+def check_message_markup(camp_body, rust_body, messages):
+    camp, rust = MessageMarkup(), MessageMarkup()
+    camp.feed(camp_body.decode())
+    rust.feed(rust_body.decode())
+    assert len(camp.csrf_values) == len(rust.csrf_values) == messages * 8, (len(camp.csrf_values), len(rust.csrf_values))
+    assert all(camp.csrf_values) and set(rust.csrf_values) == {"benchmark-csrf"}
+    assert camp.events == rust.events, next(
+        ((index, left, right) for index, (left, right) in enumerate(zip(camp.events, rust.events)) if left != right),
+        (len(camp.events), len(rust.events)),
+    )
 
 
 def update_timestamp(database, rails, timestamp):
@@ -69,7 +120,7 @@ def seed_additional_messages(database, rails, total):
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with sqlite3.connect(database) as db:
         for message_id in range(4, total + 1):
-            created = base + timedelta(seconds=(message_id - 1) * 60, microseconds=message_id * 1000)
+            created = base + timedelta(seconds=(message_id - 1) * 60, microseconds=message_id * 1000 + 456)
             body, client_id = f"cache message {message_id}", f"refresh-{message_id}"
             if rails:
                 stamp = created.strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -81,13 +132,15 @@ def seed_additional_messages(database, rails, total):
                 db.execute("INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?,1,1,?,?,?,?,?,?)", (message_id, body, client_id, stamp, nanos, stamp, nanos))
 
 
-def check(port, cookie, database, rails):
+def check(port, cookie, database, rails, sample_path=None):
     path = "/rooms/1/messages"
     first_status, first_headers, first_body = fetch(port, cookie, path)
     etag = get_header(first_headers, "ETag")
     modified = get_header(first_headers, "Last-Modified")
     cache_control = get_header(first_headers, "Cache-Control")
     assert first_status == 200 and first_body and etag and etag.startswith('W/"') and modified, (first_status, first_headers)
+    if sample_path:
+        sample_path.write_bytes(first_body)
     ids = lambda body: [int(value) for value in re.findall(rb'id=["\']message_refresh-(\d+)["\']', body)]
 
     by_etag = fetch(port, cookie, path, {"If-None-Match": etag})
@@ -137,7 +190,7 @@ def check(port, cookie, database, rails):
         "before_ids": pages["before"][2],
         "after_ids": pages["after"][2],
     }
-    return result, new_etag, new_modified
+    return result, new_etag, new_modified, first_body
 
 
 def measure_cached_read(binary, port, cookie, etag, modified, clients, seconds):
@@ -163,10 +216,13 @@ def main():
     parser.add_argument("--seconds", type=float, default=15)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--rustfire-first", action="store_true", help="reverse the serial trial order")
+    parser.add_argument("--sample-dir", type=pathlib.Path, help="save the initial full HTML response from each app")
     args = parser.parse_args()
     if any(client < 1 for client in args.clients) or args.seconds <= 0 or args.campfire_workers < 1 or not (3 <= args.messages <= 40):
         parser.error("client counts, seconds, and Campfire workers must be positive; messages must be 3–40")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
+    if args.sample_dir:
+        args.sample_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="paired-message-cache-") as scratch:
         temp = pathlib.Path(scratch)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
@@ -191,30 +247,31 @@ def main():
                     try:
                         wait_for_server(camp_port, camp)
                         cookie, _ = login_campfire(camp_port)
-                        result, etag, modified = check(camp_port, cookie, camp_db, True)
+                        result, etag, modified, body = check(camp_port, cookie, camp_db, True, args.sample_dir / "campfire-messages.html" if args.sample_dir else None)
                         performance = {clients: measure_cached_read(binary, camp_port, cookie, etag, modified, clients, args.seconds) for clients in args.clients}
-                        return result, performance
+                        return result, performance, body
                     finally:
                         stop_server(camp)
 
             def run_rustfire():
                 rust = start_server(rust_db, rust_port)
                 try:
-                    result, etag, modified = check(rust_port, "session_token=benchmark-session", rust_db, False)
+                    result, etag, modified, body = check(rust_port, "session_token=benchmark-session", rust_db, False, args.sample_dir / "rustfire-messages.html" if args.sample_dir else None)
                     performance = {clients: measure_cached_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds) for clients in args.clients}
-                    return result, performance
+                    return result, performance, body
                 finally:
                     stop_server(rust)
 
             if args.rustfire_first:
-                (rust_result, rust_performance), (camp_result, camp_performance) = run_rustfire(), run_campfire()
+                (rust_result, rust_performance, rust_body), (camp_result, camp_performance, camp_body) = run_rustfire(), run_campfire()
             else:
-                (camp_result, camp_performance), (rust_result, rust_performance) = run_campfire(), run_rustfire()
+                (camp_result, camp_performance, camp_body), (rust_result, rust_performance, rust_body) = run_campfire(), run_rustfire()
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
         assert {key: value for key, value in rust_result.items() if key not in ("body_bytes", "before_bytes", "after_bytes")} == {key: value for key, value in camp_result.items() if key not in ("body_bytes", "before_bytes", "after_bytes")}, (rust_result, camp_result)
+        check_message_markup(camp_body, rust_body, args.messages)
         print("PASS paired message-list ETag, Last-Modified, pagination, empty page, and invalidation")
         print({"rustfire": rust_result, "campfire": camp_result})
         for clients in args.clients:
