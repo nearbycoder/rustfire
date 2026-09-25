@@ -3,6 +3,7 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import fs from 'node:fs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, item, i, all) => {
   if (i % 2 === 0) pairs.push([item.slice(2), all[i + 1]]);
@@ -41,6 +42,7 @@ const samples = [];
 const sent = new Map();
 let received = 0;
 let receivedBytes = 0;
+let sampleMessage;
 let unexpected = 0;
 let closedEarly = 0;
 const clients = [];
@@ -106,7 +108,7 @@ function connect(index) {
             : typeof body === 'string' ? body.match(/fanout ([\w-]+)/)?.[1] : undefined;
           const start = sent.get(id);
           if (start === undefined) unexpected++;
-          else { received++; receivedBytes += Buffer.byteLength(typeof event.message === 'string' ? event.message : JSON.stringify(event.message)); samples.push(performance.now() - start); }
+          else { received++; receivedBytes += Buffer.byteLength(typeof event.message === 'string' ? event.message : JSON.stringify(event.message)); sampleMessage ??= event.message; samples.push(performance.now() - start); }
         }
       }
     });
@@ -136,6 +138,7 @@ try {
   samples.sort((a, b) => a - b);
   const percentile = fraction => samples.length ? samples[Math.floor((samples.length - 1) * fraction)].toFixed(2) : 'n/a';
   const elapsed = ((performance.now() - begin) / 1000).toFixed(2);
+  if (args['sample-file'] && sampleMessage !== undefined) fs.writeFileSync(args['sample-file'], typeof sampleMessage === 'string' ? sampleMessage : JSON.stringify(sampleMessage, null, 2));
   console.log(`operation=${operation} sockets=${socketCount} messages=${messageCount} expected_deliveries=${expected} received=${received} missed=${expected - received} unexpected=${unexpected} avg_message_bytes=${received ? Math.round(receivedBytes / received) : 0} elapsed_s=${elapsed} p50_ms=${percentile(.50)} p95_ms=${percentile(.95)} p99_ms=${percentile(.99)}`);
   if (received !== expected || closedEarly) process.exitCode = 1;
 } finally {

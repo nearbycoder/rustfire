@@ -60,7 +60,12 @@ if (chat) {
   const messages = chat.querySelector('.messages');
   const decorateOwn=()=>{
     messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.creatorId===document.body.dataset.userId));
-    messages.querySelectorAll('.boost-item').forEach(node=>node.classList.toggle('mine',node.dataset.boosterId===document.body.dataset.userId));
+    messages.querySelectorAll('.boost-item').forEach(node=>{
+      const mine=node.dataset.boosterId===document.body.dataset.userId;
+      node.classList.toggle('mine',mine);
+      const content=node.querySelector('[data-boost-reveal]');
+      if(mine)content?.setAttribute('tabindex','0');else content?.removeAttribute('tabindex');
+    });
   };
   const formatMessageGroups=()=>{
     messages.querySelectorAll('.day-separator').forEach(node=>node.remove());
@@ -326,8 +331,10 @@ if (chat) {
     const boost=node.closest('.boost-item');
     if(!boost?.classList.contains('mine'))return;
     const shown=boost.classList.toggle('revealed');
-    boost.querySelector('.boost-delete').hidden=!shown;
+    const button=boost.querySelector('.boost-delete');
+    button.hidden=!shown;
     node.setAttribute('aria-expanded',String(shown));
+    if(shown)button.focus();else node.focus();
   }
   messages.addEventListener('keydown',event=>{
     const content=event.target.closest('[data-boost-reveal]');
@@ -336,6 +343,7 @@ if (chat) {
   messages.addEventListener('click', async e => {
     const boostDelete=e.target.closest('[data-delete-boost]');
     if(boostDelete){
+      e.preventDefault();
       const response=await fetch(boostDelete.dataset.deleteBoost,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken,Accept:'text/vnd.turbo-stream.html'}});
       if(response.ok)boostDelete.closest('.boost-item')?.remove();
       else alert('Could not delete boost');

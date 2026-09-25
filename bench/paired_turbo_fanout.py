@@ -6,7 +6,9 @@ Both runs use the same number of sockets and messages. Message HTML still differ
 
 import argparse
 from datetime import datetime, timezone
+import html
 import pathlib
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -26,19 +28,31 @@ def seed_boost_message(rust_db, camp_db):
         db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Boost fixture','Message',1,?1,?1)", [camp_time])
 
 
-def fanout(app, port, cookie, csrf, sockets, messages, operation):
+def fanout(app, port, cookie, csrf, sockets, messages, operation, sample_file=None):
+    command = [
+        "node", "bench/fanout.mjs", "--app", app,
+        "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
+        "--csrf", csrf, "--room", "1", "--sockets", str(sockets),
+        "--messages", str(messages), "--operation", operation,
+    ]
+    if sample_file is not None:
+        command.extend(["--sample-file", str(sample_file)])
     result = subprocess.run(
-        [
-            "node", "bench/fanout.mjs", "--app", app,
-            "--base", f"http://127.0.0.1:{port}", "--cookie", cookie,
-            "--csrf", csrf, "--room", "1", "--sockets", str(sockets),
-            "--messages", str(messages), "--operation", operation,
-        ],
+        command,
         cwd=ROOT, text=True, capture_output=True,
     )
     if result.returncode:
         raise RuntimeError(f"{app} fanout failed: {result.stdout}\n{result.stderr}")
     return result.stdout.strip()
+
+
+def boost_identity(sample_file):
+    sample = html.unescape(sample_file.read_text())
+    name = re.search(r"<a\b[^>]*\btitle=['\"]([^'\"]+)['\"]", sample)
+    avatar = re.search(r"<img\b[^>]*\bsrc=['\"]([^'\"]+/avatar\?v=\d+)['\"]", sample)
+    if not name or not avatar:
+        raise RuntimeError(f"Boost sample lacks booster identity: {sample_file}")
+    return name.group(1), avatar.group(1)
 
 
 def main():
@@ -47,6 +61,7 @@ def main():
     parser.add_argument("--messages", type=int, default=5)
     parser.add_argument("--operation", choices=["messages", "boosts"], default="messages")
     parser.add_argument("--campfire-workers", type=int, default=1)
+    parser.add_argument("--sample-dir", type=pathlib.Path, help="Write one received Turbo event from each app to this directory")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
@@ -58,12 +73,19 @@ def main():
     if revision != "91d294f4a09f9bbe37f9548959bfcb43645678fb":
         parser.error(f"Campfire source is at {revision}, not the pinned compatibility target")
     ruby = args.ruby.resolve()
+    sample_dir = args.sample_dir.resolve() if args.sample_dir else None
+    if sample_dir:
+        sample_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="paired-turbo-fanout-") as scratch:
         temp = pathlib.Path(scratch)
+        output_dir = sample_dir or temp
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
         rust_port, camp_port = free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
+        with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
+            people = camp.execute("SELECT id,name,updated_at FROM users WHERE id IN(1,2)").fetchall()
+            rust.executemany("UPDATE users SET name=?2,updated_at=?3 WHERE id=?1", people)
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers)
         if args.operation == "boosts":
             seed_boost_message(rust_db, camp_db)
@@ -73,7 +95,7 @@ def main():
             "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"],
         })
         try:
-            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation)
+            rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, output_dir / "rustfire.html")
         finally:
             stop_server(rust)
 
@@ -85,7 +107,7 @@ def main():
             try:
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
-                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation)
+                camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, output_dir / "campfire.html")
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -95,6 +117,12 @@ def main():
                 stop_server(camp)
         print(f"rustfire-turbo {rust_result}")
         print(f"campfire       {camp_result}")
+        if args.operation == "boosts":
+            rust_identity = boost_identity(output_dir / "rustfire.html")
+            camp_identity = boost_identity(output_dir / "campfire.html")
+            if rust_identity != camp_identity:
+                raise RuntimeError(f"Boost identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
+            print("boost_identity_match=true")
 
 
 if __name__ == "__main__":
