@@ -405,7 +405,14 @@ def main():
             webhook_url = f"http://127.0.0.1:{webhook_server.server_port}/bot"
             assert request(admin, base, "/account/bots/3/update", {"name":"Rust Robot", "webhook_url":webhook_url})[0] == 200
             assert webhook_url in html.unescape(request(admin, base, "/account/bots/3/edit")[2])
-            assert request(admin, base, "/rooms/1/messages", {"message[body]":"@Rust Robot please answer"}, headers={"Accept":"application/json"})[0] == 201
+            code, _, payload = request(admin, base, "/autocompletable/users?room_id=1&query=Rust%20Robot")
+            bot_suggestion = json.loads(payload)[0]
+            assert code == 200 and bot_suggestion["value"] == 3 and bot_suggestion["sgid"]
+            def mention_html(user_id, text="selected mention"):
+                details = {"contentType":"application/vnd.campfire.mention","sgid":bot_suggestion["sgid"]} if user_id == 3 else {"contentType":"application/vnd.rustfire.mention","userId":str(user_id)}
+                details = html.escape(json.dumps(details), quote=True)
+                return f'<div><figure data-trix-attachment="{details}"><span class="mention">@Rust Robot</span></figure> {text}</div>'
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3, "please answer"),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
             for _ in range(100):
                 if webhook_requests and "Bot reply from webhook" in request(admin, base, "/rooms/1")[2]:
                     break
@@ -414,13 +421,10 @@ def main():
                 raise AssertionError("bot webhook reply did not arrive")
             assert webhook_requests[0]["room"]["path"] == f"/rooms/1/{key}/messages"
             assert webhook_requests[0]["message"]["body"]["plain"] == "please answer"
-            code, _, payload = request(admin, base, "/autocompletable/users?room_id=1&query=Rust%20Robot")
-            bot_suggestion = json.loads(payload)[0]
-            assert code == 200 and bot_suggestion["value"] == 3 and bot_suggestion["sgid"]
-            def mention_html(user_id):
-                details = {"contentType":"application/vnd.campfire.mention","sgid":bot_suggestion["sgid"]} if user_id == 3 else {"contentType":"application/vnd.rustfire.mention","userId":str(user_id)}
-                details = html.escape(json.dumps(details), quote=True)
-                return f'<div><figure data-trix-attachment="{details}"><span class="mention">@Rust Robot</span></figure> selected mention</div>'
+            prior_webhooks = len(webhook_requests)
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":"@Rust Robot is plain text"}, headers={"Accept":"application/json"})[0] == 201
+            time.sleep(.2)
+            assert len(webhook_requests) == prior_webhooks
             prior_webhooks = len(webhook_requests)
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3),"message[format]":"html"}, headers={"Accept":"application/json"})
             assert code == 201
@@ -456,7 +460,7 @@ def main():
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM message_mentions WHERE message_id=?",(forged_message_id,)).fetchone() == (0,)
             time.sleep(.2)
             assert len(webhook_requests) == prior_webhooks
-            assert request(admin, base, "/rooms/1/messages", {"message[body]":"@Rust Robot send image"}, headers={"Accept":"application/json"})[0] == 201
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3, "send image"),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
             for _ in range(100):
                 if "attachment.png" in request(admin, base, "/rooms/1")[2]:
                     break

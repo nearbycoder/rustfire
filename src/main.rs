@@ -164,8 +164,6 @@ struct ChatMessage {
     room_kind: Option<String>,
     #[serde(skip_serializing)]
     mention_ids: Vec<i64>,
-    #[serde(skip_serializing)]
-    structured_mentions: bool,
     creator_id: i64,
     creator_name: String,
     creator_role: i64,
@@ -1792,7 +1790,6 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
         room_id: r.get(1)?,
         room_kind: None,
         mention_ids: Vec::new(),
-        structured_mentions: false,
         creator_id: r.get(2)?,
         creator_name: r.get(3)?,
         creator_role: r.get(11)?,
@@ -2486,9 +2483,6 @@ fn insert_message(
     request_host: Option<&str>,
 ) -> Result<ChatMessage, StatusCode> {
     let room = room_for(s, u.id, rid)?;
-    let structured_mentions = rich
-        && (body.contains("application/vnd.rustfire.mention")
-            || body.contains("application/vnd.campfire.mention"));
     let candidate_mentions = if rich {
         mention_ids(
             body,
@@ -2563,7 +2557,6 @@ fn insert_message(
         room_id: rid,
         room_kind: Some(room.kind),
         mention_ids: valid_mentions,
-        structured_mentions,
         creator_id: u.id,
         creator_name: u.name.clone(),
         creator_role: u.role,
@@ -2737,17 +2730,8 @@ async fn deliver_push(
     Ok(())
 }
 fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCode> {
-    if message.creator_role == 2 {
-        return Ok(());
-    }
     let direct = message.room_kind.as_deref() == Some("Rooms::Direct");
-    if !direct
-        && (if message.structured_mentions {
-            message.mention_ids.is_empty()
-        } else {
-            !message.body.contains('@')
-        })
-    {
+    if !direct && message.mention_ids.is_empty() {
         return Ok(());
     }
     let db = pool(s)?;
@@ -2774,13 +2758,7 @@ fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), Stat
     drop(q);
     drop(db);
     for (id, name, key, url) in bots {
-        if !direct
-            && !(if message.structured_mentions {
-                message.mention_ids.contains(&id)
-            } else {
-                message.body.contains(&format!("@{name}"))
-            })
-        {
+        if id == message.creator_id || (!direct && !message.mention_ids.contains(&id)) {
             continue;
         }
         let Ok(permit) = s.webhook_slots.clone().try_acquire_owned() else {
@@ -3006,7 +2984,7 @@ async fn message_show(
     let u = user(&s, &headers)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
-    let m=db.query_row("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",params![rid,mid],|r|Ok(ChatMessage{id:r.get(0)?,room_id:r.get(1)?,room_kind:None,mention_ids:Vec::new(),structured_mentions:false,creator_id:r.get(2)?,creator_name:r.get(3)?,creator_role:r.get(11)?,body:r.get(4)?,body_html:r.get(12)?,created_at:r.get(5)?,client_message_id:r.get(6)?,attachment:r.get::<_,Option<i64>>(7)?.map(|id|Attachment{id,filename:r.get(8).unwrap_or_default(),content_type:r.get(9).unwrap_or_default()}),boosts:r.get(10)?})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
+    let m=db.query_row("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,COALESCE((SELECT group_concat(content,' ') FROM boosts WHERE message_id=m.id),''),u.role,m.body_html FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",params![rid,mid],|r|Ok(ChatMessage{id:r.get(0)?,room_id:r.get(1)?,room_kind:None,mention_ids:Vec::new(),creator_id:r.get(2)?,creator_name:r.get(3)?,creator_role:r.get(11)?,body:r.get(4)?,body_html:r.get(12)?,created_at:r.get(5)?,client_message_id:r.get(6)?,attachment:r.get::<_,Option<i64>>(7)?.map(|id|Attachment{id,filename:r.get(8).unwrap_or_default(),content_type:r.get(9).unwrap_or_default()}),boosts:r.get(10)?})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
     Ok(if headers.get("x-rustfire-fragment").is_some() {
         Html(message_html(&m)).into_response()
     } else if headers
