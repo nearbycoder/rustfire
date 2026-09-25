@@ -362,7 +362,7 @@ if (chat) {
       e.preventDefault();const article=edit.closest('.message');
       const response=await fetch(edit.href,{headers:{'X-Rustfire-Inline':'1'}});
       if(!response.ok){alert('Could not edit message');return;}
-      article.querySelector('.message-body').innerHTML=await response.text();
+      article.querySelector('[id^="presentation_message_"]').innerHTML=await response.text();
       article.classList.add('editing');edit.closest('details').open=false;
       article.querySelector('.inline-edit trix-editor')?.focus();return;
     }
@@ -374,18 +374,39 @@ if (chat) {
       const response=await fetch(remove.dataset.deleteMessage,{method:'POST',headers:{'X-CSRF-Token':csrfToken}});
       if(response.ok){const article=remove.closest('.message');(article.closest('[data-stream-message]')||article).remove();formatMessageGroups()}else alert('Could not delete message');return;
     }
+    const cancelBoost=e.target.closest('[data-cancel-custom-boost]');
+    if(cancelBoost){
+      e.preventDefault();const frame=cancelBoost.closest('turbo-frame');
+      if(frame?.dataset.originalHtml){frame.innerHTML=frame.dataset.originalHtml;delete frame.dataset.originalHtml;}
+      return;
+    }
     const customBoost=e.target.closest('[data-custom-boost]');
-    if(customBoost){e.preventDefault();const form=customBoost.nextElementSibling;form.hidden=false;form.querySelector('[name="boost[content]"]')?.focus();return;}
+    if(customBoost){
+      e.preventDefault();
+      const frameId=customBoost.dataset.turboFrame||customBoost.closest('turbo-frame')?.id;
+      const frame=frameId&&document.getElementById(frameId);
+      if(!frame){alert('Could not open boost form');return;}
+      const details=customBoost.closest('details');
+      const response=await fetch(customBoost.href,{headers:{'Turbo-Frame':frameId}});
+      if(!response.ok){alert('Could not open boost form');return;}
+      const returned=new DOMParser().parseFromString(await response.text(),'text/html').getElementById(frameId);
+      if(!returned){alert('Could not open boost form');return;}
+      if(!frame.dataset.originalHtml)frame.dataset.originalHtml=frame.innerHTML;
+      frame.innerHTML=returned.innerHTML;
+      if(details)details.open=false;
+      frame.querySelector('[name="boost[content]"]')?.focus();
+      return;
+    }
     const lightbox=e.target.closest('[data-lightbox]');
     if(lightbox){e.preventDefault();let dialog=document.querySelector('.image-lightbox');if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});document.body.append(dialog)}dialog.querySelector('img').src=lightbox.href;dialog.showModal();return;}
     const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }
     const reply=e.target.closest('[data-reply]');
     if(reply){
-      const article=reply.closest('.message');const body=article.querySelector('.message-body').cloneNode(true);
+      const article=reply.closest('.message');const body=article.querySelector('[id^="presentation_message_"]').cloneNode(true);
       const preview=body.querySelector('.og-embed a')?.href;
       body.querySelectorAll('.og-embed').forEach(node=>node.remove());
       body.querySelectorAll('.mention').forEach(node=>node.replaceWith(document.createTextNode(node.textContent.trim())));
-      const quoted=body.querySelector('.trix-content')?.innerHTML||body.querySelector('[data-message-presentation]')?.innerHTML||body.innerHTML||preview||'';
+      const quoted=body.querySelector('.trix-content')?.innerHTML||body.innerHTML||preview||'';
       const block=document.createElement('blockquote');block.innerHTML=quoted;
       const cite=document.createElement('cite');cite.textContent=article.querySelector('.message-meta strong')?.textContent+' ';
       const link=document.createElement('a');link.href=article.querySelector('.message-meta a')?.href||'#';link.textContent='#';cite.append(link);
@@ -411,7 +432,10 @@ if (chat) {
     const form=e.target.closest('.custom-boost-form');if(!form)return;
     e.preventDefault();
     const response=await fetch(form.action,{method:'POST',body:new URLSearchParams(new FormData(form)),headers:{'X-CSRF-Token':csrfToken}});
-    if(response.ok){form.reset();form.hidden=true;const details=form.closest('details');if(details)details.open=false;}
+    if(response.ok){
+      form.reset();const frame=form.closest('turbo-frame');
+      if(frame?.dataset.originalHtml){frame.innerHTML=frame.dataset.originalHtml;delete frame.dataset.originalHtml;}
+    }
     else alert('Could not boost message');
   });
 }

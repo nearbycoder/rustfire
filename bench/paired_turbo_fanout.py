@@ -7,6 +7,7 @@ Both runs use the same number of sockets and messages. Message HTML still differ
 import argparse
 from datetime import datetime, timezone
 import html
+from html.parser import HTMLParser
 import pathlib
 import re
 import sqlite3
@@ -75,6 +76,8 @@ def check_message_targets(sample_file):
         raise RuntimeError(f"Message stream lacks frame or DOM targets {missing}: {sample_file}")
     if not re.search(r"<h2\s+class=['\"]message__day-separator['\"]>\s*<time\b", sample):
         raise RuntimeError(f"Message stream lacks its day heading: {sample_file}")
+    if "custom-boost-form" in sample:
+        raise RuntimeError(f"Message stream eagerly renders a new-boost form: {sample_file}")
 
 
 def message_room_label(sample_file):
@@ -83,6 +86,28 @@ def message_room_label(sample_file):
     if not matched:
         raise RuntimeError(f"Message stream lacks its room link: {sample_file}")
     return html.unescape(matched.group(1))
+
+
+class MessageTagSequence(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(("start", tag))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag not in {"img", "input", "br", "hr", "source", "meta", "link"}:
+            self.tags.append(("end", tag))
+
+
+def message_tag_sequence(sample_file):
+    parser = MessageTagSequence()
+    parser.feed(sample_file.read_text())
+    return parser.tags
 
 
 def main():
@@ -163,6 +188,8 @@ def main():
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
+            if message_tag_sequence(output_dir / "rustfire.html") != message_tag_sequence(output_dir / "campfire.html"):
+                raise RuntimeError("Message stream tag structure differs from Campfire")
         print(f"{args.operation}_identity_match=true")
 
 
