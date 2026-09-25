@@ -102,7 +102,7 @@ A rerun after the later deactivation changes measured **0.001 ms** indexed media
 
 | Existing direct rooms | Rustfire median / p95 | Campfire median / p95 |
 |---:|---:|---:|
-| 1,000 | 0.120 / 0.172 ms | 353.617 / 392.593 ms |
-| 10,000 | 0.084 / 0.127 ms | 3,374.528 / 3,606.703 ms |
+| 1,000 | 0.297 / 0.549 ms | 345.953 / 375.839 ms |
+| 10,000 | 0.162 / 0.386 ms | 3,466.264 / 3,633.413 ms |
 
-The selected-room lookup is much faster in Rustfire at these fixture sizes. This is a **single-client ping-reuse comparison**, not proof of full-app speed or user capacity. Campfire returned HTTP 302 while Rustfire returned 303. Campfire also renders and publishes Turbo sidebar broadcasts for each participant on reuse; Rustfire sends a lighter per-user room-list event, and no clients were subscribed during the trial. The apps therefore still perform different work even though the selected room and empty redirect body match. The load generator and servers shared the host, and no sustained concurrency sweep was run.
+The selected-room lookup is much faster in Rustfire at these fixture sizes. This is a **single-client ping-reuse comparison**, not proof of full-app speed or user capacity. Both apps returned HTTP 302 with an empty body. Campfire renders and publishes Turbo sidebar broadcasts for each participant on reuse; Rustfire renders a per-user room link and sends a lighter room-list event, and no clients were subscribed during the trial. The apps therefore still perform different work. The load generator and servers shared the host, and no sustained concurrency sweep was run.

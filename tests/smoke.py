@@ -299,6 +299,11 @@ def main():
             assert code == 200 and "class='room-pill'>Admin</h1>" in page
             code, repeated_url, _ = request(admin, base, "/rooms/directs", {"user_ids": "2"})
             assert repeated_url == direct_url
+            assert request(member, base, "/rooms/3/involvement", {"involvement": "invisible"})[0] == 200
+            assert "href='/rooms/3'" not in request(member, base, "/users/me/sidebar")[2]
+            assert request(member, base, "/rooms/3")[0] == 200
+            assert request(member, base, "/rooms/3/involvement", {"involvement": "everything"})[0] == 200
+            assert "href='/rooms/3'" in request(member, base, "/users/me/sidebar")[2]
             code, _, page = request(member, base, "/rooms/directs/3/edit")
             assert code == 200 and "Ping settings" in page
             code, alias_url, _ = request(member, base, "/rooms/directs/3")

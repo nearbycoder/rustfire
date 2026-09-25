@@ -125,7 +125,7 @@ if (chat) {
   const unreadIdent=JSON.stringify({channel:'UnreadRoomsChannel'});
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
-  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar .room-link[href='/rooms/${rid}']`).forEach(link=>link.classList.toggle('unread',unread));
+  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar .room-link[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct-rooms')link.parentElement.prepend(link)});
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
     if(sidebarRefreshPending){sidebarRefreshAgain=true;return;}
@@ -142,6 +142,17 @@ if (chat) {
       if(response.headers.get('x-rustfire-active-room-accessible')==='0')location.href='/';
     }catch(error){console.error('Could not refresh room list',error)}
     finally{sidebarRefreshPending=false;if(sidebarRefreshAgain){sidebarRefreshAgain=false;refreshSidebar()}}
+  }
+  function updateDirectRoom(data){
+    const nav=document.getElementById('direct-rooms');
+    if(!nav||!Number.isInteger(data?.room_id)||typeof data.html!=='string')return false;
+    const link=new DOMParser().parseFromString(data.html,'text/html').querySelector('.room-link');
+    if(!link||link.getAttribute('href')!==`/rooms/${data.room_id}`)return false;
+    link.classList.toggle('active',data.room_id===roomId);
+    nav.querySelector(`.room-link[href='/rooms/${data.room_id}']`)?.remove();
+    nav.prepend(link);
+    if(sidebarRefreshPending)sidebarRefreshAgain=true;
+    return true;
   }
   const typingIndicator=document.getElementById('typing-indicator');
   const typingPeople=new Map();
@@ -163,7 +174,7 @@ if (chat) {
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/cable`, 'actioncable-v1-json');
     socket.addEventListener('open', () => { catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,unreadIdent,readIdent,roomListIdent])socket.send(JSON.stringify({command:'subscribe',identifier})); });
     socket.addEventListener('message', e => {
-      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){refreshSidebar();return;} if (!data || data.room_id !== roomId) return;
+      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;} if (!data || data.room_id !== roomId) return;
         if (data.type === 'message'&&historyMode){updateReturnButton();return;}
         if (data.type === 'message') { if (!document.getElementById(`message-${data.message.id}`)) { const scrollToLatest=nearBottom()||data.message.creator?.id===Number(document.body.dataset.userId); messages.insertAdjacentHTML('beforeend', data.html); formatLocalTimes(messages); decorateOwn(); formatMessageGroups(); if(scrollToLatest)messages.scrollTop=messages.scrollHeight; updateReturnButton(); const sound=document.querySelector(`#message-${data.message.id} [data-sound]`); if(sound) new Audio(sound.dataset.sound).play().catch(()=>{}); } if (!catchingUp) cursor = Math.max(cursor, data.message.id); }
         if (data.type === 'message_deleted') {document.getElementById(`message-${data.id}`)?.remove();formatMessageGroups();}

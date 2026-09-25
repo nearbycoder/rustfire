@@ -108,6 +108,30 @@ fn notify_room_lists(s: &AppState, ids: impl IntoIterator<Item = i64>) {
         });
     }
 }
+fn notify_direct_room(s: &AppState, rid: i64, ids: impl IntoIterator<Item = i64>) {
+    for uid in ids.into_iter().collect::<HashSet<_>>() {
+        let rendered = (|| -> Result<String, StatusCode> {
+            let room = room_for(s, uid, rid)?;
+            let unread: bool = pool(s)?
+                .query_row(
+                    "SELECT unread_at IS NOT NULL FROM memberships WHERE room_id=?1 AND user_id=?2",
+                    params![rid, uid],
+                    |row| row.get(0),
+                )
+                .map_err(db_err)?;
+            Ok(sidebar_room_link(&room, None, unread))
+        })();
+        match rendered {
+            Ok(html) => s.room_list_events.send(Event {
+                room_id: uid,
+                payload: json!({"type":"direct_room_added","room_id":rid,"html":html}).to_string(),
+            }),
+            Err(status) => {
+                eprintln!("Rustfire direct-room update could not render for user {uid}: {status}")
+            }
+        }
+    }
+}
 #[derive(Clone, Serialize)]
 struct User {
     id: i64,
@@ -453,6 +477,13 @@ fn room_for(state: &AppState, uid: i64, rid: i64) -> Result<Room, StatusCode> {
 }
 fn can_admin(u: &User, room: &Room) -> bool {
     is_admin(u) || room.creator_id == u.id || room.kind == "Rooms::Direct"
+}
+fn found_redirect(path: &str) -> Response {
+    let mut response = StatusCode::FOUND.into_response();
+    response
+        .headers_mut()
+        .insert(header::LOCATION, path.parse().unwrap());
+    response
 }
 fn csrf_forms(html: &str, token: &str) -> String {
     let mut out = String::with_capacity(html.len() + 512);
@@ -1438,7 +1469,7 @@ async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes)
 
 fn rooms_for(s: &AppState, uid: i64) -> Result<Vec<Room>, StatusCode> {
     let db = pool(s)?;
-    let mut q=db.prepare("SELECT r.id,CASE WHEN r.type='Rooms::Direct' THEN COALESCE((SELECT group_concat(name,', ') FROM (SELECT u2.name FROM users u2 JOIN memberships m2 ON m2.user_id=u2.id WHERE m2.room_id=r.id AND u2.id!=?1 ORDER BY u2.id)),(SELECT name FROM users WHERE id=?1)) ELSE COALESCE(r.name,'') END,r.type,r.creator_id FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=?1 AND (r.type='Rooms::Direct' OR m.involvement!='invisible') ORDER BY r.type,LOWER(r.name)").map_err(db_err)?;
+    let mut q=db.prepare("SELECT r.id,CASE WHEN r.type='Rooms::Direct' THEN COALESCE((SELECT group_concat(name,', ') FROM (SELECT u2.name FROM users u2 JOIN memberships m2 ON m2.user_id=u2.id WHERE m2.room_id=r.id AND u2.id!=?1 ORDER BY u2.id)),(SELECT name FROM users WHERE id=?1)) ELSE COALESCE(r.name,'') END,r.type,r.creator_id FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=?1 AND m.involvement!='invisible' ORDER BY CASE WHEN r.type='Rooms::Direct' THEN 0 ELSE 1 END,CASE WHEN r.type='Rooms::Direct' THEN r.updated_at END DESC,LOWER(r.name)").map_err(db_err)?;
     let rows = q
         .query_map([uid], |r| {
             Ok(Room {
@@ -1450,6 +1481,27 @@ fn rooms_for(s: &AppState, uid: i64) -> Result<Vec<Room>, StatusCode> {
         })
         .map_err(db_err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+}
+fn sidebar_room_link(room: &Room, active: Option<i64>, unread: bool) -> String {
+    format!(
+        "<a class='room-link {}' href='/rooms/{}'>{} {}</a>",
+        format!(
+            "{} {}",
+            if active == Some(room.id) {
+                "active"
+            } else {
+                ""
+            },
+            if unread { "unread" } else { "" }
+        ),
+        room.id,
+        if room.kind == "Rooms::Direct" {
+            "↗"
+        } else {
+            "#"
+        },
+        esc(&room.name)
+    )
 }
 fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, StatusCode> {
     let rooms = rooms_for(s, u.id)?;
@@ -1470,34 +1522,16 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
         )
         .map_err(db_err)?;
     let mut html = format!(
-        "<aside class='sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'>×</button><div class='sidebar-account'><a class='icon-btn' href='/rooms/directs/new' aria-label='New ping'>✚</a><a class='sidebar-user' href='/users/me/profile'><img src='/users/{}/avatar' alt=''><span>{}</span></a></div><div class='sidebar-title'>Pings</div><nav>",
+        "<aside class='sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'>×</button><div class='sidebar-account'><a class='icon-btn' href='/rooms/directs/new' aria-label='New ping'>✚</a><a class='sidebar-user' href='/users/me/profile'><img src='/users/{}/avatar' alt=''><span>{}</span></a></div><div class='sidebar-title'>Pings</div><nav id='direct-rooms'>",
         u.id,
         esc(u.name.split_whitespace().next().unwrap_or(&u.name))
     );
     for r in rooms.iter().filter(|r| r.kind == "Rooms::Direct") {
-        html.push_str(&format!(
-            "<a class='room-link {}' href='/rooms/{}'>↗ {}</a>",
-            format!(
-                "{} {}",
-                if active == Some(r.id) { "active" } else { "" },
-                if unread.contains(&r.id) { "unread" } else { "" }
-            ),
-            r.id,
-            esc(&r.name)
-        ));
+        html.push_str(&sidebar_room_link(r, active, unread.contains(&r.id)));
     }
     html.push_str("</nav><div class='sidebar-title'>Rooms</div><nav>");
     for r in rooms.iter().filter(|r| r.kind != "Rooms::Direct") {
-        html.push_str(&format!(
-            "<a class='room-link {}' href='/rooms/{}'># {}</a>",
-            format!(
-                "{} {}",
-                if active == Some(r.id) { "active" } else { "" },
-                if unread.contains(&r.id) { "unread" } else { "" }
-            ),
-            r.id,
-            esc(&r.name)
-        ));
+        html.push_str(&sidebar_room_link(r, active, unread.contains(&r.id)));
     }
     html.push_str("</nav>");
     if is_admin(u) || !restricted {
@@ -3374,8 +3408,8 @@ async fn direct_create(
         .map_err(db_err)?;
     if let Some(id) = existing {
         tx.commit().map_err(db_err)?;
-        notify_room_lists(&s, ids);
-        return Ok(Redirect::to(&format!("/rooms/{id}")).into_response());
+        notify_direct_room(&s, id, ids);
+        return Ok(found_redirect(&format!("/rooms/{id}")));
     }
     let mut names = Vec::new();
     for id in &ids {
@@ -3408,8 +3442,8 @@ async fn direct_create(
     )
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
-    notify_room_lists(&s, ids);
-    Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+    notify_direct_room(&s, rid, ids);
+    Ok(found_redirect(&format!("/rooms/{rid}")))
 }
 async fn search_get(
     State(s): State<Arc<AppState>>,
