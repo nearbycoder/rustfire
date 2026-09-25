@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import uuid
 import urllib.request
+import urllib.parse
 import struct
 import zlib
 
@@ -160,6 +161,41 @@ def check_video_poster(sample_file, port, cookie):
     return len(body), hashlib.sha256(body).hexdigest()
 
 
+def fetch_edit_frame(output_file, port, cookie, client_id):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/rooms/1/messages/1/edit",
+        headers={"Cookie": cookie, "Turbo-Frame": f"edit_message_{client_id}"},
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Message edit returned {response.status}")
+        output_file.write_bytes(response.read())
+
+
+def edit_frame_structure(sample_file):
+    source = sample_file.read_text()
+    match = re.search(r"<turbo-frame\s+id=['\"]edit_message_[^'\"]+['\"][^>]*>.*?</turbo-frame>", source, re.S)
+    if not match:
+        raise RuntimeError(f"Edit response lacks its Turbo frame: {sample_file}")
+    parser = MessageTagSequence()
+    parser.feed(match.group(0))
+    normalized = []
+    for tag, attrs in parser.attributes:
+        values = dict(attrs)
+        if tag == "input" and values.get("name") == "authenticity_token":
+            if not values.get("value"):
+                raise RuntimeError(f"Edit form has an empty CSRF token: {sample_file}")
+            values["value"] = "<csrf>"
+        for key in ("data-direct-upload-url", "data-blob-url-template"):
+            if key in values:
+                url = urllib.parse.urlsplit(values[key])
+                if not url.scheme or not url.netloc:
+                    raise RuntimeError(f"Edit form has a relative {key}: {sample_file}")
+                values[key] = url.path
+        normalized.append((tag, tuple(sorted(values.items()))))
+    return parser.tags, parser.attribute_keys, normalized, parser.text
+
+
 def write_png(path, width, height):
     def chunk(name, data):
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
@@ -196,6 +232,7 @@ def main():
     parser.add_argument("--image-size", help="Use a generated PNG of WIDTHxHEIGHT for image uploads; default is 1x1")
     parser.add_argument("--video-size", default="16x16", help="Generate a video of WIDTHxHEIGHT for video uploads; default is 16x16")
     parser.add_argument("--video-sar", help="Set sample aspect ratio NUM/DEN in the generated video")
+    parser.add_argument("--check-edit", action="store_true", help="Fetch the first message's edit frame")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
@@ -208,6 +245,8 @@ def main():
         parser.error("--video-size must be WIDTHxHEIGHT, each below 10000")
     if args.video_sar and (args.operation != "videos" or not re.fullmatch(r"[1-9]\d{0,2}/[1-9]\d{0,2}", args.video_sar)):
         parser.error("--video-sar requires videos and NUM/DEN")
+    if args.check_edit and args.operation == "boosts":
+        parser.error("--check-edit requires a message operation")
     repo = args.campfire_repo.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     if revision != "91d294f4a09f9bbe37f9548959bfcb43645678fb":
@@ -254,6 +293,8 @@ def main():
         })
         try:
             rust_result = fanout("rustfire-turbo", rust_port, "session_token=benchmark-session", "benchmark-csrf", args.sockets, args.messages, args.operation, run_id, output_dir / "rustfire.html", image_file, video_file)
+            if args.check_edit:
+                fetch_edit_frame(output_dir / "rustfire-edit.html", rust_port, "session_token=benchmark-session", f"{run_id}-0")
             rust_image_bytes = check_image_representation(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session", expected_image_dimensions) if args.operation == "images" else None
             rust_poster_bytes = check_video_poster(output_dir / "rustfire.html", rust_port, "session_token=benchmark-session") if args.operation == "videos" else None
         finally:
@@ -268,6 +309,8 @@ def main():
                 wait_for_server(camp_port, camp)
                 cookie, csrf = login_campfire(camp_port)
                 camp_result = fanout("campfire", camp_port, cookie, csrf, args.sockets, args.messages, args.operation, run_id, output_dir / "campfire.html", image_file, video_file)
+                if args.check_edit:
+                    fetch_edit_frame(output_dir / "campfire-edit.html", camp_port, cookie, f"{run_id}-0")
                 camp_image_bytes = check_image_representation(output_dir / "campfire.html", camp_port, cookie, expected_image_dimensions) if args.operation == "images" else None
                 camp_poster_bytes = check_video_poster(output_dir / "campfire.html", camp_port, cookie) if args.operation == "videos" else None
             except Exception:
@@ -340,6 +383,12 @@ def main():
                 raise RuntimeError("Boost stream attribute values differ from Campfire")
             if rust_text != camp_text:
                 raise RuntimeError("Boost stream text differs from Campfire")
+        if args.check_edit:
+            rust_edit = edit_frame_structure(output_dir / "rustfire-edit.html")
+            camp_edit = edit_frame_structure(output_dir / "campfire-edit.html")
+            if rust_edit != camp_edit:
+                raise RuntimeError("Message edit frame structure or static content differs from Campfire")
+            print("edit_frame_identity_match=true")
         print(f"{args.operation}_identity_match=true")
 
 

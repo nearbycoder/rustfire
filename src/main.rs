@@ -1111,13 +1111,19 @@ fn csrf_forms(html: &str, token: &str) -> String {
         let Some(end) = rest.find('>') else { break };
         let tag = &rest[..=end];
         out.push_str(tag);
+        rest = &rest[end + 1..];
         if tag.contains("method='post'") {
+            if rest.starts_with("<input type='hidden' name='_method'") {
+                if let Some(method_end) = rest.find('>') {
+                    out.push_str(&rest[..=method_end]);
+                    rest = &rest[method_end + 1..];
+                }
+            }
             out.push_str(&format!(
                 "<input type='hidden' name='authenticity_token' value='{}'>",
                 esc(token)
             ));
         }
-        rest = &rest[end + 1..];
     }
     out.push_str(rest);
     out
@@ -2495,34 +2501,56 @@ fn image_preview_dimensions(
         ),
     ))
 }
+fn attachment_presentation_html(s: &AppState, a: &Attachment) -> String {
+    let filename = esc(&a.filename);
+    let blob_url = attachment_blob_path(s, a);
+    let download_url = format!("{blob_url}?disposition=attachment");
+    if safe_inline_image(&a.content_type) {
+        let (container_class, style, dimensions) =
+            if let Some((width, height, style)) = image_preview_dimensions(a, false) {
+                (
+                    "max-inline-size center flex overflow-clip",
+                    format!(" style='width: {style}'"),
+                    format!(" width='{width}' height='{height}'"),
+                )
+            } else {
+                (
+                    "max-inline-size center overflow-clip",
+                    String::new(),
+                    String::new(),
+                )
+            };
+        let representation = image_representation_path(s, a)
+            .unwrap_or_else(|_| format!("/attachments/{}/thumb", a.id));
+        format!(
+            "<div class='{container_class}'{style}><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img{dimensions} class='message__attachment' loading='lazy' src='{representation}'></a></div>"
+        )
+    } else if safe_inline_video(&a.content_type) {
+        let (container_class, style) =
+            if let Some((_, _, style)) = image_preview_dimensions(a, true) {
+                (
+                    "max-inline-size center flex overflow-clip",
+                    format!(" style='width: {style}'"),
+                )
+            } else {
+                ("max-inline-size center overflow-clip", String::new())
+            };
+        let poster = representation_path(s, a, "webp")
+            .unwrap_or_else(|_| format!("/attachments/{}/poster", a.id));
+        format!(
+            "<div class='{container_class}'{style}><video src='{blob_url}' poster='{poster}' controls='controls' preload='none' width='100%' height='100%' class='message__attachment'></video></div>"
+        )
+    } else {
+        format!(
+            "<div class='flex-inline align-center gap-half'><img class='colorize--black' aria-hidden='true' src='/assets/common-file-text-9043d980.svg' width='22' height='22'><span>{filename}</span><a class='btn message__action-btn hide-in-ios-pwa' style='--width: auto;' href='{download_url}'><img aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'><span class='for-screen-reader'>Download {filename}</span></a><button class='btn message__action-btn' style='--width: auto;' data-controller='web-share' data-action='web-share#share' data-web-share-files-value='{download_url}'><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'><span class='for-screen-reader'>Share {filename}</span></button></div>"
+        )
+    }
+}
 fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
     let attachment = m
         .attachment
         .as_ref()
-        .map(|a| {
-            let filename = esc(&a.filename);
-            let blob_url = attachment_blob_path(s, a);
-            let download_url = format!("{blob_url}?disposition=attachment");
-            if safe_inline_image(&a.content_type) {
-                let (container_class, style, dimensions) = if let Some((width, height, style)) = image_preview_dimensions(a, false) {
-                    ("max-inline-size center flex overflow-clip", format!(" style='width: {style}'"), format!(" width='{width}' height='{height}'"))
-                } else {
-                    ("max-inline-size center overflow-clip", String::new(), String::new())
-                };
-                let representation = image_representation_path(s, a).unwrap_or_else(|_| format!("/attachments/{}/thumb", a.id));
-                format!("<div class='{container_class}'{style}><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img{dimensions} class='message__attachment' loading='lazy' src='{representation}'></a></div>")
-            } else if safe_inline_video(&a.content_type) {
-                let (container_class, style) = if let Some((_, _, style)) = image_preview_dimensions(a, true) {
-                    ("max-inline-size center flex overflow-clip", format!(" style='width: {style}'"))
-                } else {
-                    ("max-inline-size center overflow-clip", String::new())
-                };
-                let poster = representation_path(s, a, "webp").unwrap_or_else(|_| format!("/attachments/{}/poster", a.id));
-                format!("<div class='{container_class}'{style}><video src='{blob_url}' poster='{poster}' controls='controls' preload='none' width='100%' height='100%' class='message__attachment'></video></div>")
-            } else {
-                format!("<div class='flex-inline align-center gap-half'><img class='colorize--black' aria-hidden='true' src='/assets/common-file-text-9043d980.svg' width='22' height='22'><span>{filename}</span><a class='btn message__action-btn hide-in-ios-pwa' style='--width: auto;' href='{download_url}'><img aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'><span class='for-screen-reader'>Download {filename}</span></a><button class='btn message__action-btn' style='--width: auto;' data-controller='web-share' data-action='web-share#share' data-web-share-files-value='{download_url}'><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'><span class='for-screen-reader'>Share {filename}</span></button></div>")
-            }
-        })
+        .map(|a| attachment_presentation_html(s, a))
         .unwrap_or_default();
     let presentation = if m.attachment.is_some() {
         String::new()
@@ -3812,32 +3840,49 @@ async fn message_edit(
     let u = user(&s, &headers)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
-    let row: Option<(i64, String, Option<String>)> = db
+    let row: Option<(i64, String, Option<String>, String)> = db
         .query_row(
-            "SELECT creator_id,body,COALESCE(body_source,body_html) FROM messages WHERE id=?1 AND room_id=?2",
+            "SELECT creator_id,body,body_source,client_message_id FROM messages WHERE id=?1 AND room_id=?2",
             params![mid, rid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(db_err)?;
-    let (creator, body, body_html) = row.ok_or(StatusCode::NOT_FOUND)?;
+    let (creator, body, body_source, client_id) = row.ok_or(StatusCode::NOT_FOUND)?;
     if !is_admin(&u) && creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
-    let source = esc(&body_html.unwrap_or_else(|| format!("<div>{}</div>", esc(&body))));
-    if headers.get("x-rustfire-inline").is_some() {
-        return Ok(Html(format!(
-            "<div class='inline-edit'><form method='post' action='/rooms/{rid}/messages/{mid}/update'><input type='hidden' id='edit-body-{mid}' name='message[body]' value='{source}'><input type='hidden' name='message[format]' value='html'><trix-editor input='edit-body-{mid}' aria-label='Edit message'></trix-editor><div class='inline-edit-actions'><button type='submit' class='button'>Save changes</button><button type='button' data-cancel-edit>Cancel</button><button type='button' class='danger' data-delete-message='/rooms/{rid}/messages/{mid}/delete'>Delete message</button></div></form></div>"
-        )).into_response());
-    }
-    Ok(render(
-        "Edit message",
-        &format!(
-            "<section class='form-card'><h1>Edit message</h1><form method='post' action='/rooms/{rid}/messages/{mid}/update'><input type='hidden' id='edit-body' name='message[body]' value='{}'><input type='hidden' name='message[format]' value='html'><trix-editor input='edit-body' aria-label='Edit message'></trix-editor><button class='button'>Save</button></form><form method='post' action='/rooms/{rid}/messages/{mid}/delete'><button class='danger'>Delete</button></form></section>",
-            source
-        ),
-        Some(&u),
-    ))
+    let source = esc(&body_source.unwrap_or(body));
+    let client_id = esc(&client_id);
+    let frame_id = format!("edit_message_{client_id}");
+    let delete_form_id = format!("delete_form_message_{client_id}");
+    let action = format!("/rooms/{rid}/messages/{mid}");
+    let upload_url = esc(&public_url(
+        &headers,
+        "/rails/active_storage/direct_uploads",
+    ));
+    let blob_url = esc(&public_url(
+        &headers,
+        "/rails/active_storage/blobs/redirect/:signed_id/:filename",
+    ));
+    let delete_button = format!(
+        "<button name='button' type='submit' class='btn btn--negative' form='{delete_form_id}' data-turbo-confirm='Are you sure you want to delete this message?'><img aria-hidden='true' src='/assets/trash-708c7eb2.svg'><span class='for-screen-reader'>Delete message</span></button>"
+    );
+    let attachment = message_by_id(&s, rid, mid)?.attachment;
+    let editor = if let Some(attachment) = attachment {
+        format!(
+            "{}<div class='message__edit-btns flex align-center justify-space-between gap full-width pad-block-start-half'><button name='button' type='submit' class='btn btn--negative center margin-block-end' form='{delete_form_id}' data-turbo-confirm='Are you sure you want to delete this message?'><img aria-hidden='true' src='/assets/trash-708c7eb2.svg'><span class='for-screen-reader'>Delete message</span></button></div>",
+            attachment_presentation_html(&s, &attachment)
+        )
+    } else {
+        format!(
+            "<div class='composer--edit composer--rich-text'><form id='form_message_{client_id}' data-controller='form' data-action='trix-file-accept-&gt;form#preventAttachment keydown.esc-&gt;form#cancel keydown.ctrl+enter-&gt;form#submit:prevent keydown.meta+enter-&gt;form#submit:prevent' action='{action}' accept-charset='UTF-8' method='post'><input type='hidden' name='_method' value='patch'><div class='full-width input input--actor min-width fill-white'><input type='hidden' name='message[body]' id='message_body_trix_input_message_{client_id}' value='{source}'><trix-editor rows='1' class='input' aria-multiline='true' aria-label='Edit message' autofocus='autofocus' data-controller='rich-autocomplete' data-action='trix-change-&gt;typing-notifications#start keydown-&gt;composer#submitByKeyboard trix-focus-&gt;rich-autocomplete#focus trix-change-&gt;rich-autocomplete#search trix-blur-&gt;rich-autocomplete#blur' data-rich-autocomplete-url-value='/autocompletable/users?room_id={rid}' data-direct-upload-url='{upload_url}' data-blob-url-template='{blob_url}' id='message_body' input='message_body_trix_input_message_{client_id}'></trix-editor></div><a data-form-target='cancel' hidden='hidden' href='{action}'>Close editor and discard changes</a><div class='message__edit-btns flex align-center justify-space-between gap full-width pad-block-start-half'><button name='button' type='submit' class='btn btn--reversed'><img aria-hidden='true' src='/assets/check-7897ff7e.svg'><span class='for-screen-reader'>Save changes</span></button>{delete_button}</div></form></div>"
+        )
+    };
+    let frame = format!(
+        "<turbo-frame id='{frame_id}'><div class='message__body position-relative' data-controller='scroll-into-view'><div class='message__body-content message__body-content--editing gap'>{editor}</div><div class='message__actions flex flex-wrap'><a class='message__action-btn message__edit-close-btn txt-small btn btn--borderless' href='{action}'><img class='colorize--black' aria-hidden='true' src='/assets/remove-0e7a045d.svg'><span class='for-screen-reader'>Close editor and discard changes</span></a></div><form id='{delete_form_id}' data-turbo-frame='{frame_id}' action='{action}' accept-charset='UTF-8' method='post'><input type='hidden' name='_method' value='delete'></div></turbo-frame>"
+    );
+    Ok(render("Edit message", &frame, Some(&u)))
 }
 async fn message_update(
     State(s): State<Arc<AppState>>,
@@ -3934,6 +3979,20 @@ async fn message_update(
         message_show(State(s), headers, Path((rid, mid))).await
     } else {
         Ok(Redirect::to(&format!("/rooms/{rid}/messages/{mid}")).into_response())
+    }
+}
+async fn message_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((rid, mid)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult {
+    match form.get("_method").map(String::as_str) {
+        Some("patch" | "put") => {
+            message_update(State(s), headers, Path((rid, mid)), Form(form)).await
+        }
+        Some("delete") => message_delete(State(s), headers, Path((rid, mid))).await,
+        _ => Err(StatusCode::METHOD_NOT_ALLOWED),
     }
 }
 async fn message_delete(
@@ -7013,6 +7072,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/rooms/{id}/messages/{mid}",
             get(message_show)
+                .post(message_post_override)
                 .patch(message_update)
                 .put(message_update)
                 .delete(message_delete),

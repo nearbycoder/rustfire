@@ -164,7 +164,7 @@ if (chat) {
         const page=await refreshed.json();
         for(const entry of page.updated||[]){
           const existing=messageById(entry.id);
-          if(existing&&!existing.querySelector('.inline-edit'))existing.outerHTML=entry.html;
+          if(existing&&!existing.querySelector('.composer--edit'))existing.outerHTML=entry.html;
         }
         lastRefreshAt=page.checked_at;
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
@@ -257,7 +257,7 @@ if (chat) {
           for(const node of addedMessages){const sound=node.querySelector('[data-sound]');if(sound)new Audio(sound.dataset.sound).play().catch(()=>{});}
         }else decorateOwn();
       }else if(action==='replace'&&target!==messages){
-        if(target.closest('.inline-edit'))continue;
+        if(target.closest('.composer--edit'))continue;
         target.replaceWith(fragment);
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
       }
@@ -359,20 +359,18 @@ if (chat) {
     const edit=e.target.closest('.message__edit-btn');
     if(edit){
       e.preventDefault();const article=edit.closest('.message');
-      const response=await fetch(edit.href,{headers:{'X-Rustfire-Inline':'1'}});
+      const frame=article.querySelector('turbo-frame[id^="edit_message_"]');
+      if(!frame){alert('Could not open editor');return;}
+      const response=await fetch(edit.href,{headers:{'Turbo-Frame':frame.id}});
       if(!response.ok){alert('Could not edit message');return;}
-      article.querySelector('[id^="presentation_message_"]').innerHTML=await response.text();
+      const returned=new DOMParser().parseFromString(await response.text(),'text/html').getElementById(frame.id);
+      if(!returned){alert('Could not open editor');return;}
+      frame.replaceWith(returned);
       article.classList.add('editing');edit.closest('details').open=false;
-      article.querySelector('.inline-edit trix-editor')?.focus();return;
+      article.querySelector('.composer--edit trix-editor')?.focus();return;
     }
-    const cancel=e.target.closest('[data-cancel-edit]');
-    if(cancel){try{await restoreMessage(cancel.closest('.message'))}catch{alert('Could not restore message')}return;}
-    const remove=e.target.closest('[data-delete-message]');
-    if(remove){
-      if(!confirm('Delete this message?'))return;
-      const response=await fetch(remove.dataset.deleteMessage,{method:'POST',headers:{'X-CSRF-Token':csrfToken}});
-      if(response.ok){const article=remove.closest('.message');article.remove();formatMessageGroups()}else alert('Could not delete message');return;
-    }
+    const cancel=e.target.closest('.message__edit-close-btn,[data-form-target="cancel"]');
+    if(cancel){e.preventDefault();try{await restoreMessage(cancel.closest('.message'))}catch{alert('Could not restore message')}return;}
     const cancelBoost=e.target.closest('[data-cancel-custom-boost]');
     if(cancelBoost){
       e.preventDefault();const frame=cancelBoost.closest('turbo-frame');
@@ -427,10 +425,19 @@ if (chat) {
     if(copy){try{await navigator.clipboard.writeText(new URL(copy.dataset.copyToClipboardContentValue,location.origin).href);copy.setAttribute('aria-label','Copied');copy.title='Copied';setTimeout(()=>{copy.setAttribute('aria-label','Copy link');copy.title='Copy link';},1500);}catch{}return;}
   });
   messages.addEventListener('submit', async e => {
-    const editForm=e.target.closest('.inline-edit form');
+    const deleteForm=e.target.closest('form[id^="delete_form_message_"]');
+    if(deleteForm){
+      e.preventDefault();if(!confirm('Are you sure you want to delete this message?'))return;
+      const response=await fetch(deleteForm.action,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken}});
+      if(response.ok){deleteForm.closest('.message').remove();formatMessageGroups()}
+      else alert('Could not delete message');
+      return;
+    }
+    const editForm=e.target.closest('form[id^="form_message_"]');
     if(editForm){
       e.preventDefault();const article=editForm.closest('.message');
-      const response=await fetch(editForm.action,{method:'POST',body:new URLSearchParams(new FormData(editForm)),headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
+      const body=new URLSearchParams(new FormData(editForm));body.set('message[format]','html');
+      const response=await fetch(editForm.action,{method:'PATCH',body,headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
       if(response.ok){try{await restoreMessage(article)}catch{alert('Message saved, but could not reload it')}}
       else alert('Could not save message');
       return;

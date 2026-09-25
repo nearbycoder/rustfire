@@ -775,6 +775,19 @@ def main():
             code, _, payload = request(admin, base, f"/rooms/1/refresh?after={first_page['next_after']}", headers={"Accept":"application/json"})
             last_page = json.loads(payload)
             assert code == 200 and len(last_page["messages"]) == 1 and not last_page["has_more"], (code, last_page)
+            code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]":"Edit form check","message[client_message_id]":"edit-form-check"}, headers={"Accept":"application/json"})
+            assert code == 201
+            edit_id = json.loads(payload)["id"]
+            code, _, edit_frame = request(admin, base, f"/rooms/1/messages/{edit_id}/edit", headers={"Turbo-Frame":"edit_message_edit-form-check"})
+            assert code == 200 and "<turbo-frame id='edit_message_edit-form-check'>" in edit_frame
+            assert "name='_method' value='patch'" in edit_frame and "name='message[body]'" in edit_frame
+            assert "id='delete_form_message_edit-form-check'" in edit_frame
+            code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"patch","message[body]":"Edited by form"}, method="POST")
+            assert code == 200
+            assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT body FROM messages WHERE id=?",(edit_id,)).fetchone() == ("Edited by form",)
+            code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"delete"}, method="POST")
+            assert code in (200, 204)
+            assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM messages WHERE id=?",(edit_id,)).fetchone() == (0,)
             print("PASS setup, messages, attachments, boosts, search, private rooms, pings, account administration, bots, transfer, bans, direct-room index migration")
         finally:
             if webhook_server:
