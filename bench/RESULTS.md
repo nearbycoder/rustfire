@@ -271,3 +271,24 @@ In two `--operation videos --sockets 200 --messages 10 --campfire-workers 1` bur
 ## Message edit frames
 
 Rustfire now returns Campfire's editable Turbo frame for plain messages and a view with Delete and Close controls for attachments. The room's editor link loads the frame in place; Save uses the nested message PATCH route, Close restores the message, and Delete removes it. The paired probe fetched edit responses for plain messages, text files, images, and videos. All four frame samples matched Campfire's ordered elements, attribute names, static values, and text after normalizing session CSRF tokens and the apps' different listen origins. A browser check opened the editor, saved text, closed a reopened editor without changes, and deleted the message. The smoke suite also exercises Rails-style `_method=patch` and `_method=delete` form posts. The surrounding document layout and other browser interactions still need parity work.
+
+## Bot administration behavior and token storage
+
+`bench/paired_bot_admin.py` now runs the same bot creation, editing, key rotation, and deletion workflow against the pinned Campfire and Rustfire builds on disposable databases. Both returned HTTP 302 to `/account/bots` for each mutation, accepted the same three new-form fields, saved a 12-character alphanumeric token, the byte-identical original PNG avatar, webhook, and open-room membership, and allowed the same bot message API path. After rotation, the old key redirected to sign-in and the new key worked. Deactivation retained the token on the inactive row and removed its open-room membership in both apps. Rustfire also migrated a legacy prefixed token in an older Rustfire database to Campfire's token-only storage without changing the public key. This checks the listed workflow and persisted fields; the surrounding HTML and all bot behavior are not yet equivalent.
+
+## Bot JSON read concurrency sweep after token alignment
+
+With 10,000 seeded messages and the latest 40 returned, `bench/paired_bot_messages.py` again confirmed equal parsed JSON after URL-origin normalization. The response sizes were 19,185 bytes for Rustfire and 20,385 for Campfire. Each app ran separately on the same host with Redis available to Campfire and SQLite WAL in Rustfire. One run used one Campfire worker; the other used 22. Two warmup reads preceded each measurement. The following results are separate short local trials, not a sustained capacity limit.
+
+| Campfire workers | Clients | Trial length | Rustfire requests/s | Campfire requests/s | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 2 s | 1,926 | 155 | 0.8 ms | 10.7 ms |
+| 1 | 8 | 2 s | 7,876 | 147 | 1.8 ms | 86.6 ms |
+| 1 | 32 | 2 s | 3,764 | 92 | 10.3 ms | 420.3 ms |
+| 22 | 1 | 2 s | 1,991 | 122 | 0.7 ms | 15.8 ms |
+| 22 | 8 | 2 s | 8,772 | 876 | 1.5 ms | 16.2 ms |
+| 22 | 32 | 2 s | 4,027 | 1,310 | 9.6 ms | 57.4 ms |
+| 22 | 64 | 3 s | 4,105 | 1,283 | 21.9 ms | 108.3 ms |
+| 22 | 128 | 3 s | 3,850 | 1,225 | 53.6 ms | 151.0 ms |
+
+All listed runs had zero HTTP errors. Under a 100 ms p95 threshold for **this read endpoint**, Rustfire met the threshold at every tested concurrency through 128 clients; the 22-worker Campfire run met it through 32 and exceeded it at 64 and 128. A longer trial, independent load generator, more routes, and full feature parity are still required before claiming a general speed or scale advantage for the application.

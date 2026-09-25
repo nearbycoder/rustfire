@@ -55,7 +55,7 @@ def seed_messages(rust_database, camp_database, count, include_attachments, scra
 
     with sqlite3.connect(rust_database) as db:
         db.execute("UPDATE users SET name='Test Admin',updated_at=? WHERE id=1", [cache_stamp])
-        db.execute("UPDATE users SET role=2,bot_token=?,updated_at=? WHERE id=3", [BOT_KEY, cache_stamp])
+        db.execute("UPDATE users SET role=2,bot_token=?,updated_at=? WHERE id=3", [BOT_KEY.split("-", 1)[1], cache_stamp])
         db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,3,'mentions',?)", [STAMP])
         db.executemany(
             "INSERT INTO messages(id,room_id,creator_id,body,body_html,client_message_id,created_at,created_at_ns,updated_at) VALUES(?1,1,1,?2,?3,?4,?5,?6,?5)",

@@ -1064,9 +1064,25 @@ fn user(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
     let db = pool(state)?;
     db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
+fn generate_bot_token() -> Result<String, StatusCode> {
+    const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut token = String::with_capacity(12);
+    while token.len() < 12 {
+        let mut random = [0u8; 16];
+        openssl::rand::rand_bytes(&mut random).map_err(db_err)?;
+        for byte in random {
+            if byte < 248 && token.len() < 12 {
+                token.push(ALPHANUMERIC[(byte % 62) as usize] as char);
+            }
+        }
+    }
+    Ok(token)
+}
 fn bot_user(state: &AppState, key: &str) -> Result<User, StatusCode> {
+    let (id, token) = key.split_once('-').ok_or(StatusCode::UNAUTHORIZED)?;
+    let id: i64 = id.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
     let db = pool(state)?;
-    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE bot_token=?1 AND status=0", [key], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
+    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND bot_token=?2 AND role=2 AND status=0", params![id,token], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
 fn is_admin(u: &User) -> bool {
     u.role == 1
@@ -1794,10 +1810,11 @@ async fn reject_banned_ip(
         .path_and_query()
         .map(|value| value.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
+    let sign_in_url = public_url(request.headers(), "/session/new");
     let response = next.run(request).await;
     if browser_navigation && response.status() == StatusCode::UNAUTHORIZED {
         let encoded = URL_SAFE_NO_PAD.encode(requested_path.as_bytes());
-        let mut redirect = Redirect::to("/session/new").into_response();
+        let mut redirect = found_redirect(&sign_in_url);
         redirect.headers_mut().append(
             header::SET_COOKIE,
             format!(
@@ -3590,10 +3607,11 @@ fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), Stat
         .map_err(db_err)?;
     drop(q);
     drop(db);
-    for (id, name, key, url) in bots {
+    for (id, name, token, url) in bots {
         if id == message.creator_id || (!direct && !message.mention_ids.contains(&id)) {
             continue;
         }
+        let key = format!("{id}-{token}");
         let Ok(permit) = s.webhook_slots.clone().try_acquire_owned() else {
             break;
         };
@@ -5563,7 +5581,7 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
     }
     let db = pool(&s)?;
     let mut q = db
-        .prepare("SELECT id,name,bot_token FROM users WHERE bot_token IS NOT NULL AND status=0")
+        .prepare("SELECT id,name,bot_token FROM users WHERE role=2 AND bot_token IS NOT NULL AND status=0 ORDER BY LOWER(name)")
         .map_err(db_err)?;
     let rows = q
         .query_map([], |r| {
@@ -5577,7 +5595,8 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     let mut list = String::new();
-    for (id, name, key) in rows {
+    for (id, name, token) in rows {
+        let key = format!("{id}-{token}");
         list.push_str(&format!("<li>{} · key: <code>{}</code> <a href='/account/bots/{id}/edit'>Edit</a> <form method='post' action='/account/bots/{id}/delete'><button>Delete</button></form></li>",esc(&name),esc(&key)));
     }
     Ok(render(
@@ -5696,10 +5715,10 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Req
     let t = now();
     db.execute("INSERT INTO users(name,role,status,bot_token,created_at,updated_at) VALUES(?1,2,0,NULL,?2,?2)",params![name.trim(),t]).map_err(db_err)?;
     let id = db.last_insert_rowid();
-    let bot_key = format!("{id}-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let bot_token = generate_bot_token()?;
     db.execute(
         "UPDATE users SET bot_token=?1 WHERE id=?2",
-        params![bot_key, id],
+        params![bot_token, id],
     )
     .map_err(db_err)?;
     if !webhook_url.is_empty() {
@@ -5717,7 +5736,7 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Req
             return Err(error);
         }
     }
-    Ok(Redirect::to("/account/bots").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
 async fn bot_edit(
     State(s): State<Arc<AppState>>,
@@ -5734,7 +5753,8 @@ async fn bot_edit(
         [id],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional().map_err(db_err)?;
-    let (name, key, webhook_url) = bot.ok_or(StatusCode::NOT_FOUND)?;
+    let (name, token, webhook_url) = bot.ok_or(StatusCode::NOT_FOUND)?;
+    let key = format!("{id}-{token}");
     Ok(render(
         "Edit bot",
         &format!(
@@ -5789,7 +5809,7 @@ async fn bot_update(
     if let Some((bytes, content_type)) = avatar {
         save_avatar(&s, id, bytes, content_type)?;
     }
-    Ok(Redirect::to("/account/bots").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
 async fn bot_post_override(
     State(s): State<Arc<AppState>>,
@@ -5893,15 +5913,15 @@ async fn bot_key_rotate(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let new_key = format!("{id}-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let new_token = generate_bot_token()?;
     let changed = pool(&s)?.execute(
         "UPDATE users SET bot_token=?1,updated_at=?2 WHERE id=?3 AND role=2 AND status=0 AND bot_token IS NOT NULL",
-        params![new_key,now(),id],
+        params![new_token,now(),id],
     ).map_err(db_err)?;
     if changed == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Redirect::to("/account/bots").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
 async fn bot_delete(
     State(s): State<Arc<AppState>>,
@@ -5912,10 +5932,21 @@ async fn bot_delete(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    pool(&s)?
-        .execute("UPDATE users SET status=1,bot_token=NULL,updated_at=?1 WHERE id=?2 AND bot_token IS NOT NULL",params![now(),id])
+    let mut db = pool(&s)?;
+    let tx = db.transaction().map_err(db_err)?;
+    let changed = tx.execute("UPDATE users SET status=1,updated_at=?1 WHERE id=?2 AND role=2 AND status=0 AND bot_token IS NOT NULL",params![now(),id]).map_err(db_err)?;
+    if changed == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    tx.execute("DELETE FROM memberships WHERE user_id=?1 AND room_id IN (SELECT id FROM rooms WHERE type!='Rooms::Direct')",[id]).map_err(db_err)?;
+    tx.execute("DELETE FROM push_subscriptions WHERE user_id=?1", [id])
         .map_err(db_err)?;
-    Ok(Redirect::to("/account/bots").into_response())
+    tx.execute("DELETE FROM searches WHERE user_id=?1", [id])
+        .map_err(db_err)?;
+    tx.execute("DELETE FROM sessions WHERE user_id=?1", [id])
+        .map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
 async fn bot_messages_get(
     State(s): State<Arc<AppState>>,
@@ -6948,6 +6979,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
+    conn.execute("UPDATE users SET bot_token=substr(bot_token,length(CAST(id AS TEXT))+2) WHERE role=2 AND bot_token LIKE CAST(id AS TEXT)||'-%'", [])?;
     let has_session_ip: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='ip_address')",
         [],
