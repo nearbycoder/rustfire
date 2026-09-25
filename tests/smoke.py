@@ -4,6 +4,8 @@ import http.server
 import html
 import base64
 import concurrent.futures
+import hashlib
+import hmac
 import json
 import os
 import pathlib
@@ -438,12 +440,17 @@ def main():
             else:
                 raise AssertionError("structured mention webhook did not arrive")
             imported_sgid = "eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvMz9leHBpcmVzX2luIiwicHVyIjoiYXR0YWNoYWJsZSJ9fQ==--407356a6ecde1089c9bdc4a0c980e4b6a1016234"
-            assert imported_sgid != bot_suggestion["sgid"]
-            imported_body = mention_html(3).replace(bot_suggestion["sgid"], imported_sgid)
-            code, _, imported_payload = request(admin, base, "/rooms/1/messages", {"message[body]":imported_body,"message[format]":"html"}, headers={"Accept":"application/json"})
+            assert imported_sgid == bot_suggestion["sgid"]
+            local_key = sqlite3.connect(f"{tmp}/test.db").execute("SELECT value FROM app_secrets WHERE name='mention_sgid'").fetchone()[0]
+            local_payload = json.dumps({"_rails":{"data":"gid://campfire/User/3?expires_in","pur":"attachable"}}, separators=(",", ":")).encode()
+            local_encoded = base64.urlsafe_b64encode(local_payload).decode()
+            local_sgid = f"{local_encoded}--{hmac.new(local_key, local_encoded.encode(), hashlib.sha1).hexdigest()}"
+            assert local_sgid != imported_sgid
+            local_body = mention_html(3).replace(bot_suggestion["sgid"], local_sgid)
+            code, _, local_response = request(admin, base, "/rooms/1/messages", {"message[body]":local_body,"message[format]":"html"}, headers={"Accept":"application/json"})
             assert code == 201
-            imported_id = json.loads(imported_payload)["id"]
-            assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(imported_id,)).fetchone() == (3,)
+            local_id = json.loads(local_response)["id"]
+            assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(local_id,)).fetchone() == (3,)
             edit_page = request(admin, base, f"/rooms/1/messages/{structured_id}/edit")[2]
             assert "data-trix-attachment" in html.unescape(edit_page)
             assert request(admin, base, f"/rooms/1/messages/{structured_id}", {"message[body]":mention_html(3).replace("selected mention", "edited mention"),"message[format]":"html"}, method="PATCH")[0] == 303

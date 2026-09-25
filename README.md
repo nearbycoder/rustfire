@@ -26,7 +26,7 @@ Configuration:
 - `RUSTFIRE_DISABLE_WEBHOOKS` — set to `true` to suppress outbound bot webhook delivery
 - `RUSTFIRE_DISABLE_PUSH` — set to `true` to suppress outbound Web Push delivery
 - `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid.
-- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to verify imported Rails mention IDs. Keep it configured while imported messages or attachments use those IDs.
+- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to issue and verify Rails mention IDs with Campfire's verifier key. Keep it configured while imported messages or attachments use those IDs. Rustfire also accepts IDs signed with its own persistent key.
 - `RUSTFIRE_TRUSTED_PROXY_IPS` — comma-separated IPs of reverse proxies that append `X-Forwarded-For`; empty by default. Session IPs and bans use the direct peer unless it is listed here.
 
 The server creates its SQLite schema at startup and enables WAL mode. Run behind a TLS proxy for network use. Back up the database and upload directory together.

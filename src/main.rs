@@ -4559,6 +4559,10 @@ async fn autocomplete(
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
+    let signing_key = s
+        .imported_mention_signing_key
+        .as_deref()
+        .unwrap_or(&s.mention_signing_key);
     let rows = users
         .into_iter()
         .map(|(id, name)| {
@@ -4566,7 +4570,7 @@ async fn autocomplete(
                 "value": id,
                 "name": esc(&name),
                 "avatar_url": public_url(&headers, &format!("/users/{id}/avatar")),
-                "sgid": mention_sgid(&s.mention_signing_key, id).map_err(db_err)?,
+                "sgid": mention_sgid(signing_key, id).map_err(db_err)?,
             }))
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
