@@ -57,10 +57,10 @@ try{
   const streamClientId='ws-stream-1';
   const streamPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream test','message[client_message_id]':streamClientId})});
   assert.equal(streamPost.status,201);
+  const streamMessageId=(await streamPost.json()).id;
   const streamEvents=[await nextFrame(),await nextFrame()];
   assert(streamEvents.some(frame=>frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='signed stream test'));
-  assert(streamEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="append" target="messages_rooms_open_1">')&&frame.message.includes(`id='message_${streamClientId}'`)&&frame.message.includes('signed stream test')));
-  const streamMessageId=(await streamPost.json()).id;
+  assert(streamEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes('<turbo-stream action="append" target="messages_rooms_open_1">')&&frame.message.includes(`id='message_${streamClientId}' class='message'`)&&frame.message.includes(`data-message-id='${streamMessageId}'`)&&frame.message.includes("src='/users/eyJ")&&frame.message.includes('signed stream test')));
   const streamEdit=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream edited'})});
   assert.equal(streamEdit.status,200);
   const editEvents=[await nextFrame(),await nextFrame()];

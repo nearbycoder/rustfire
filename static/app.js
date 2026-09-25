@@ -58,6 +58,7 @@ const chat = document.querySelector('.chat');
 if (chat) {
   const roomId = Number(chat.dataset.roomId);
   const messages = chat.querySelector('.messages');
+  const messageById=id=>messages.querySelector(`.message[data-message-id="${Number(id)}"]`);
   const decorateOwn=()=>{
     messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.creatorId===document.body.dataset.userId));
     messages.querySelectorAll('.boost-item').forEach(node=>{
@@ -91,7 +92,7 @@ if (chat) {
   formatMessageGroups();
   let historyMode=chat.dataset.historyMode==='true';
   const atMessage=chat.dataset.atMessage;
-  if(atMessage)document.getElementById(`message-${atMessage}`)?.scrollIntoView({block:'center'});
+  if(atMessage)messageById(atMessage)?.scrollIntoView({block:'center'});
   else messages.scrollTop=messages.scrollHeight;
   const returnButton=document.createElement('button');
   returnButton.type='button';returnButton.className='return-to-latest';returnButton.textContent='↓ Latest messages';returnButton.hidden=true;
@@ -153,7 +154,7 @@ if (chat) {
         if (!response.ok) break;
         const page = await response.json();
         for (const entry of page.messages) {
-          if (!document.getElementById(`message-${entry.id}`)) messages.insertAdjacentHTML('beforeend', entry.html);
+          if (!messageById(entry.id)) messages.insertAdjacentHTML('beforeend', entry.html);
         }
         formatLocalTimes(messages);
         cursor = page.next_after;
@@ -165,7 +166,7 @@ if (chat) {
       if(refreshed.ok){
         const page=await refreshed.json();
         for(const entry of page.updated||[]){
-          const existing=document.getElementById(`message-${entry.id}`);
+          const existing=messageById(entry.id);
           if(existing&&!existing.querySelector('.inline-edit'))(existing.closest('[data-stream-message]')||existing).outerHTML=entry.html;
         }
         lastRefreshAt=page.checked_at;

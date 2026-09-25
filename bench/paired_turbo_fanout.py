@@ -46,13 +46,21 @@ def fanout(app, port, cookie, csrf, sockets, messages, operation, sample_file=No
     return result.stdout.strip()
 
 
-def boost_identity(sample_file):
+def stream_avatar_identity(sample_file):
     sample = html.unescape(sample_file.read_text())
     name = re.search(r"<a\b[^>]*\btitle=['\"]([^'\"]+)['\"]", sample)
     avatar = re.search(r"<img\b[^>]*\bsrc=['\"]([^'\"]+/avatar\?v=\d+)['\"]", sample)
     if not name or not avatar:
-        raise RuntimeError(f"Boost sample lacks booster identity: {sample_file}")
+        raise RuntimeError(f"Stream sample lacks avatar identity: {sample_file}")
     return name.group(1), avatar.group(1)
+
+
+def stream_message_id(sample_file):
+    sample = sample_file.read_text()
+    matched = re.search(r"\bdata-message-id=['\"](\d+)['\"]", sample)
+    if not matched:
+        raise RuntimeError(f"Message sample lacks its numeric ID: {sample_file}")
+    return int(matched.group(1))
 
 
 def main():
@@ -84,6 +92,7 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(repo, ruby, args.bundle_path.resolve(), repo / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
+            camp.execute("DELETE FROM sqlite_sequence WHERE name='messages'")
             people = camp.execute("SELECT id,name,updated_at FROM users WHERE id IN(1,2)").fetchall()
             rust.executemany("UPDATE users SET name=?2,updated_at=?3 WHERE id=?1", people)
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers)
@@ -117,12 +126,13 @@ def main():
                 stop_server(camp)
         print(f"rustfire-turbo {rust_result}")
         print(f"campfire       {camp_result}")
-        if args.operation == "boosts":
-            rust_identity = boost_identity(output_dir / "rustfire.html")
-            camp_identity = boost_identity(output_dir / "campfire.html")
-            if rust_identity != camp_identity:
-                raise RuntimeError(f"Boost identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
-            print("boost_identity_match=true")
+        rust_identity = stream_avatar_identity(output_dir / "rustfire.html")
+        camp_identity = stream_avatar_identity(output_dir / "campfire.html")
+        if rust_identity != camp_identity:
+            raise RuntimeError(f"Avatar identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
+        if args.operation == "messages" and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
+            raise RuntimeError("Message IDs differ in paired stream samples")
+        print(f"{args.operation}_identity_match=true")
 
 
 if __name__ == "__main__":

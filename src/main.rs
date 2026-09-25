@@ -178,6 +178,8 @@ struct ChatMessage {
     body: String,
     body_html: Option<String>,
     created_at: String,
+    #[serde(skip_serializing)]
+    updated_at: String,
     client_message_id: String,
     attachment: Option<Attachment>,
     boosts: Vec<BoostSummary>,
@@ -1959,7 +1961,7 @@ fn message_list(
         })
         .transpose()?;
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
@@ -1974,7 +1976,7 @@ fn message_list(
 fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
     let db = pool(s)?;
     db.query_row(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
         params![rid, mid],
         chat_message_from_row,
     )
@@ -2001,7 +2003,7 @@ fn messages_after_position(
     } else {
         i64::MIN
     };
-    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
+    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
     query
         .query_map(
             params![rid, cursor_time, after, limit],
@@ -2024,6 +2026,7 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
         body: r.get(4)?,
         body_html: r.get(12)?,
         created_at: r.get(5)?,
+        updated_at: r.get(14)?,
         client_message_id: r.get(6)?,
         attachment: r.get::<_, Option<i64>>(7)?.map(|id| Attachment {
             id,
@@ -2056,7 +2059,7 @@ fn messages_since(
         ("m.created_at_ns>?2", "ASC", "idx_messages_room_created_ns")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
@@ -2122,14 +2125,29 @@ fn message_presentation_html(m: &ChatMessage) -> String {
             .unwrap_or_else(|| esc(&m.body).replace('\n', "<br>"))
     };
     format!(
-        "<div id='presentation_message_{}' data-message-presentation dir='auto'>{presentation}{attachment}</div>",
+        "<div id='presentation_message_{}' data-message-presentation data-reply-target='body' data-messages-target='body' dir='auto'>{presentation}{attachment}</div>",
         esc(&m.client_message_id)
     )
 }
 fn message_html(s: &AppState, m: &ChatMessage) -> String {
-    let timestamp = chrono::DateTime::parse_from_rfc3339(&m.created_at)
+    let created =
+        message_timestamp_ns(&m.created_at).map(chrono::DateTime::<Utc>::from_timestamp_nanos);
+    let timestamp = created
+        .as_ref()
         .map(|date| date.format("%b %-d, %Y · %-I:%M %p").to_string())
-        .unwrap_or_else(|_| m.created_at.clone());
+        .unwrap_or_else(|| m.created_at.clone());
+    let datetime = created
+        .as_ref()
+        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| m.created_at.clone());
+    let created_ms = message_timestamp_ns(&m.created_at).unwrap_or(0) / 1_000_000;
+    let updated_ms = message_timestamp_ns(&m.updated_at).unwrap_or(0) / 1_000_000;
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
+    let creator_avatar = avatar_path(avatar_key, m.creator_id, &m.creator_updated_at)
+        .unwrap_or_else(|_| format!("/users/{}/avatar", m.creator_id));
     let presentation = message_presentation_html(m);
     let quick_boosts=[("👍","Thumbs up"),("👏","Clapping"),("👋","Waving hand"),("💪","Muscle"),("❤️","Red heart"),("😂","Face with tears of joy"),("🎉","Party popper"),("🔥","Fire")].iter().map(|(emoji,label)|format!("<button type='button' data-boost='{}' data-emoji='{emoji}' title='{label}' aria-label='{label}'>{emoji}</button>",m.id)).collect::<String>();
     let content_action = if m.attachment.is_some() {
@@ -2159,22 +2177,15 @@ fn message_html(s: &AppState, m: &ChatMessage) -> String {
             )
         })
         .collect::<String>();
+    let client_id = esc(&m.client_message_id);
+    let creator_name = esc(&m.creator_name);
+    let datetime = esc(&datetime);
+    let timestamp = esc(&timestamp);
     format!(
-        "<div id='message_{}' data-stream-message><article class='message' id='message-{}' data-message-id='{}' data-creator-id='{}'><div class='avatar'><img src='/users/{}/avatar' alt='{}'></div><div class='message-main'><div class='message-meta'><strong>{}</strong><a href='/rooms/{}/@{}'><time datetime='{}' data-local-datetime>{}</time></a></div><div class='message-body'>{}</div><div class='boosts' id='boosts_message_{}'>{}</div></div><div class='message-actions'>{actions}</div></article></div>",
-        esc(&m.client_message_id),
-        m.id,
-        m.id,
-        m.creator_id,
-        m.creator_id,
-        esc(&m.creator_name),
-        esc(&m.creator_name),
-        m.room_id,
-        m.id,
-        esc(&m.created_at),
-        esc(&timestamp),
-        presentation,
-        esc(&m.client_message_id),
-        boosts
+        "<div id='message_{client_id}' class='message' data-stream-message data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-creator-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><div class='message-main'><div class='message-meta'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-datetime data-local-time-target='time'>{timestamp}</time></a></div><div class='message-body'>{presentation}</div><div class='boosts' id='boosts_message_{client_id}'>{boosts}</div></div><div class='message-actions'>{actions}</div></div>",
+        message_id = m.id,
+        creator_id = m.creator_id,
+        room_id = m.room_id,
     )
 }
 fn sound_presentation(body: &str) -> Option<String> {
@@ -2886,7 +2897,8 @@ fn insert_message(
         creator_updated_at: u.updated_at.clone(),
         body: plain,
         body_html,
-        created_at: t,
+        created_at: t.clone(),
+        updated_at: t,
         client_message_id: cid,
         attachment,
         boosts: Vec::new(),
