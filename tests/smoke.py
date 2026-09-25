@@ -74,7 +74,8 @@ def main():
                     time.sleep(.05)
             else:
                 raise AssertionError("server did not start")
-            code, _, manifest = request(client(), base, "/webmanifest")
+            assert request(client(), base, "/webmanifest")[0] == 406
+            code, _, manifest = request(client(), base, "/webmanifest.json")
             manifest = json.loads(manifest)
             assert code == 200 and manifest["display"] == "standalone" and manifest["name"] == "Rustfire"
             assert [icon["sizes"] for icon in manifest["icons"]] == ["192x192", "512x512", "512x512"]
@@ -84,7 +85,8 @@ def main():
             for screenshot in manifest["screenshots"]:
                 with client().open(screenshot["src"]) as asset:
                     assert asset.status == 200 and asset.read(8) == b"\x89PNG\r\n\x1a\n"
-            code, _, worker = request(client(), base, "/service-worker")
+            assert request(client(), base, "/service-worker")[0] == 406
+            code, _, worker = request(client(), base, "/service-worker", headers={"Accept": "*/*"})
             assert code == 200 and "notificationclick" in worker
             admin = client()
             assert request(admin, base, "/")[1].endswith("/first_run")
@@ -93,6 +95,7 @@ def main():
             assert code == 200 and "/rooms/1" in url, (code, url)
             code, _, page = request(admin, base, "/rooms/1")
             assert code == 200 and "Campfire" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
+            assert "href='/webmanifest.json'" in page
             assert "id='system_welcome'" in page and "Welcome to Rustfire" in page and "id='invite_url'" in page
             assert "data-room-notification data-room-id='1' data-room-kind='shared'" in page
             assert "class='room-notifications-dialog'" in page and "Notifications aren’t allowed" in page

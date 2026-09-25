@@ -1695,6 +1695,85 @@ fn render_unauth(title: &str, body: &str) -> Response {
     );
     response
 }
+fn user_agent_version(user_agent: &str, marker: &str) -> Option<(u32, u32)> {
+    let after = user_agent.split_once(marker)?.1;
+    let version = after
+        .split(|character: char| !character.is_ascii_digit() && character != '.')
+        .next()?;
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor))
+}
+fn browser_blocked(user_agent: &str) -> bool {
+    let agent = user_agent.to_ascii_lowercase();
+    if agent.contains("bot") || agent.contains("chrome-lighthouse") {
+        return false;
+    }
+    if agent.contains("msie ") || agent.contains("trident/") {
+        return true;
+    }
+    if let Some(version) = user_agent_version(&agent, "opr/") {
+        return version < (104, 0);
+    }
+    if let Some(version) = user_agent_version(&agent, "opera/") {
+        return version < (104, 0);
+    }
+    if let Some(version) = user_agent_version(&agent, "firefox/") {
+        return version < (121, 0);
+    }
+    if agent.contains("edge/") {
+        return false;
+    }
+    if let Some(version) = user_agent_version(&agent, "crios/") {
+        return version < (120, 0);
+    }
+    if let Some(version) = user_agent_version(&agent, "chrome/") {
+        return version < (120, 0);
+    }
+    if agent.contains("safari/") {
+        let ios_agent = agent.replace('_', ".");
+        return user_agent_version(&agent, "version/")
+            .or_else(|| user_agent_version(&ios_agent, "cpu iphone os "))
+            .or_else(|| user_agent_version(&ios_agent, "cpu os "))
+            .is_some_and(|version| version < (17, 2));
+    }
+    false
+}
+fn custom_styles_tag() -> String {
+    CUSTOM_STYLES
+        .get()
+        .and_then(|styles| {
+            styles
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|css| format!("<style data-turbo-track=\"reload\">{css}</style>"))
+        })
+        .unwrap_or_default()
+}
+fn incompatible_browser_page() -> Response {
+    let translation = profile_translation_button(
+        "Upgrade to a supported web browser. Campfire requires a modern web browser. Please use one of the browsers listed below and make sure auto-updates are enabled.",
+        [
+            "Actualiza a un navegador web compatible. Campfire requiere un navegador web moderno. Utiliza uno de los navegadores listados a continuación y asegúrate de que las actualizaciones automáticas estén habilitadas.",
+            "Mettez à jour vers un navigateur web pris en charge. Campfire nécessite un navigateur web moderne. Veuillez utiliser l'un des navigateurs répertoriés ci-dessous et assurez-vous que les mises à jour automatiques sont activées.",
+            "समर्थित वेब ब्राउज़र में अपग्रेड करें। Campfire को एक आधुनिक वेब ब्राउज़र की आवश्यकता है। कृपया नीचे सूचीबद्ध ब्राउज़रों में से कोई एक का उपयोग करें और सुनिश्चित करें कि स्वचालित अपडेट्स सक्षम हैं।",
+            "Aktualisieren Sie auf einen unterstützten Webbrowser. Campfire erfordert einen modernen Webbrowser. Verwenden Sie bitte einen der unten aufgeführten Browser und stellen Sie sicher, dass automatische Updates aktiviert sind.",
+            "Atualize para um navegador compatível. O Campfire requer um navegador moderno. Por favor, use um dos navegadores listados abaixo e certifique-se de que as atualizações automáticas estão ativadas.",
+            "サポートされたウェブブラウザーにアップグレードしてください。Campfireはモダンなウェブブラウザーが必要です。下記のブラウザーのいずれかを使用し、自動更新が有効になっていることを確認してください。",
+        ],
+    );
+    let browsers = [("safari", "Safari", "17.2"), ("chrome", "Chrome", "120"), ("firefox", "Firefox", "121"), ("opera", "Opera", "104")]
+        .into_iter()
+        .map(|(icon, name, version)| format!("<div class='browser flex flex-column'><img src='/assets/browsers/{icon}.svg' aria-hidden='true' class='center'><div class='flex flex-column align-center margin-block-start-half'><strong>{name}</strong><span>{version}+</span></div></div>"))
+        .collect::<String>();
+    Html(format!(
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='light dark'><title>Unsupported browser</title><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/unsupported.css'>{}</head><body><a class='skip-navigation' href='#main-content'>Skip to main content</a><nav id='nav'></nav><main id='main-content'><div class='panel center'><header><h1 class='txt-x-large txt-tight-lines txt-align-center margin-none-block-start margin-block-end'>Upgrade to a supported web browser</h1><div class='description flex align-start gap'>{translation}<p class='margin-none-block-start'>Campfire requires a modern web browser. Please use one of the browsers listed below and make sure auto-updates are enabled.</p></div></header><div class='browser-list flex align-center flex-wrap gap justify-center margin-block'>{browsers}</div></div></main><a href='https://once.com' id='app-logo' target='_blank' aria-label='Once software from 37signals home page'><img src='/static/icons/campfire-icon.png' alt='Campfire logo' width='256' height='216'></a></body></html>",
+        custom_styles_tag(),
+    ))
+    .into_response()
+}
 fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
     let account_stylesheet = if body.contains("class='panel account-settings") || body.contains("custom-styles-panel") {
         "<link rel='stylesheet' href='/static/account.css'>"
@@ -1715,18 +1794,9 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
         String::new()
     };
     let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
-    let custom_styles = CUSTOM_STYLES
-        .get()
-        .and_then(|styles| {
-            styles
-                .read()
-                .unwrap()
-                .as_ref()
-                .map(|css| format!("<style data-turbo-track=\"reload\">{css}</style>"))
-        })
-        .unwrap_or_default();
+    let custom_styles = custom_styles_tag();
     let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
         esc(token),
         VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
         esc(title),
@@ -2444,6 +2514,27 @@ async fn reject_banned_ip(
     } else {
         response
     }
+}
+async fn reject_unsupported_browser(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if path == "/up"
+        || path == "/cable"
+        || path.starts_with("/assets/")
+        || path.starts_with("/static/")
+        || path.starts_with("/attachments/")
+        || path.starts_with("/rails/")
+    {
+        return next.run(request).await;
+    }
+    if request
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(browser_blocked)
+    {
+        return incompatible_browser_page();
+    }
+    next.run(request).await
 }
 fn transfer_link(state: &AppState, uid: i64) -> Result<String, StatusCode> {
     let key = state
@@ -8735,7 +8826,19 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
 async fn health() -> impl IntoResponse {
     "ok"
 }
-async fn webmanifest(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+async fn webmanifest(State(s): State<Arc<AppState>>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
+    let explicit_json = uri.path().ends_with(".json")
+        || uri.query().is_some_and(|query| query.split('&').any(|part| part == "format=json"));
+    let accepts_json = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|accept| {
+        accept.split(',').any(|part| {
+            matches!(part.trim().split(';').next(), Some("application/json" | "application/*" | "*/*"))
+        })
+    });
+    if !explicit_json && !accepts_json {
+        let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
+        response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+        return Ok(response);
+    }
     let db = pool(&s)?;
     let account: Option<(String, String)> = db
         .query_row("SELECT name,updated_at FROM accounts LIMIT 1", [], |r| {
@@ -8778,15 +8881,27 @@ async fn webmanifest(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
     })).into_response();
     r.headers_mut().insert(
         header::CONTENT_TYPE,
-        "application/manifest+json".parse().unwrap(),
+        "application/json; charset=utf-8".parse().unwrap(),
     );
     Ok(r)
 }
-async fn service_worker() -> Response {
+async fn service_worker(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Response {
+    let explicit_js = uri.path().ends_with(".js")
+        || uri.query().is_some_and(|query| query.split('&').any(|part| part == "format=js"));
+    let accepts_js = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|accept| {
+        accept.split(',').any(|part| {
+            matches!(part.trim().split(';').next(), Some("text/javascript" | "application/javascript" | "text/*" | "*/*"))
+        })
+    });
+    if !explicit_js && !accepts_js {
+        let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
+        response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+        return response;
+    }
     let mut r = include_str!("../static/service-worker.js").into_response();
     r.headers_mut().insert(
         header::CONTENT_TYPE,
-        "application/javascript".parse().unwrap(),
+        "text/javascript; charset=utf-8".parse().unwrap(),
     );
     r.headers_mut()
         .insert("service-worker-allowed", "/".parse().unwrap());
@@ -9204,7 +9319,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(root))
         .route("/up", get(health))
         .route("/webmanifest", get(webmanifest))
+        .route("/webmanifest.json", get(webmanifest))
         .route("/service-worker", get(service_worker))
+        .route("/service-worker.js", get(service_worker))
         .route("/qr_code/{id}", get(qr_code_show))
         .route("/first_run", get(first_run_get).post(first_run_post))
         .route("/session/new", get(login_get))
@@ -9414,6 +9531,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest_service("/assets", ServeDir::new("static/assets"))
         .nest_service("/static", ServeDir::new("static"))
         .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(reject_unsupported_browser))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             reject_banned_ip,
@@ -9563,6 +9681,34 @@ mod tests {
             super::init_db(&db).unwrap();
             let styles: Option<String> = db.get().unwrap().query_row("SELECT custom_styles FROM accounts WHERE id=1", [], |r| r.get(0)).unwrap();
             assert_eq!(styles.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn named_browser_versions_match_pinned_campfire_policy() {
+        for (agent, blocked) in [
+            ("Mozilla/5.0 Firefox/114.0", true),
+            ("Mozilla/5.0 Firefox/121.0", false),
+            ("Mozilla/5.0 Chrome/119.0.0.0 Safari/537.36", true),
+            ("Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36", false),
+            ("Mozilla/5.0 Version/17.1 Safari/605.1.15", true),
+            ("Mozilla/5.0 Version/17.2 Safari/605.1.15", false),
+            ("Mozilla/5.0 Chrome/117.0.0.0 Safari/537.36 OPR/103.0.0.0", true),
+            ("Mozilla/5.0 Chrome/118.0.0.0 Safari/537.36 OPR/104.0.0.0", false),
+            ("Mozilla/5.0 Trident/7.0; rv:11.0", true),
+            ("Googlebot/2.1 Chrome/10.0.0.0", false),
+            ("Mozilla/5.0 Chrome/119.0.0.0 Safari/537.36 Chrome-Lighthouse/11.0", false),
+            ("Mozilla/5.0 Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0", true),
+            ("Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0", false),
+            ("Mozilla/5.0 Chrome/119.0.0.0 Safari/537.36 Edge/119.0.0.0", false),
+            ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/119.0.0.0 Safari/604.1", true),
+            ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/120.0.0.0 Safari/604.1", false),
+            ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 FxiOS/120.0 Safari/605.1.15", true),
+            ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 FxiOS/120.0 Safari/605.1.15", false),
+            ("curl/8.0.0", false),
+            ("", false),
+        ] {
+            assert_eq!(super::browser_blocked(agent), blocked, "{agent}");
         }
     }
 
