@@ -453,6 +453,26 @@ A Chromium check of Rustfire's editor exposed a 403 on form submission: the shar
 
 `bench/paired_bans.py` compared disposable accounts on the pinned Campfire and Rustfire release builds. With two public-IP sessions for a member, both apps returned 302 to `/users/2`, marked the member banned, removed both sessions, and saved the two IP bans. A GET from one banned forwarded IP remained 200; a POST returned 429. Repeating ban preserved the same state and returned 302. Unban and repeat unban both returned 302, left the member active, and cleared the bans. Member attempts to ban or unban returned 403. When the member had a private-IP session, both apps returned 422 and rolled back the ban, preserving the active status and session. This covers these route, database, and request-filter outcomes. Campfire enqueues message removal through Resque; Rustfire now commits a SQLite job with the ban for a background worker. A separate restart check recovered a pending 55-message job, deleted all messages across two batches, and removed an attachment and inline blob from storage. These checks do not establish equal job scheduling latency, socket revocation, other IP classes, or all user roles.
 
+The paired banned-content probe seeded the same 55 text messages, search entries, and boost on each app. Each received a ban request. Rustfire's SQLite worker and Campfire's live Resque worker processed the queued jobs; Campfire used a disposable source copy and isolated Redis server so it did not consume shared queue entries. Both removed all 55 messages, search entries, and boosts, and updated the room. Campfire also removed the 55 ActionText rich-body rows. With **200 subscribed room sockets**, each app delivered all **11,000 / 11,000** expected Turbo remove actions with zero misses or unexpected actions, and the sampled removal HTML was byte-identical. The worker polling interval was 250 ms on both apps. Three fresh same-host runs measured elapsed time from socket readiness through ban request, queue wait, job work, and final delivery:
+
+| Run | Rustfire | Campfire |
+| ---: | ---: | ---: |
+| 1 | 126 ms | 946 ms |
+| 2 | 144 ms | 707 ms |
+| 3 | 102 ms | 804 ms |
+
+Those runs used one Puma worker and one Resque worker for Campfire. At **5,000 subscribed sockets**, both apps then delivered all **275,000 / 275,000** expected removals in each trial. With one Puma worker, Rustfire took **564 and 562 ms** versus Campfire's **14,189 and 15,867 ms**. With the packaged **22 Puma workers** and one Resque worker, the three fresh runs were:
+
+| Run | Rustfire | Campfire |
+| ---: | ---: | ---: |
+| 1 | 565 ms | 1,429 ms |
+| 2 | 549 ms | 1,427 ms |
+| 3 | 560 ms | 1,558 ms |
+
+Reversing the serial order with Campfire first still delivered **275,000 / 275,000** removals on each app at 5,000 sockets: Rustfire took **568 ms** and 22-worker Campfire **1,441 ms**. The 200-socket reverse-order check likewise delivered all 11,000 removals (143 / 586 ms). Neither app missed or duplicated a removal in these runs.
+
+Server, worker, and connection startup were outside the measured interval. The results show a faster **55-message banned-content cleanup and Turbo removal burst** for Rustfire under this fixture, with matched removal actions and zero delivery errors. They do not establish sustained capacity or full-app superiority; richer content, attachment cleanup, multiple rooms and users, CPU and memory use, and retry behavior need separate checks.
+
 With the background worker idle, a 1,100-user paired account-page regression sweep still matched the source's parsed roster and Turbo Stream pages, with zero HTTP errors. At 32 clients for two seconds, Rustfire served the settings page at **1,030.7 requests/s, 43.03 ms p95** versus Campfire's **40.5 requests/s, 1,192.17 ms p95**. The page-2 Turbo Stream measured **1,565.0 versus 84.1 requests/s**, with **23.63 versus 702.89 ms p95**. This checks that the periodic worker did not visibly disrupt those short read trials; the full page HTML and workload side effects still differ.
 
 ## Paired browser compatibility and PWA formats
