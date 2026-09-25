@@ -413,6 +413,7 @@ def main():
             assert "data-ping-user-id='1'" not in request(member, base, "/users/me/sidebar")[2]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM rooms WHERE type='Rooms::Direct'").fetchone() == (1,)
+                assert check_db.execute("SELECT name FROM rooms WHERE id=3").fetchone() == (None,)
                 assert check_db.execute("SELECT member_ids FROM direct_room_sets WHERE room_id=3").fetchone() == ("1,2",)
                 plan = " ".join(row[3] for row in check_db.execute("EXPLAIN QUERY PLAN SELECT room_id FROM direct_room_sets WHERE member_ids='1,2' ORDER BY room_id LIMIT 1"))
                 assert "idx_direct_room_sets_members" in plan, plan
@@ -573,10 +574,19 @@ def main():
                     size = int(self.headers["Content-Length"])
                     webhook_payload = json.loads(self.rfile.read(size))
                     webhook_requests.append(webhook_payload)
-                    image_reply = webhook_payload["message"]["body"]["plain"] == "send image"
-                    body = png if image_reply else b"Bot reply from webhook"
+                    plain = webhook_payload["message"]["body"]["plain"]
+                    if plain == "send image":
+                        body, content_type = png, "image/png"
+                    elif plain == "send html":
+                        body, content_type = b"<strong>Bold webhook reply</strong>", "text/html"
+                    elif plain == "send zip":
+                        body, content_type = b"PK\x03\x04webhook archive", "application/zip"
+                    elif plain == "send empty":
+                        body, content_type = b"", "text/plain"
+                    else:
+                        body, content_type = b"Bot reply from webhook", "text/plain"
                     self.send_response(200)
-                    self.send_header("Content-Type", "image/png" if image_reply else "text/plain")
+                    self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -603,6 +613,10 @@ def main():
                 raise AssertionError("bot webhook reply did not arrive")
             assert webhook_requests[0]["room"]["path"] == f"/rooms/1/{key}/messages"
             assert webhook_requests[0]["message"]["body"]["plain"] == "please answer"
+            assert webhook_requests[0]["message"]["body"]["html"] == (
+                f'<div><action-text-attachment sgid="{bot_suggestion["sgid"]}" '
+                'content-type="application/vnd.campfire.mention"></action-text-attachment> please answer</div>'
+            )
             prior_webhooks = len(webhook_requests)
             assert request(admin, base, "/rooms/1/messages", {"message[body]":"@Rust Robot is plain text"}, headers={"Accept":"application/json"})[0] == 201
             time.sleep(.2)
@@ -654,6 +668,31 @@ def main():
                 time.sleep(.05)
             else:
                 raise AssertionError("bot webhook image did not arrive")
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3, "send html"),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
+            for _ in range(100):
+                if "<strong>Bold webhook reply</strong>" in request(admin, base, "/rooms/1")[2]:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("bot webhook HTML reply did not arrive as rich text")
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3, "send zip"),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
+            for _ in range(100):
+                if "attachment.zip" in request(admin, base, "/rooms/1")[2]:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("bot webhook ZIP attachment did not arrive")
+            with sqlite3.connect(f"{tmp}/test.db") as check_db:
+                blank_before = check_db.execute("SELECT count(*) FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.creator_id=3 AND m.body='' AND a.id IS NULL").fetchone()[0]
+            assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3, "send empty"),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
+            for _ in range(100):
+                with sqlite3.connect(f"{tmp}/test.db") as check_db:
+                    blank_after = check_db.execute("SELECT count(*) FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.creator_id=3 AND m.body='' AND a.id IS NULL").fetchone()[0]
+                if blank_after == blank_before + 1:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("bot webhook empty text reply did not create a message")
             code, direct_bot_url, _ = request(admin, base, "/rooms/directs", {"user_ids":"3"})
             assert code == 200
             direct_bot_room = int(re.search(r"/rooms/(\d+)", direct_bot_url).group(1))
@@ -665,6 +704,18 @@ def main():
                 time.sleep(.05)
             else:
                 raise AssertionError("direct-room webhook did not arrive")
+            assert webhook_requests[-1]["room"]["name"] is None
+            assert webhook_requests[-1]["message"]["body"] == {"html": "hello in direct", "plain": "hello in direct"}
+            direct_file=(b"--direct-file\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"direct.txt\"\r\nContent-Type: text/plain\r\n\r\nfile bytes\r\n--direct-file--\r\n")
+            before_direct_file = len(webhook_requests)
+            assert request(admin, base, f"/rooms/{direct_bot_room}/messages", data=direct_file, method="POST", headers={"Content-Type":"multipart/form-data; boundary=direct-file", "Accept":"application/json"})[0] == 201
+            for _ in range(100):
+                if len(webhook_requests) > before_direct_file:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("direct-room file webhook did not arrive")
+            assert webhook_requests[-1]["message"]["body"] == {"html": None, "plain": "direct.txt"}
             bot_attachment=(b"--bot-file\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"from-bot.txt\"\r\nContent-Type: text/plain\r\n\r\nbot file\r\n--bot-file--\r\n")
             code, _, payload = request(client(), base, f"/rooms/1/{key}/messages", data=bot_attachment, method="POST", headers={"Content-Type":"multipart/form-data; boundary=bot-file"})
             assert code == 201 and payload == ""

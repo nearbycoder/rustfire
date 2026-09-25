@@ -3613,6 +3613,7 @@ fn insert_message(
     upload: Option<Upload>,
     rich: bool,
     request_headers: Option<&HeaderMap>,
+    allow_blank: bool,
 ) -> Result<ChatMessage, StatusCode> {
     let request_host = request_headers
         .and_then(|headers| headers.get(header::HOST))
@@ -3640,7 +3641,8 @@ fn insert_message(
     } else {
         (body.trim().to_string(), None)
     };
-    if plain.is_empty()
+    if !allow_blank
+        && plain.is_empty()
         && upload.is_none()
         && !body_html
             .as_ref()
@@ -3892,13 +3894,25 @@ fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), Stat
         return Ok(());
     }
     let db = pool(s)?;
-    let room_name: String = db
+    let room_name: Option<String> = db
         .query_row(
-            "SELECT COALESCE(name,'') FROM rooms WHERE id=?1",
+            "SELECT name FROM rooms WHERE id=?1",
             [message.room_id],
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let source_html: Option<String> = db
+        .query_row(
+            "SELECT body_source FROM messages WHERE id=?1",
+            [message.id],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
+    let source_html = match source_html {
+        Some(source) => Some(action_text_webhook_html(&source)),
+        None if message.attachment.is_some() && message.body.is_empty() => None,
+        None => Some(message.body.clone()),
+    };
     let mut q = db.prepare("SELECT u.id,u.name,u.bot_token,w.url FROM memberships m JOIN users u ON u.id=m.user_id JOIN webhooks w ON w.user_id=u.id WHERE m.room_id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL").map_err(db_err)?;
     let bots = q
         .query_map([message.room_id], |r| {
@@ -3925,12 +3939,48 @@ fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), Stat
         let state = s.clone();
         let post = message.clone();
         let room_name = room_name.clone();
+        let source_html = source_html.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            deliver_webhook(state, id, name, key, url, room_name, post).await;
+            deliver_webhook(state, id, name, key, url, room_name, source_html, post).await;
         });
     }
     Ok(())
+}
+fn action_text_webhook_html(input: &str) -> String {
+    if !input.contains("data-trix-attachment") {
+        return input.to_string();
+    }
+    static TRIX_FIGURE: OnceLock<Regex> = OnceLock::new();
+    let pattern = TRIX_FIGURE
+        .get_or_init(|| Regex::new(r"(?is)<figure\b[^>]*>.*?</figure>").unwrap());
+    let selector = Selector::parse("figure[data-trix-attachment]").unwrap();
+    pattern
+        .replace_all(input, |capture: &regex::Captures<'_>| {
+            let fragment = ParsedHtml::parse_fragment(&capture[0]);
+            let Some(figure) = fragment.select(&selector).next() else {
+                return capture[0].to_string();
+            };
+            let Some(data) = figure.value().attr("data-trix-attachment") else {
+                return capture[0].to_string();
+            };
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                return capture[0].to_string();
+            };
+            if value.get("contentType").and_then(Value::as_str)
+                != Some("application/vnd.campfire.mention")
+            {
+                return capture[0].to_string();
+            }
+            let Some(sgid) = value.get("sgid").and_then(Value::as_str) else {
+                return capture[0].to_string();
+            };
+            format!(
+                "<action-text-attachment sgid=\"{}\" content-type=\"application/vnd.campfire.mention\"></action-text-attachment>",
+                html_escape::encode_double_quoted_attribute(sgid)
+            )
+        })
+        .into_owned()
 }
 async fn deliver_webhook(
     s: Arc<AppState>,
@@ -3938,22 +3988,23 @@ async fn deliver_webhook(
     bot_name: String,
     key: String,
     url: String,
-    room_name: String,
+    room_name: Option<String>,
+    source_html: Option<String>,
     message: ChatMessage,
 ) {
-    let html = message
-        .body_html
-        .clone()
-        .unwrap_or_else(|| format!("<div>{}</div>", esc(&message.body)));
     let plain = message
-        .body
+        .attachment
+        .as_ref()
+        .filter(|_| message.body.is_empty())
+        .map(|attachment| attachment.filename.as_str())
+        .unwrap_or(&message.body)
         .replace(&format!("@{bot_name}"), "")
         .trim()
         .to_string();
     let payload = json!({
         "user":{"id":message.creator_id,"name":message.creator_name},
         "room":{"id":message.room_id,"name":room_name,"path":format!("/rooms/{}/{key}/messages",message.room_id)},
-        "message":{"id":message.id,"body":{"html":html,"plain":plain},"path":format!("/rooms/{}/@{}",message.room_id,message.id)}
+        "message":{"id":message.id,"body":{"html":source_html,"plain":plain},"path":format!("/rooms/{}/@{}",message.room_id,message.id)}
     });
     let reply = match s.webhook_client.post(&url).json(&payload).send().await {
         Ok(response) => response,
@@ -3969,6 +4020,7 @@ async fn deliver_webhook(
                         None,
                         false,
                         None,
+                        false,
                     );
                 }
             }
@@ -4010,21 +4062,9 @@ async fn deliver_webhook(
     }
     if kind == "text/plain" || kind == "text/html" {
         if let Ok(text) = String::from_utf8(data) {
-            if !text.trim().is_empty() {
-                let _ = insert_message(&s, &bot, message.room_id, &text, None, None, false, None);
-            }
+            let _ = insert_message(&s, &bot, message.room_id, &text, None, None, true, None, true);
         }
-    } else if matches!(
-        kind.as_str(),
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf"
-    ) {
-        let ext = match kind.as_str() {
-            "image/png" => "png",
-            "image/jpeg" => "jpg",
-            "image/gif" => "gif",
-            "image/webp" => "webp",
-            _ => "pdf",
-        };
+    } else if let Some(ext) = campfire_webhook_attachment_extension(&kind) {
         let _ = insert_message(
             &s,
             &bot,
@@ -4038,8 +4078,49 @@ async fn deliver_webhook(
             }),
             false,
             None,
+            false,
         );
     }
+}
+fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "text/javascript" => "js",
+        "text/css" => "css",
+        "text/calendar" => "ics",
+        "text/csv" => "csv",
+        "text/vcard" => "vcf",
+        "text/vtt" => "vtt",
+        "text/markdown" => "md",
+        "image/png" => "png",
+        "image/jpeg" => "jpeg",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        "image/svg+xml" => "svg",
+        "image/webp" => "webp",
+        "video/mpeg" => "mpeg",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/aac" => "m4a",
+        "video/webm" => "webm",
+        "video/mp4" => "mp4",
+        "font/otf" => "otf",
+        "font/ttf" => "ttf",
+        "font/woff" => "woff",
+        "font/woff2" => "woff2",
+        "application/xml" => "xml",
+        "application/rss+xml" => "rss",
+        "application/atom+xml" => "atom",
+        "application/x-yaml" => "yaml",
+        "multipart/form-data" => "multipart_form",
+        "application/x-www-form-urlencoded" => "url_encoded_form",
+        "application/json" => "json",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/gzip" => "gzip",
+        "text/vnd.turbo-stream.html" => "turbo_stream",
+        _ => return None,
+    })
 }
 async fn message_create(
     State(s): State<Arc<AppState>>,
@@ -4105,7 +4186,7 @@ async fn message_create(
             f.format.as_deref() == Some("html"),
         )
     };
-    let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers))?;
+    let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), false)?;
     if s.webhooks_enabled {
         if let Err(error) = enqueue_webhooks(&s, &m) {
             eprintln!("Rustfire webhook dispatch error: {error}");
@@ -4802,17 +4883,13 @@ async fn direct_create(
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(db_err)?;
-    let mut names = Vec::new();
     let mut selected = Vec::with_capacity(ids.len());
     for id in ids {
         let name: Option<String> = tx
             .query_row("SELECT name FROM users WHERE id=?1", [id], |r| r.get(0))
             .optional()
             .map_err(db_err)?;
-        if let Some(name) = name {
-            if id != u.id {
-                names.push(name);
-            }
+        if name.is_some() {
             selected.push(id);
         }
     }
@@ -4832,7 +4909,7 @@ async fn direct_create(
         return Ok(found_redirect(&format!("/rooms/{id}")));
     }
     let t = now();
-    tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES(?1,'Rooms::Direct',?2,?3,?3)",params![names.join(", "),u.id,t]).map_err(db_err)?;
+    tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES(NULL,'Rooms::Direct',?1,?2,?2)",params![u.id,t]).map_err(db_err)?;
     let rid = tx.last_insert_rowid();
     for id in &ids {
         tx.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(?1,?2,'everything',?3)",params![rid,id,t]).map_err(db_err)?;
@@ -7077,7 +7154,7 @@ async fn bot_messages_post(
             None,
         )
     };
-    let m = insert_message(&s, &u, rid, &body, None, attachment, false, Some(&headers))?;
+    let m = insert_message(&s, &u, rid, &body, None, attachment, false, Some(&headers), false)?;
     let mut r = StatusCode::CREATED.into_response();
     r.headers_mut().insert(
         header::LOCATION,
@@ -8019,6 +8096,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
     conn.execute("UPDATE users SET bot_token=substr(bot_token,length(CAST(id AS TEXT))+2) WHERE role=2 AND bot_token LIKE CAST(id AS TEXT)||'-%'", [])?;
+    conn.execute("UPDATE rooms SET name=NULL WHERE type='Rooms::Direct' AND name IS NOT NULL", [])?;
     let has_session_ip: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='ip_address')",
         [],
@@ -8500,6 +8578,38 @@ mod tests {
         nid::Nid,
     };
     use std::net::IpAddr;
+
+    #[test]
+    fn webhook_html_uses_campfire_action_text_mentions() {
+        let source = r#"<div><figure data-trix-attachment="{&quot;contentType&quot;:&quot;application/vnd.campfire.mention&quot;,&quot;sgid&quot;:&quot;signed-id&quot;}"><span class="mention">@Robot</span></figure> please answer</div>"#;
+        assert_eq!(
+            super::action_text_webhook_html(source),
+            "<div><action-text-attachment sgid=\"signed-id\" content-type=\"application/vnd.campfire.mention\"></action-text-attachment> please answer</div>"
+        );
+        assert_eq!(super::action_text_webhook_html("First post!"), "First post!");
+    }
+
+    #[test]
+    fn webhook_attachment_filenames_follow_campfire_mime_registry() {
+        assert_eq!(super::campfire_webhook_attachment_extension("image/jpeg"), Some("jpeg"));
+        assert_eq!(super::campfire_webhook_attachment_extension("application/zip"), Some("zip"));
+        assert_eq!(super::campfire_webhook_attachment_extension("audio/mpeg"), Some("mp3"));
+        assert_eq!(super::campfire_webhook_attachment_extension("application/octet-stream"), None);
+    }
+
+    #[test]
+    fn old_direct_room_names_migrate_to_campfire_null_names() {
+        let db = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .unwrap();
+        super::init_db(&db).unwrap();
+        db.get().unwrap().execute_batch("INSERT INTO users(id,name,created_at,updated_at) VALUES(1,'Test','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+            INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(1,'Legacy name','Rooms::Direct',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');").unwrap();
+        super::init_db(&db).unwrap();
+        let name: Option<String> = db.get().unwrap().query_row("SELECT name FROM rooms WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, None);
+    }
 
     #[test]
     fn unfurl_link_accepts_editor_json_and_form_posts() {
