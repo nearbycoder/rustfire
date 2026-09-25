@@ -4020,18 +4020,49 @@ fn action_text_webhook_html(input: &str) -> String {
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 return capture[0].to_string();
             };
-            if value.get("contentType").and_then(Value::as_str)
-                != Some("application/vnd.campfire.mention")
-            {
+            if !value.is_object() {
                 return capture[0].to_string();
             }
-            let Some(sgid) = value.get("sgid").and_then(Value::as_str) else {
-                return capture[0].to_string();
-            };
-            format!(
-                "<action-text-attachment sgid=\"{}\" content-type=\"application/vnd.campfire.mention\"></action-text-attachment>",
-                html_escape::encode_double_quoted_attribute(sgid)
-            )
+            let composed = figure
+                .value()
+                .attr("data-trix-attributes")
+                .and_then(|data| serde_json::from_str::<Value>(data).ok());
+            let attributes = [
+                ("sgid", "sgid"),
+                ("contentType", "content-type"),
+                ("url", "url"),
+                ("href", "href"),
+                ("filename", "filename"),
+                ("filesize", "filesize"),
+                ("width", "width"),
+                ("height", "height"),
+                ("previewable", "previewable"),
+                ("presentation", "presentation"),
+                ("caption", "caption"),
+                ("content", "content"),
+            ]
+            .into_iter()
+            .filter_map(|(key, attribute)| {
+                let value = if key == "presentation" || key == "caption" {
+                    composed.as_ref().and_then(|composed| composed.get(key))
+                } else {
+                    value.get(key)
+                }?;
+                let text = value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                Some(format!(
+                    " {attribute}=\"{}\"",
+                    html_escape::encode_double_quoted_attribute(&text)
+                ))
+            })
+            .collect::<String>();
+            if attributes.is_empty() {
+                capture[0].to_string()
+            } else {
+                format!("<action-text-attachment{attributes}></action-text-attachment>")
+            }
         })
         .into_owned()
 }
@@ -8654,6 +8685,11 @@ mod tests {
         assert_eq!(
             super::action_text_webhook_html(source),
             "<div><action-text-attachment sgid=\"signed-id\" content-type=\"application/vnd.campfire.mention\"></action-text-attachment> please answer</div>"
+        );
+        let preview = r#"<div><figure data-trix-attachment="{&quot;contentType&quot;:&quot;application/vnd.actiontext.opengraph-embed&quot;,&quot;href&quot;:&quot;https://example.com&quot;,&quot;url&quot;:&quot;https://example.com/i.png&quot;,&quot;filename&quot;:&quot;Example&quot;}" data-trix-attributes="{&quot;caption&quot;:&quot;Some text&quot;}">Something</figure></div>"#;
+        assert_eq!(
+            super::action_text_webhook_html(preview),
+            "<div><action-text-attachment content-type=\"application/vnd.actiontext.opengraph-embed\" url=\"https://example.com/i.png\" href=\"https://example.com\" filename=\"Example\" caption=\"Some text\"></action-text-attachment></div>"
         );
         assert_eq!(super::action_text_webhook_html("First post!"), "First post!");
     }
