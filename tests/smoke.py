@@ -138,6 +138,10 @@ def main():
             assert code == 201, (code, payload)
             attachment_message = json.loads(payload)
             attachment_id = sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (attachment_message["id"],)).fetchone()[0]
+            attachment_page = request(admin, base, "/rooms/1")[2]
+            assert "common-file-text-9043d980.svg" in attachment_page and "Share note.txt" in attachment_page
+            blob_download = re.search(r"href='(/rails/active_storage/blobs/redirect/[^']+/note\.txt\?disposition=attachment)'", attachment_page).group(1)
+            assert f"data-web-share-files-value='{blob_download.removesuffix('?disposition=attachment')}'" in attachment_page
             code, _, payload = request(admin, base, f"/rooms/1/refresh?after={message['id']}", headers={"Accept":"application/json"})
             refresh = json.loads(payload)
             assert code == 200 and [m["id"] for m in refresh["messages"]] == [attachment_message["id"]]
@@ -147,6 +151,12 @@ def main():
                 assert "action='append'" in response.read().decode()
             code, _, content = request(admin, base, f"/attachments/{attachment_id}")
             assert code == 200 and content == "file contents"
+            with admin.open(base + f"/attachments/{attachment_id}?disposition=attachment") as response:
+                assert response.status == 200 and response.headers["Content-Disposition"].startswith("attachment;")
+            with client().open(base + blob_download) as response:
+                assert response.status == 200 and response.read() == b"file contents"
+                assert response.headers["Content-Disposition"].startswith("attachment;")
+            assert request(client(), base, blob_download.replace("--", "--x", 1))[0] == 404
             assert request(admin, base, f"/attachments/{attachment_id}", headers={"Range":"bytes=0-3"}) == (206, base+f"/attachments/{attachment_id}", "file")
             assert request(admin, base, f"/attachments/{attachment_id}", headers={"Range":"bytes=999-"})[0] == 416
             code, _, payload = request(admin, base, "/rooms/1/messages", headers={"Accept": "application/json"})
@@ -209,7 +219,14 @@ def main():
             code,_,payload=request(admin,base,"/rooms/1/messages",data=image_body,method="POST",headers={"Accept":"application/json","Content-Type":"multipart/form-data; boundary=image-test"})
             assert code==201,(code,payload)
             image_id=sqlite3.connect(f"{tmp}/test.db").execute("SELECT id FROM attachments WHERE message_id=?", (json.loads(payload)["id"],)).fetchone()[0]
-            assert f"/attachments/{image_id}/thumb" in request(admin,base,"/rooms/1")[2]
+            image_page=request(admin,base,"/rooms/1")[2]
+            assert f"/attachments/{image_id}/thumb" in image_page and "class='message__attachment'" in image_page
+            image_blob_download=re.search(r"href='(/rails/active_storage/blobs/redirect/[^']+/image\.png\?disposition=attachment)'",image_page).group(1)
+            assert image_blob_download in image_page
+            with admin.open(base+f"/attachments/{image_id}") as response:
+                assert response.headers["Content-Disposition"].startswith("inline;")
+            with admin.open(base+f"/attachments/{image_id}?disposition=attachment") as response:
+                assert response.headers["Content-Disposition"].startswith("attachment;")
             with admin.open(base+f"/attachments/{image_id}/thumb") as res:
                 assert res.status==200 and res.headers.get_content_type()==("image/webp" if shutil.which("vips") else "image/png") and len(res.read())>0
             if shutil.which("ffmpeg") and shutil.which("ffprobe"):

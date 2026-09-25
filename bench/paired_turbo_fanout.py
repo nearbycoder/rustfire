@@ -1,7 +1,7 @@
 """Probe signed RoomMessagesChannel fanout on disposable Rustfire and Campfire fixtures.
 
 Requires the pinned Campfire checkout, its installed bundle, and Redis on localhost:6379.
-Both runs use the same number of sockets and messages. Message values still differ.
+Both runs use the same number of sockets and posts. Generated timestamps still differ.
 """
 
 import argparse
@@ -140,7 +140,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sockets", type=int, default=50)
     parser.add_argument("--messages", type=int, default=5)
-    parser.add_argument("--operation", choices=["messages", "boosts"], default="messages")
+    parser.add_argument("--operation", choices=["messages", "boosts", "attachments"], default="messages")
     parser.add_argument("--campfire-workers", type=int, default=1)
     parser.add_argument("--sample-dir", type=pathlib.Path, help="Write one received Turbo event from each app to this directory")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
@@ -207,28 +207,35 @@ def main():
         camp_identity = stream_avatar_identity(output_dir / "campfire.html")
         if rust_identity != camp_identity:
             raise RuntimeError(f"Avatar identity differs: Rustfire {rust_identity}, Campfire {camp_identity}")
-        if args.operation == "messages" and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
+        if args.operation in {"messages", "attachments"} and stream_message_id(output_dir / "rustfire.html") != stream_message_id(output_dir / "campfire.html"):
             raise RuntimeError("Message IDs differ in paired stream samples")
-        if args.operation == "messages":
+        if args.operation in {"messages", "attachments"}:
             check_message_targets(output_dir / "rustfire.html")
             check_message_targets(output_dir / "campfire.html")
             rust_room_label = message_room_label(output_dir / "rustfire.html")
             camp_room_label = message_room_label(output_dir / "campfire.html")
             if rust_room_label != camp_room_label:
                 raise RuntimeError(f"Message room labels differ: Rustfire {rust_room_label}, Campfire {camp_room_label}")
+        if args.operation in {"messages", "attachments"}:
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
             if rust_tags != camp_tags:
-                raise RuntimeError("Message stream tag structure differs from Campfire")
+                raise RuntimeError(f"{args.operation} stream tag structure differs from Campfire")
             if rust_attributes != camp_attributes:
-                raise RuntimeError("Message stream attribute keys differ from Campfire")
+                raise RuntimeError(f"{args.operation} stream attribute keys differ from Campfire")
             check_message_times(rust_values, output_dir / "rustfire.html")
             check_message_times(camp_values, output_dir / "campfire.html")
             if stable_message_attributes(rust_values) != stable_message_attributes(camp_values):
-                raise RuntimeError("Message stream static attribute values differ from Campfire")
+                raise RuntimeError(f"{args.operation} stream static attribute values differ from Campfire")
             if rust_text != camp_text:
-                raise RuntimeError("Message stream text differs from Campfire")
-        elif args.operation == "boosts":
+                raise RuntimeError(f"{args.operation} stream text differs from Campfire")
+        if args.operation == "attachments":
+            expected_filename = f"fanout-file-{run_id}-0.txt"
+            for app in ("rustfire", "campfire"):
+                sample = (output_dir / f"{app}.html").read_text()
+                if expected_filename not in sample or "web-share#share" not in sample or "Download" not in sample:
+                    raise RuntimeError(f"{app} attachment stream lacks its file or actions")
+        if args.operation == "boosts":
             rust_tags, rust_attributes, rust_values, rust_text = stream_structure(output_dir / "rustfire.html")
             camp_tags, camp_attributes, camp_values, camp_text = stream_structure(output_dir / "campfire.html")
             if rust_tags != camp_tags:

@@ -77,6 +77,8 @@ struct AppState {
     imported_mention_signing_key: Option<Vec<u8>>,
     avatar_signing_key: Vec<u8>,
     imported_avatar_signing_key: Option<Vec<u8>>,
+    blob_signing_key: Vec<u8>,
+    imported_blob_signing_key: Option<Vec<u8>>,
     turbo_stream_signing_key: Vec<u8>,
     imported_turbo_stream_signing_key: Option<Vec<u8>>,
     push_slots: Arc<Semaphore>,
@@ -534,6 +536,9 @@ fn rails_sgid_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::Erro
 fn rails_avatar_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
     rails_verifier_key(secret_key_base, b"active_record/signed_id")
 }
+fn rails_blob_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    rails_verifier_key(secret_key_base, b"ActiveStorage")
+}
 fn rails_turbo_stream_key(secret_key_base: &str) -> Result<Vec<u8>, openssl::error::ErrorStack> {
     rails_verifier_key(secret_key_base, b"turbo/signed_stream_verifier_key")
 }
@@ -617,6 +622,60 @@ fn avatar_id_from_token(key: &[u8], token: &str) -> Option<i64> {
         }
     }
     metadata.get("data")?.as_i64().filter(|id| *id > 0)
+}
+fn blob_token(key: &[u8], id: i64) -> Result<String, openssl::error::ErrorStack> {
+    let payload = json!({"_rails":{"data":id,"pur":"blob_id"}}).to_string();
+    let encoded = STANDARD.encode(payload);
+    let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())?;
+    let digest = signature
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{encoded}--{digest}"))
+}
+fn blob_id_from_token(key: &[u8], token: &str) -> Option<i64> {
+    if token.len() > 1024 {
+        return None;
+    }
+    let (encoded, signature) = token.split_once("--")?;
+    if signature.len() != 40 {
+        return None;
+    }
+    let expected = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1())
+        .ok()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !memcmp::eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let envelope: Value = serde_json::from_slice(&STANDARD.decode(encoded).ok()?).ok()?;
+    let metadata = envelope.get("_rails")?;
+    if metadata.get("pur").and_then(Value::as_str) != Some("blob_id") {
+        return None;
+    }
+    if let Some(expiry) = metadata.get("exp").filter(|expiry| !expiry.is_null()) {
+        if chrono::DateTime::parse_from_rfc3339(expiry.as_str()?).ok()? <= Utc::now() {
+            return None;
+        }
+    }
+    metadata.get("data")?.as_i64().filter(|id| *id > 0)
+}
+fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> {
+    let encoded_filename = filename
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect::<String>();
+    Ok(format!(
+        "/rails/active_storage/blobs/redirect/{}/{encoded_filename}",
+        blob_token(key, id).map_err(db_err)?
+    ))
 }
 fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
     let version = chrono::DateTime::parse_from_rfc3339(updated_at)
@@ -2190,13 +2249,29 @@ fn room_messages_target(kind: &str, room_id: i64) -> Option<String> {
     };
     Some(format!("messages_{class}_{room_id}"))
 }
-fn message_presentation_html(m: &ChatMessage) -> String {
+fn attachment_blob_path(s: &AppState, attachment: &Attachment) -> String {
+    let key = s
+        .imported_blob_signing_key
+        .as_deref()
+        .unwrap_or(&s.blob_signing_key);
+    blob_path(key, attachment.id, &attachment.filename)
+        .unwrap_or_else(|_| format!("/attachments/{}", attachment.id))
+}
+fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
     let attachment = m
         .attachment
         .as_ref()
         .map(|a| {
-            let preview=if safe_inline_image(&a.content_type){format!("<a class='lightbox-link' href='/attachments/{}' data-lightbox><img class='attachment-preview' src='/attachments/{}/thumb' alt='{}' loading='lazy'></a>",a.id,a.id,esc(&a.filename))}else if safe_inline_video(&a.content_type){format!("<video class='attachment-video' src='/attachments/{}' poster='/attachments/{}/poster' controls preload='none'></video>",a.id,a.id)}else{String::new()};
-            format!("<div>{preview}<p><a class='attachment' href='/attachments/{}' download>{}</a></p></div>",a.id,esc(&a.filename))
+            let filename = esc(&a.filename);
+            let blob_url = attachment_blob_path(s, a);
+            let download_url = format!("{blob_url}?disposition=attachment");
+            if safe_inline_image(&a.content_type) {
+                format!("<div class='max-inline-size center overflow-clip'><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img class='message__attachment' src='/attachments/{id}/thumb' alt='{filename}' loading='lazy'></a></div>",id=a.id)
+            } else if safe_inline_video(&a.content_type) {
+                format!("<div class='max-inline-size center overflow-clip'><video src='{blob_url}' poster='/attachments/{id}/poster' controls preload='none' width='100%' height='100%' class='message__attachment'></video></div>",id=a.id)
+            } else {
+                format!("<div class='flex-inline align-center gap-half'><img class='colorize--black' aria-hidden='true' src='/assets/common-file-text-9043d980.svg' width='22' height='22'><span>{filename}</span><a class='btn message__action-btn hide-in-ios-pwa' style='--width: auto;' href='{download_url}'><img aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'><span class='for-screen-reader'>Download {filename}</span></a><button class='btn message__action-btn' style='--width: auto;' data-controller='web-share' data-action='web-share#share' data-web-share-files-value='{download_url}'><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'><span class='for-screen-reader'>Share {filename}</span></button></div>")
+            }
         })
         .unwrap_or_default();
     let presentation = if m.attachment.is_some() {
@@ -2242,13 +2317,15 @@ fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMa
         .unwrap_or(&s.avatar_signing_key);
     let creator_avatar = avatar_path(avatar_key, m.creator_id, &m.creator_updated_at)
         .unwrap_or_else(|_| format!("/users/{}/avatar", m.creator_id));
-    let presentation = message_presentation_html(m);
+    let presentation = message_presentation_html(s, m);
     let client_id = esc(&m.client_message_id);
     let quick_boosts=[("👍","Thumbs up"),("👏","Clapping"),("👋","Waving hand"),("💪","Muscle"),("❤️","Red heart"),("😂","Face with tears of joy"),("🎉","Party popper"),("🔥","Fire")].iter().map(|(emoji,label)|format!("<form data-turbo-frame='boosting_message_{client_id}' data-action='popup#close' action='/messages/{}/boosts' accept-charset='UTF-8' method='post'><input type='hidden' name='boost[content]' id='boost_content' value='{emoji}'><button name='button' type='submit' title='{label}' class='btn message__action-btn' data-emoji='{emoji}'><figure class='margin-none boost-character'>{emoji}</figure><span class='for-screen-reader'>{label}</span></button></form>",m.id)).collect::<String>();
     let content_action = if m.attachment.is_some() {
+        let attachment = m.attachment.as_ref().unwrap();
+        let blob_url = attachment_blob_path(s, attachment);
         format!(
-            "<a class='btn message__action-btn center full-width' href='/attachments/{}' title='Download' aria-label='Download' download><img class='colorize--black' aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'></a>",
-            m.attachment.as_ref().unwrap().id
+            "<a class='btn message__action-btn center full-width hide-in-ios-pwa' href='{blob_url}?disposition=attachment' title='Download' aria-label='Download'><img class='colorize--black' aria-hidden='true' src='/assets/download-04029899.svg' width='20' height='20'></a><button class='btn message__action-btn center full-width' data-controller='web-share' data-action='web-share#share' data-web-share-files-value='{blob_url}' data-web-share-title-value='{filename}' title='Share' aria-label='Share'><img class='colorize--black' aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'></button>",
+            filename = esc(&attachment.filename)
         )
     } else {
         "<button class='btn message__action-btn center full-width' data-action='reply#reply' title='Reply' aria-label='Reply'><img class='colorize--black' aria-hidden='true' src='/assets/reply-edb77e33.svg' width='20' height='20'></button>".to_string()
@@ -3577,7 +3654,7 @@ async fn message_update(
     }
     drop(db);
     let updated_message = message_by_id(&s, rid, mid)?;
-    let presentation_html = message_presentation_html(&updated_message);
+    let presentation_html = message_presentation_html(&s, &updated_message);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
@@ -5548,7 +5625,7 @@ async fn bot_message_update(
         .map_err(db_err)?;
     drop(db);
     let m = message_by_id(&s, rid, mid)?;
-    let presentation_html = message_presentation_html(&m);
+    let presentation_html = message_presentation_html(&s, &m);
     let _ = s.events.send(Event {
         room_id: rid,
         payload: json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":m.client_message_id,"body":body,"presentation_html":presentation_html}).to_string(),
@@ -5591,11 +5668,17 @@ fn attachment_record(
     u: &User,
     id: i64,
 ) -> Result<(String, String, String), StatusCode> {
-    let db = pool(&s)?;
-    let row:Option<(i64,String,String,String)>=db.query_row("SELECT m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?;
-    let (rid, filename, content_type, stored) = row.ok_or(StatusCode::NOT_FOUND)?;
+    let (rid, filename, content_type, stored) = attachment_record_unchecked(s, id)?;
     room_for(&s, u.id, rid)?;
     Ok((filename, content_type, stored))
+}
+fn attachment_record_unchecked(
+    s: &AppState,
+    id: i64,
+) -> Result<(i64, String, String, String), StatusCode> {
+    let db = pool(&s)?;
+    let row:Option<(i64,String,String,String)>=db.query_row("SELECT m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?;
+    row.ok_or(StatusCode::NOT_FOUND)
 }
 fn byte_range(input: &str, size: u64) -> Result<(u64, u64), StatusCode> {
     let value = input
@@ -5712,6 +5795,7 @@ async fn attachment_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let (filename, content_type, stored) = attachment_record(&s, &u, id)?;
@@ -5721,7 +5805,33 @@ async fn attachment_get(
         &filename,
         &content_type,
         &headers,
-        safe_inline_image(&content_type) || safe_inline_video(&content_type),
+        query.get("disposition").map(String::as_str) != Some("attachment")
+            && (safe_inline_image(&content_type) || safe_inline_video(&content_type)),
+    )
+    .await
+}
+async fn signed_blob_get(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((token, _filename)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> AppResult {
+    let id = blob_id_from_token(&s.blob_signing_key, &token)
+        .or_else(|| {
+            s.imported_blob_signing_key
+                .as_deref()
+                .and_then(|key| blob_id_from_token(key, &token))
+        })
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
+    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+    serve_attachment(
+        &std::path::Path::new(&dir).join(stored),
+        &filename,
+        &content_type,
+        &headers,
+        query.get("disposition").map(String::as_str) != Some("attachment")
+            && (safe_inline_image(&content_type) || safe_inline_video(&content_type)),
     )
     .await
 }
@@ -6280,6 +6390,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS app_secrets(name TEXT PRIMARY KEY,value BLOB NOT NULL);
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('mention_sgid',randomblob(32));
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('avatar_signed_id',randomblob(32));
+        INSERT OR IGNORE INTO app_secrets(name,value) VALUES('blob_signed_id',randomblob(32));
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('turbo_stream',randomblob(32));
         CREATE TABLE IF NOT EXISTS account_custom_styles(id INTEGER PRIMARY KEY CHECK(id=1),css TEXT NOT NULL DEFAULT '');
         INSERT OR IGNORE INTO account_custom_styles(id,css) VALUES(1,'');
@@ -6459,6 +6570,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |row| row.get(0),
     )?;
+    let blob_signing_key: Vec<u8> = db.get()?.query_row(
+        "SELECT value FROM app_secrets WHERE name='blob_signed_id'",
+        [],
+        |row| row.get(0),
+    )?;
     let turbo_stream_signing_key: Vec<u8> = db.get()?.query_row(
         "SELECT value FROM app_secrets WHERE name='turbo_stream'",
         [],
@@ -6473,6 +6589,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .map(rails_avatar_key)
         .transpose()?;
+    let imported_blob_signing_key = campfire_secret.as_deref().map(rails_blob_key).transpose()?;
     let imported_turbo_stream_signing_key = campfire_secret
         .as_deref()
         .map(rails_turbo_stream_key)
@@ -6510,6 +6627,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         imported_mention_signing_key,
         avatar_signing_key,
         imported_avatar_signing_key,
+        blob_signing_key,
+        imported_blob_signing_key,
         turbo_stream_signing_key,
         imported_turbo_stream_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
@@ -6699,6 +6818,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/{bid}/delete", post(boost_delete))
         .route("/attachments/{id}", get(attachment_get))
         .route("/attachments/{id}/{kind}", get(attachment_variant))
+        .route(
+            "/rails/active_storage/blobs/redirect/{token}/{filename}",
+            get(signed_blob_get),
+        )
         .nest_service("/assets", ServeDir::new("static/assets"))
         .nest_service("/static", ServeDir::new("static"))
         .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024))

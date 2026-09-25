@@ -68,6 +68,7 @@ if (chat) {
       if(mine){content?.setAttribute('tabindex','0');content?.setAttribute('aria-describedby','delete_boost_accessible_label');}
       else{content?.removeAttribute('tabindex');content?.removeAttribute('aria-describedby');}
     });
+    messages.querySelectorAll('[data-controller~="web-share"]').forEach(node=>{node.hidden=typeof navigator.canShare!=='function';});
   };
   const formatMessageGroups=()=>{
     let previous=null,previousDay=null;
@@ -395,8 +396,20 @@ if (chat) {
       frame.querySelector('[name="boost[content]"]')?.focus();
       return;
     }
-    const lightbox=e.target.closest('[data-lightbox]');
+    const lightbox=e.target.closest('[data-action~="lightbox#open"],[data-lightbox]');
     if(lightbox){e.preventDefault();let dialog=document.querySelector('.image-lightbox');if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});document.body.append(dialog)}dialog.querySelector('img').src=lightbox.href;dialog.showModal();return;}
+    const share=e.target.closest('[data-action~="web-share#share"]');
+    if(share){
+      e.preventDefault();
+      try{
+        const response=await fetch(share.dataset.webShareFilesValue);
+        if(!response.ok)throw Error('Could not load attachment');
+        const blob=await response.blob();
+        const filename=`Campfire_${Math.random().toString(36).slice(2)}.${blob.type.split('/').pop()}`;
+        await navigator.share({title:share.dataset.webShareTitleValue||'',files:[new File([blob],filename,{type:blob.type})]});
+      }catch(error){if(error.name!=='AbortError')alert('Could not share attachment');}
+      return;
+    }
     const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }
     const reply=e.target.closest('[data-action~="reply#reply"]');
     if(reply){

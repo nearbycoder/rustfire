@@ -26,7 +26,7 @@ Configuration:
 - `RUSTFIRE_DISABLE_WEBHOOKS` — set to `true` to suppress outbound bot webhook delivery
 - `RUSTFIRE_DISABLE_PUSH` — set to `true` to suppress outbound Web Push delivery
 - `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid.
-- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to issue and verify Rails mention and avatar IDs with Campfire's verifier keys. Keep it configured while imported messages or attachments use those IDs. Rustfire also accepts IDs signed with its own persistent keys.
+- `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to issue and verify Rails mention, avatar, and blob IDs with Campfire's verifier keys. Keep it configured while imported messages or attachments use those IDs. Rustfire also accepts IDs signed with its own persistent keys.
 - `RUSTFIRE_TRUSTED_PROXY_IPS` — comma-separated IPs of reverse proxies that append `X-Forwarded-For`; empty by default. Session IPs and bans use the direct peer unless it is listed here.
 
 The server creates its SQLite schema at startup and enables WAL mode. Run behind a TLS proxy for network use. Back up the database and upload directory together.
@@ -37,7 +37,7 @@ The server creates its SQLite schema at startup and enables WAL mode. Run behind
 - QR codes for invite and device sign-in links
 - Open and private rooms, room membership and settings, direct-message rooms; private-room membership revisions preserve unchanged members' notification and unread state, and creators may remove themselves. Ping creation searches users as you type instead of loading the full account roster. Direct-room reuse uses an indexed participant key and a write transaction so concurrent requests create one ping, returning the upstream 302 redirect and sending each participant a rendered sidebar link.
 - Optional administrator-only room creation
-- Paginated message history with upward scrolling, links that open a room around a message, local day separators, five-minute message grouping, a return-to-latest control, posting, inline editing, deleting, file upload, authenticated byte-range downloads, cached image thumbnails, lightbox viewing, and video playback with generated posters; attachment files and cached variants are removed with their message or room
+- Paginated message history with upward scrolling, links that open a room around a message, local day separators, five-minute message grouping, a return-to-latest control, posting, inline editing, deleting, file upload, authenticated direct byte-range downloads, Campfire-format signed blob links, cached image thumbnails, lightbox viewing, and video playback with generated posters; attachment files and cached variants are removed with their message or room
 - Message pages and reconnect refresh follow Campfire's creation-time ordering and new/edited selection, backed by indexed nanosecond creation and update timestamps; existing Rustfire and imported Campfire-format messages are backfilled at startup
 - Room unread markers, per-room notification preference storage, and live sidebar updates when rooms are created, renamed, deleted, or membership changes; visible pings are ordered by recent room activity, and the sidebar offers direct-ping shortcuts for active users without an existing ping
 - SQLite FTS5 search limited to rooms the user can access, with recent searches
