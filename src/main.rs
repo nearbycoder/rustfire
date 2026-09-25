@@ -903,7 +903,7 @@ fn analyze_image_and_thumbnail(
     }
     dimensions
 }
-fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Path) -> bool {
+fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Path, width: i64, height: i64) -> bool {
     let Some(parent) = output.parent() else {
         return false;
     };
@@ -912,11 +912,13 @@ fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Pa
     }
     let extension = output.extension().and_then(|extension| extension.to_str()).unwrap_or("png");
     let temporary = parent.join(format!("inline-{}.{}", Uuid::new_v4(), extension));
+    let width = width.to_string();
+    let height = height.to_string();
     let converted = std::process::Command::new("vips")
         .arg("thumbnail")
         .arg(input)
         .arg(&temporary)
-        .args(["1024", "--height", "768", "--size", "down"])
+        .args([&width, "--height", &height, "--size", "down"])
         .output()
         .is_ok_and(|result| result.status.success());
     let published = converted && std::fs::rename(&temporary, output).is_ok();
@@ -925,7 +927,7 @@ fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Pa
     }
     published
 }
-fn generate_inline_pdf_variant(input: &std::path::Path, output: &std::path::Path) -> bool {
+fn generate_inline_pdf_variant(input: &std::path::Path, output: &std::path::Path, width: i64, height: i64) -> bool {
     let Some(parent) = output.parent() else {
         return false;
     };
@@ -940,11 +942,11 @@ fn generate_inline_pdf_variant(input: &std::path::Path, output: &std::path::Path
         .arg(&prefix)
         .output()
         .is_ok_and(|result| result.status.success());
-    let published = rendered && generate_inline_image_variant(&frame, output);
+    let published = rendered && generate_inline_image_variant(&frame, output, width, height);
     let _ = std::fs::remove_file(frame);
     published
 }
-fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Path) -> bool {
+fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Path, width: i64, height: i64) -> bool {
     let Some(parent) = output.parent() else {
         return false;
     };
@@ -959,7 +961,7 @@ fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Pa
         .arg(&frame)
         .output()
         .is_ok_and(|result| result.status.success());
-    let published = rendered && generate_inline_image_variant(&frame, output);
+    let published = rendered && generate_inline_image_variant(&frame, output, width, height);
     let _ = std::fs::remove_file(frame);
     published
 }
@@ -1069,8 +1071,8 @@ fn image_variation_token_sized(
         .collect::<String>();
     Ok(format!("{encoded}--{digest}"))
 }
-fn inline_preview_variation_token(key: &[u8]) -> Result<String, StatusCode> {
-    let payload = json!({"_rails":{"data":{"resize_to_limit":[1024,768]},"pur":"variation"}}).to_string();
+fn inline_preview_variation_token(key: &[u8], width: i64, height: i64) -> Result<String, StatusCode> {
+    let payload = json!({"_rails":{"data":{"resize_to_limit":[width,height]},"pur":"variation"}}).to_string();
     let encoded = STANDARD.encode(payload);
     let signature = mention_signature(key, encoded.as_bytes(), MessageDigest::sha1()).map_err(db_err)?;
     let digest = signature.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
@@ -1105,6 +1107,7 @@ fn inline_image_representation_path(
     id: i64,
     filename: &str,
     format: &str,
+    gallery: bool,
 ) -> Result<String, StatusCode> {
     let blob = blob_path(key, id, filename)?;
     let (prefix, filename) = blob
@@ -1113,14 +1116,14 @@ fn inline_image_representation_path(
     Ok(format!(
         "{}/{}/{}",
         prefix.replacen("/blobs/", "/representations/", 1),
-        image_variation_token_sized(key, format, 1024, 768)?,
+        image_variation_token_sized(key, format, if gallery { 800 } else { 1024 }, if gallery { 600 } else { 768 })?,
         filename
     ))
 }
-fn inline_pdf_representation_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> {
+fn inline_media_representation_path(key: &[u8], id: i64, filename: &str, gallery: bool) -> Result<String, StatusCode> {
     let blob = blob_path(key, id, filename)?;
     let (prefix, filename) = blob.rsplit_once('/').ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(format!("{}/{}/{}", prefix.replacen("/blobs/", "/representations/", 1), inline_preview_variation_token(key)?, filename))
+    Ok(format!("{}/{}/{}", prefix.replacen("/blobs/", "/representations/", 1), inline_preview_variation_token(key, if gallery { 800 } else { 1024 }, if gallery { 600 } else { 768 })?, filename))
 }
 fn avatar_path(key: &[u8], id: i64, updated_at: &str) -> Result<String, StatusCode> {
     let version = chrono::DateTime::parse_from_rfc3339(updated_at)
@@ -1301,10 +1304,16 @@ fn render_imported_inline_files(
     static INLINE_ATTACHMENT: OnceLock<Regex> = OnceLock::new();
     let pattern = INLINE_ATTACHMENT.get_or_init(|| Regex::new(r"(?is)<action-text-attachment\b[^>]*>.*?</action-text-attachment>").unwrap());
     let selector = Selector::parse("action-text-attachment[sgid]").unwrap();
+    let document = ParsedHtml::parse_fragment(input);
+    let all_attachments = document.select(&Selector::parse("action-text-attachment").unwrap()).collect::<Vec<_>>();
     let mut rendered = String::with_capacity(input.len() + 256);
     let mut consumed = 0;
-    for found in pattern.find_iter(input) {
+    for (index, found) in pattern.find_iter(input).enumerate() {
         rendered.push_str(&input[consumed..found.start()]);
+        let in_gallery = all_attachments.get(index).is_some_and(|node| node.ancestors().any(|ancestor| {
+            ancestor.value().as_element().and_then(|element| element.attr("class"))
+                .is_some_and(|classes| classes.split_whitespace().any(|class| class == "attachment-gallery"))
+        }));
         let fragment = ParsedHtml::parse_fragment(found.as_str());
         let attachment = fragment.select(&selector).next();
         let blob_id = attachment
@@ -1328,17 +1337,17 @@ fn render_imported_inline_files(
                 format!("<span class=\"attachment__name\">{}</span><span class=\"attachment__size\">{}</span>", esc(&filename), inline_file_size(size))
             };
             let (preview_attribute, figure_class, preview_html) = if let Some(format) = image_format(&content_type) {
-                let path = inline_image_representation_path(blob_key, blob_id, &filename, format)?;
+                let path = inline_image_representation_path(blob_key, blob_id, &filename, format, in_gallery)?;
                 let dimensions = match (width, height) {
                     (Some(width), Some(height)) if width > 0 && height > 0 => format!(" width=\"{width}\" height=\"{height}\""),
                     _ => String::new(),
                 };
                 (format!("{dimensions} previewable=\"true\""), "preview", format!("<img src=\"{}\">", esc(&path)))
             } else if content_type == "application/pdf" {
-                let path = inline_pdf_representation_path(blob_key, blob_id, &filename)?;
+                let path = inline_media_representation_path(blob_key, blob_id, &filename, in_gallery)?;
                 (" previewable=\"true\"".to_string(), "preview", format!("<img src=\"{}\">", esc(&path)))
             } else if safe_inline_video(&content_type) {
-                let path = inline_pdf_representation_path(blob_key, blob_id, &filename)?;
+                let path = inline_media_representation_path(blob_key, blob_id, &filename, in_gallery)?;
                 let dimensions = match (width, height) {
                     (Some(width), Some(height)) if width > 0 && height > 0 => format!(" width=\"{width}\" height=\"{height}\""),
                     _ => String::new(),
@@ -7836,29 +7845,39 @@ async fn signed_representation_get(
     .ok_or(StatusCode::NOT_FOUND)?;
     let id = blob_id_from_token(key, &token).ok_or(StatusCode::NOT_FOUND)?;
     let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
+    let matches = |candidate: &str| variation.len() == candidate.len() && memcmp::eq(variation.as_bytes(), candidate.as_bytes());
     let (format, kind) = if let Some(format) = image_format(&content_type) {
         let inline = image_variation_token_sized(key, format, 1024, 768)?;
-        if variation.len() == inline.len() && memcmp::eq(variation.as_bytes(), inline.as_bytes()) {
+        let gallery = image_variation_token_sized(key, format, 800, 600)?;
+        if matches(&inline) {
             (format, "inline")
+        } else if matches(&gallery) {
+            (format, "inline-gallery")
         } else {
             (format, "thumb")
         }
     } else if content_type == "application/pdf" {
-        ("png", "inline-pdf")
+        let gallery = inline_preview_variation_token(key, 800, 600)?;
+        ("png", if matches(&gallery) { "inline-pdf-gallery" } else { "inline-pdf" })
     } else if safe_inline_video(&content_type) {
-        let inline = inline_preview_variation_token(key)?;
-        if variation.len() == inline.len() && memcmp::eq(variation.as_bytes(), inline.as_bytes()) {
+        let inline = inline_preview_variation_token(key, 1024, 768)?;
+        let gallery = inline_preview_variation_token(key, 800, 600)?;
+        if matches(&inline) {
             ("jpeg", "inline-video")
+        } else if matches(&gallery) {
+            ("jpeg", "inline-video-gallery")
         } else {
             ("webp", "poster")
         }
     } else {
         return Err(StatusCode::NOT_FOUND);
     };
-    let expected = if kind == "inline-pdf" || kind == "inline-video" {
-        inline_preview_variation_token(key)?
-    } else if kind == "inline" {
-        image_variation_token_sized(key, format, 1024, 768)?
+    let gallery = kind.ends_with("gallery");
+    let (width, height) = if gallery { (800, 600) } else { (1024, 768) };
+    let expected = if kind.starts_with("inline-pdf") || kind.starts_with("inline-video") {
+        inline_preview_variation_token(key, width, height)?
+    } else if kind.starts_with("inline") {
+        image_variation_token_sized(key, format, width, height)?
     } else {
         image_variation_token(key, format)?
     };
@@ -7881,22 +7900,22 @@ async fn signed_representation_get(
                     analyze_video_and_poster(&input, &stored_copy)
                 })
                 .await;
-            } else if kind == "inline-pdf" {
+            } else if kind.starts_with("inline-pdf") {
                 let output_copy = output.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    generate_inline_pdf_variant(&input, &output_copy)
+                    generate_inline_pdf_variant(&input, &output_copy, width, height)
                 })
                 .await;
-            } else if kind == "inline-video" {
+            } else if kind.starts_with("inline-video") {
                 let output_copy = output.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    generate_inline_video_variant(&input, &output_copy)
+                    generate_inline_video_variant(&input, &output_copy, width, height)
                 })
                 .await;
-            } else if kind == "inline" {
+            } else if kind.starts_with("inline") {
                 let output_copy = output.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    generate_inline_image_variant(&input, &output_copy)
+                    generate_inline_image_variant(&input, &output_copy, width, height)
                 })
                 .await;
             } else {
@@ -7911,9 +7930,9 @@ async fn signed_representation_get(
     if tokio::fs::metadata(&output).await.is_err() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let response_type = if kind == "inline-pdf" {
+    let response_type = if kind.starts_with("inline-pdf") {
         "image/png"
-    } else if kind == "inline-video" {
+    } else if kind.starts_with("inline-video") {
         "image/jpeg"
     } else if kind == "poster" {
         "image/webp"
@@ -7942,9 +7961,15 @@ fn remove_attachment_files(stored: &str) {
             dir.join("variants")
                 .join(format!("{stored}-inline.{format}")),
         );
+        let _ = std::fs::remove_file(
+            dir.join("variants")
+                .join(format!("{stored}-inline-gallery.{format}")),
+        );
     }
     let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-pdf.png")));
     let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-video.jpeg")));
+    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-pdf-gallery.png")));
+    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-video-gallery.jpeg")));
 }
 fn inline_blob_ids(db: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<i64>, StatusCode> {
     let mut query = db.prepare(sql).map_err(db_err)?;

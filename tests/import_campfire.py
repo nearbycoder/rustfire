@@ -64,7 +64,7 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
-            for mid in (1, 2, 3, 4, 5, 6, 7):
+            for mid in (1, 2, 3, 4, 5, 6, 7, 8):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(1,'Message',1,'body',?,?,?)", (source_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
@@ -102,6 +102,9 @@ def main():
             video_body = f'<div>Clip <action-text-attachment sgid="{video_sgid}" content-type="video/mp4" filename="clip.mp4" width="16" height="16" previewable="true"></action-text-attachment> end</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(6,'Message',7,'body',?,?,?)", (video_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(7,?)", ("Clip [clip.mp4] end",))
+            gallery_body = f'<div class="attachment-gallery attachment-gallery--3"><action-text-attachment sgid="{image_sgid}" content-type="image/png" filename="pixel.png"></action-text-attachment><action-text-attachment sgid="{pdf_sgid}" content-type="application/pdf" filename="page.pdf"></action-text-attachment><action-text-attachment sgid="{video_sgid}" content-type="video/mp4" filename="clip.mp4"></action-text-attachment></div>'
+            fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(7,'Message',8,'body',?,?,?)", (gallery_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(8,?)", ("[pixel.png] [page.pdf] [clip.mp4]",))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
@@ -152,6 +155,12 @@ def main():
                 VALUES(13,?,'clip.mp4','video/mp4',?,'local',?,'2026-01-01 00:00:00')""", (video_key, json.dumps({"width": 16, "height": 16, "identified": True}), len(video_bytes)))
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                 VALUES(13,'embeds','ActionText::RichText',6,13,'2026-01-01 00:00:00')""")
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(14,'embeds','ActionText::RichText',7,11,'2026-01-01 00:00:00')""")
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(15,'embeds','ActionText::RichText',7,12,'2026-01-01 00:00:00')""")
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(16,'embeds','ActionText::RichText',7,13,'2026-01-01 00:00:00')""")
             for blob_id, record_type, record_id, name in ((8, "User", 1, "avatar"), (9, "Account", 1, "logo")):
                 media_key = f"ab{blob_id}cdef1234567890"
                 media_file = source_files / media_key[:2] / media_key[2:4] / media_key
@@ -174,7 +183,7 @@ def main():
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
-        assert result["messages"] == 7 and result["attachments"] == 1 and result["inline_embeds"] == 4, result
+        assert result["messages"] == 8 and result["attachments"] == 1 and result["inline_embeds"] == 7, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -220,6 +229,13 @@ def main():
             video_variant = target_uploads / "variants" / f"{video_stored}-inline-video.jpeg"
             assert video_variant.read_bytes().startswith(b"\xff\xd8")
             video_variant.unlink()
+            gallery_html = imported.execute("SELECT body_html FROM messages WHERE id=8").fetchone()[0]
+            assert 'class="attachment-gallery attachment-gallery--3"' in gallery_html, gallery_html
+            gallery_urls = re.findall(r'<img src="([^"]+)"', gallery_html)
+            assert len(gallery_urls) == 3, gallery_html
+            assert variation_data(gallery_urls[0]) == {"format": "png", "resize_to_limit": [800, 600]}
+            assert variation_data(gallery_urls[1]) == {"resize_to_limit": [800, 600]}
+            assert variation_data(gallery_urls[2]) == {"resize_to_limit": [800, 600]}
             assert imported.execute("SELECT id FROM attachments WHERE message_id=2").fetchone() == (7,)
             stored = imported.execute("SELECT stored_name FROM attachments WHERE id=7").fetchone()[0]
             assert (target_uploads / stored).read_bytes() == file_bytes
@@ -282,14 +298,27 @@ def main():
                 assert response.status == 200 and response.headers["Content-Type"] == "image/jpeg"
                 assert response.read().startswith(b"\xff\xd8")
             assert video_variant.is_file()
+            for gallery_url, media_type, signature in zip(gallery_urls, ("image/png", "image/png", "image/jpeg"), (b"\x89PNG\r\n\x1a\n", b"\x89PNG\r\n\x1a\n", b"\xff\xd8")):
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{gallery_url}", timeout=10) as response:
+                    assert response.status == 200 and response.headers["Content-Type"] == media_type
+                    assert response.read().startswith(signature)
+            image_gallery_variant = target_uploads / "variants" / f"{image_stored[0]}-inline-gallery.png"
+            assert image_gallery_variant.is_file()
             delete_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5/delete", data=b"",
                 headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/vnd.turbo-stream.html"})
             with urllib.request.urlopen(delete_image, timeout=2) as response:
                 assert response.status == 200
             with sqlite3.connect(target_db) as cleaned:
+                assert cleaned.execute("SELECT count(*) FROM inline_blobs WHERE id=11").fetchone() == (1,)
+            assert (target_uploads / image_stored[0]).is_file() and image_variant.is_file()
+            delete_gallery = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/8/delete", data=b"",
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/vnd.turbo-stream.html"})
+            with urllib.request.urlopen(delete_gallery, timeout=2) as response:
+                assert response.status == 200
+            with sqlite3.connect(target_db) as cleaned:
                 assert cleaned.execute("SELECT count(*) FROM inline_blobs WHERE id=11").fetchone() == (0,)
                 assert cleaned.execute("SELECT count(*) FROM inline_blobs WHERE id IN (10,12,13)").fetchone() == (3,)
-            assert not (target_uploads / image_stored[0]).exists() and not image_variant.exists()
+            assert not (target_uploads / image_stored[0]).exists() and not image_variant.exists() and not image_gallery_variant.exists()
         finally:
             server.terminate()
             server.wait(timeout=5)

@@ -45,7 +45,7 @@ python tools/import_campfire.py \
   --target-uploads /path/to/rustfire/data/uploads
 ```
 
-The offline importer preserves account settings and styles, user IDs and passwords, session records, bans, rooms, memberships, message IDs and timestamps, original plain-text search content, boosts, searches, bot webhooks, push subscriptions, file attachments, inline files, images, PDFs, and videos, avatars, and the account logo. It copies local Active Storage bytes into the new upload directory, prepares inline previews, then renders imported rich text with Rustfire's sanitizer. It builds the target in a temporary directory and publishes it only after validation. The source remains read-only. Keep the original secret key base configured when running Rustfire afterward so existing signed mentions, blobs, and session cookies can be verified. Test the imported copy before replacing a production service.
+The offline importer preserves account settings and styles, user IDs and passwords, session records, bans, rooms, memberships, message IDs and timestamps, original plain-text search content, boosts, searches, bot webhooks, push subscriptions, file attachments, inline files, images, PDFs, and videos, avatars, and the account logo. It copies local Active Storage bytes into the new upload directory, prepares inline previews, then renders imported rich text with Rustfire's sanitizer. Inline galleries use Campfire's 800×600 signed preview variation. It builds the target in a temporary directory and publishes it only after validation. The source remains read-only. Keep the original secret key base configured when running Rustfire afterward so existing signed mentions, blobs, and session cookies can be verified. Test the imported copy before replacing a production service.
 
 If Campfire has push subscriptions, also set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to its original VAPID keys before import. The importer verifies the pair and creates Rustfire's key file so those subscriptions retain the same application server key.
 
@@ -81,7 +81,7 @@ The importer currently stops if Campfire has unsupported or undecodable inline m
 ## Remaining parity work
 
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior
-- Remaining ActionText rich-text behavior, image gallery presentation, media format and metadata edge cases, and exact link preview rendering
+- Remaining ActionText rich-text behavior, media format and metadata edge cases, and exact link preview rendering
 - Exact ActionText mention HTML and webhook triggering, full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior and cross-browser push delivery validation
 - Remaining webhook response edge cases and JSON API compatibility
