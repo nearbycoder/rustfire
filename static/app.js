@@ -171,7 +171,8 @@ if (chat) {
   window.addEventListener('online',()=>catchUp());
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)catchUp()});
   let socket;
-  const messageIdent=JSON.stringify({channel:'RoomMessagesChannel',room_id:roomId});
+  const signedStreamName=chat.querySelector('turbo-cable-stream-source[channel="RoomMessagesChannel"]')?.getAttribute('signed-stream-name');
+  const messageIdent=JSON.stringify({channel:'RoomMessagesChannel',signed_stream_name:signedStreamName});
   const typingIdent=JSON.stringify({channel:'TypingNotificationsChannel',room_id:roomId});
   const presenceIdent=JSON.stringify({channel:'PresenceChannel',room_id:roomId});
   const unreadIdent=JSON.stringify({channel:'UnreadRoomsChannel'});
@@ -222,17 +223,45 @@ if (chat) {
   setInterval(()=>{if(!document.hidden)sendPresence('refresh');},50000);
   let visibilityTimer;
   document.addEventListener('visibilitychange',()=>{clearTimeout(visibilityTimer);visibilityTimer=setTimeout(()=>sendPresence(document.hidden?'absent':'present'),5000);});
+  function applyRoomStream(html){
+    const streamDocument=new DOMParser().parseFromString(html,'text/html');
+    for(const stream of streamDocument.querySelectorAll('turbo-stream')){
+      const targetId=stream.getAttribute('target');
+      const target=targetId&&document.getElementById(targetId);
+      if(!target||(target!==messages&&!messages.contains(target)))continue;
+      const action=stream.getAttribute('action');
+      if(action==='remove'){
+        if(target!==messages){target.remove();formatMessageGroups();}
+        continue;
+      }
+      const fragment=stream.querySelector('template')?.content.cloneNode(true);
+      if(!fragment)continue;
+      if(action==='append'){
+        if(target===messages&&historyMode){updateReturnButton();continue;}
+        for(const node of [...fragment.children])if(node.id&&document.getElementById(node.id))node.remove();
+        if(!fragment.childNodes.length)continue;
+        const scrollToLatest=target===messages&&(nearBottom()||[...fragment.querySelectorAll('.message')].some(node=>node.dataset.creatorId===document.body.dataset.userId));
+        const addedMessages=[...fragment.querySelectorAll('.message[data-message-id]')];
+        target.append(fragment);
+        if(target===messages){
+          formatLocalTimes(messages);decorateOwn();formatMessageGroups();
+          if(!catchingUp)for(const node of addedMessages)cursor=Math.max(cursor,Number(node.dataset.messageId));
+          if(scrollToLatest)messages.scrollTop=messages.scrollHeight;
+          updateReturnButton();
+          for(const node of addedMessages){const sound=node.querySelector('[data-sound]');if(sound)new Audio(sound.dataset.sound).play().catch(()=>{});}
+        }
+      }else if(action==='replace'&&target!==messages){
+        if(target.closest('.inline-edit'))continue;
+        target.replaceWith(fragment);
+        formatLocalTimes(messages);decorateOwn();formatMessageGroups();
+      }
+    }
+  }
   function connect() {
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/cable`, 'actioncable-v1-json');
     socket.addEventListener('open', () => { catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,unreadIdent,readIdent,roomListIdent])socket.send(JSON.stringify({command:'subscribe',identifier})); });
     socket.addEventListener('message', e => {
-      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;} if (!data || data.room_id !== roomId) return;
-        if (data.type === 'message'&&historyMode){updateReturnButton();return;}
-        if (data.type === 'message') { if (!document.getElementById(`message-${data.message.id}`)) { const scrollToLatest=nearBottom()||data.message.creator?.id===Number(document.body.dataset.userId); messages.insertAdjacentHTML('beforeend', data.html); formatLocalTimes(messages); decorateOwn(); formatMessageGroups(); if(scrollToLatest)messages.scrollTop=messages.scrollHeight; updateReturnButton(); const sound=document.querySelector(`#message-${data.message.id} [data-sound]`); if(sound) new Audio(sound.dataset.sound).play().catch(()=>{}); } if (!catchingUp) cursor = Math.max(cursor, data.message.id); }
-        if (data.type === 'message_deleted') {const article=document.getElementById(`message-${data.id}`);(article?.closest('[data-stream-message]')||article)?.remove();formatMessageGroups();}
-        if (data.type === 'message_updated') { const article=document.getElementById(`message-${data.id}`);const node=article?.querySelector('[data-message-presentation]'); if(node&&!article.querySelector('.inline-edit')) {if(data.html!==undefined&&data.html!==null)node.innerHTML=`<div class='trix-content'>${data.html}</div>`;else node.textContent=data.body;} }
-        if (data.type === 'boost') { const node=document.querySelector(`#message-${data.message_id} .boosts`); if(node&&data.boost_html&&!document.getElementById(`boost_${data.id}`))node.insertAdjacentHTML('beforeend',data.boost_html); }
-        if (data.type === 'boost_deleted') document.getElementById(`boost_${data.id}`)?.remove();
+      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
       } catch {}
     });
     socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});
