@@ -41,10 +41,10 @@ body:has(.app-shell)>header { display: none; }
 .sidebar-directs #direct_rooms .direct:hover { background: var(--chat-bubble); }
 .sidebar-directs #direct_rooms .direct.unread::after { content: '●'; position: absolute; top: 55px; left: 50%; font-size: 9px; color: #d86b2e; line-height: 1; transform: translateX(-50%); }
 .direct-placeholders form { flex: none; margin: 0; }
-.direct-placeholder { display: grid; justify-items: center; align-content: start; gap: 3px; min-width: 56px; max-width: 90px; height: 64px; padding: 0; border: 0; background: transparent; color: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
-.direct-placeholder img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; }
-.direct-placeholder span { max-width: 100%; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.direct-placeholder:hover,.direct-placeholder:focus-visible { border-radius: 8px; background: var(--chat-bubble); }
+.direct-placeholders button.direct { display: grid; justify-items: center; align-content: start; gap: 3px; min-width: 56px; max-width: 90px; height: 64px; padding: 0; border: 0; background: transparent; color: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
+.direct-placeholders button.direct img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; }
+.direct-placeholders button.direct .direct__author { max-width: 100%; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.direct-placeholders button.direct:hover,.direct-placeholders button.direct:focus-visible { border-radius: 8px; background: var(--chat-bubble); }
 .sidebar-rooms { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px 13.3px; }
 .sidebar-rooms nav { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .sidebar .sidebar-rooms .room { display: inline-flex; align-items: center; min-height: 40px; max-width: 100%; padding: 8px 17px; border: 1px solid var(--chat-border); border-radius: 20px; background: var(--chat-bg); color: var(--chat-text); font-size: 16px; line-height: 22px; text-decoration: none; }

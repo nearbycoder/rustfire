@@ -402,21 +402,24 @@ def main():
             assert code == 200 and "id='ping-form'" in ping_page and "id='ping-suggestions'" in ping_page
             assert "type='checkbox' name='user_ids'" not in ping_page
             admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
-            assert "data-ping-user-id='2'" in admin_sidebar
-            assert f"name='authenticity_token' value='{CSRF[admin]}'" in admin_sidebar
+            assert 'action="/rooms/directs?user_ids%5B%5D=2"' in admin_sidebar
+            assert f'name="authenticity_token" value="{CSRF[admin]}"' in admin_sidebar
             second_admin = client()
             assert request(second_admin, base, "/session/new")[0] == 200
             assert request(second_admin, base, "/session", {"email_address": "admin@example.com", "password": "password123"})[0] == 200
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as workers:
-                creations = list(workers.map(lambda opener: request(opener, base, "/rooms/directs", {"user_ids": "2"}), [admin, second_admin]))
+                creations = list(workers.map(lambda pair: request(pair[0], base, pair[1], pair[2]), [
+                    (admin, "/rooms/directs?user_ids%5B%5D=2", {}),
+                    (second_admin, "/rooms/directs", {"user_ids": "2"}),
+                ]))
             code, direct_url, _ = creations[0]
             assert creations[1][0] == 200 and creations[1][1] == direct_url, creations
             assert code == 200 and "/rooms/3" in direct_url
             admin_sidebar = request(admin, base, "/users/me/sidebar")[2]
-            assert "data-ping-user-id='2'" not in admin_sidebar
+            assert 'action="/rooms/directs?user_ids%5B%5D=2"' not in admin_sidebar
             assert re.search(r'<a class="direct" id="list_rooms_direct_3"[^>]*href="/rooms/3">\s*<span class="avatar">\s*<img aria-hidden="true" src="/users/[^\"]+/avatar\?v=\d+" width="48" height="48"', admin_sidebar)
             assert '<span class="for-screen-reader">Ping with</span>\n          Member' in admin_sidebar
-            assert "data-ping-user-id='1'" not in request(member, base, "/users/me/sidebar")[2]
+            assert 'action="/rooms/directs?user_ids%5B%5D=1"' not in request(member, base, "/users/me/sidebar")[2]
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM rooms WHERE type='Rooms::Direct'").fetchone() == (1,)
                 assert check_db.execute("SELECT name FROM rooms WHERE id=3").fetchone() == (None,)

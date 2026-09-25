@@ -3050,11 +3050,11 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
         .map_err(db_err)?;
     let placeholder_limit = (19 - direct_participants).max(0);
     let mut placeholder_query = db
-        .prepare("SELECT id,name FROM users WHERE status=0 AND id!=?1 AND id NOT IN (SELECT m2.user_id FROM memberships m1 JOIN rooms r ON r.id=m1.room_id JOIN memberships m2 ON m2.room_id=r.id WHERE m1.user_id=?1 AND r.type='Rooms::Direct') ORDER BY created_at,id LIMIT ?2")
+        .prepare("SELECT id,name,updated_at FROM users WHERE status=0 AND id!=?1 AND id NOT IN (SELECT m2.user_id FROM memberships m1 JOIN rooms r ON r.id=m1.room_id JOIN memberships m2 ON m2.room_id=r.id WHERE m1.user_id=?1 AND r.type='Rooms::Direct') ORDER BY created_at,id LIMIT ?2")
         .map_err(db_err)?;
     let placeholders = placeholder_query
         .query_map(params![u.id, placeholder_limit], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            Ok(SidebarMember { id: row.get(0)?, name: row.get(1)?, updated_at: row.get(2)? })
         })
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
@@ -3093,13 +3093,16 @@ fn sidebar(s: &AppState, u: &User, active: Option<i64>) -> Result<String, Status
         )?);
     }
     html.push_str("</nav><div id='direct-placeholders' class='direct-placeholders' aria-label='People you can ping'>");
-    for (id, name) in placeholders {
-        let first_name = name.split_whitespace().next().unwrap_or(&name);
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    for member in placeholders {
+        let first_name = member.name.split_whitespace().next().unwrap_or(&member.name);
+        let avatar = avatar_path(avatar_key, member.id, &member.updated_at)?;
         html.push_str(&format!(
-            "<form method='post' action='/rooms/directs' data-ping-user-id='{id}'><input type='hidden' name='user_ids[]' value='{id}'><input type='hidden' name='authenticity_token' value='{}'><button type='submit' class='direct-placeholder' aria-label='Start a ping with {}'><img src='/users/{id}/avatar' alt=''><span>{}</span></button></form>",
+            "<form class=\"button_to\" method=\"post\" action=\"/rooms/directs?user_ids%5B%5D={}\"><button class=\"direct borderless fill-transparent unpad\" type=\"submit\">\n  <span class=\"avatar\">\n    <img aria-hidden=\"true\" src=\"{}\" />\n  </span>\n\n  <span class=\"direct__author flex align-center gap max-width min-width border-radius txt-small\">\n    <span class=\"txt-nowrap overflow-ellipsis\">\n      <span class=\"for-screen-reader\">Start a ping with</span>\n      {}\n    </span>\n  </span>\n</button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form>",
+            member.id,
+            avatar,
+            esc(first_name),
             esc(u.csrf_token.as_deref().unwrap_or("")),
-            esc(&name),
-            esc(first_name)
         ));
     }
     html.push_str("</div></div><div class='sidebar-rooms'><nav id='shared_rooms'>");
@@ -5586,10 +5589,12 @@ async fn direct_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppRe
 async fn direct_create(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     RawForm(raw): RawForm,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let (_, mut ids) = fields(&raw);
+    ids.extend(fields(uri.query().unwrap_or("").as_bytes()).1);
     ids.push(u.id);
     ids.sort_unstable();
     ids.dedup();
