@@ -283,7 +283,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   }
   messages.addEventListener('scroll',()=>{updateReturnButton();if(messages.scrollTop<240)loadOlder();else if(historyMode&&nearBottom())loadNewer()},{passive:true});
   let catchingUp = false;
-  async function catchUp() {
+  async function catchUp(reason='connection') {
     if (catchingUp||historyMode) return;
     catchingUp = true;
     const wasNearBottom=nearBottom();
@@ -297,7 +297,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
         if(!page.has_more||!page.messages.length)break;
       }
-      const refreshed=await fetch(`/rooms/${roomId}/refresh?since=${lastRefreshAt}`,{headers:{Accept:'text/vnd.turbo-stream.html'}});
+      const refreshed=await fetch(`/rooms/${roomId}/refresh?since=${lastRefreshAt}&reason=${encodeURIComponent(reason)}`,{headers:{Accept:'text/vnd.turbo-stream.html'}});
       if(!refreshed.ok)throw Error(`Room refresh returned ${refreshed.status}`);
       applyRoomStream(await refreshed.text());
       lastRefreshAt=Math.max(lastRefreshAt,...Array.from(messages.querySelectorAll('.message[data-message-updated-at]'),node=>Number(node.dataset.messageUpdatedAt)||0));
@@ -307,13 +307,26 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     } catch (error) { console.error('Could not refresh room', error); }
     finally { catchingUp = false; }
   }
-  window.addEventListener('online',()=>catchUp());
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden)catchUp()});
   let socket;
+  let lastSocketBeat=0;
+  let reconnectTimer;
+  let offlineTimer=null;
+  let hiddenAt=null;
+  const fields=document.querySelector('#composer [data-composer-target="fields"]');
+  const scheduleOffline=()=>{if(fields.disabled||offlineTimer!==null)return;offlineTimer=setTimeout(()=>{offlineTimer=null;fields.disabled=true;window.dispatchEvent(new CustomEvent('refresh-room:offline'));},5000)};
+  const heartbeatConnected=()=>{clearTimeout(offlineTimer);offlineTimer=null;fields.disabled=false;window.dispatchEvent(new CustomEvent('refresh-room:online'));catchUp('connection')};
+  scheduleOffline();
+  window.addEventListener('online',()=>{if(socket?.readyState===WebSocket.OPEN&&Date.now()-lastSocketBeat>6000)socket.close();else if(socket?.readyState!==WebSocket.OPEN&&socket?.readyState!==WebSocket.CONNECTING){clearTimeout(reconnectTimer);connect()}});
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){hiddenAt=Date.now();return;}
+    if(hiddenAt&&Date.now()-hiddenAt>60000){catchUp('visibility');refreshSidebar();window.dispatchEvent(new CustomEvent('refresh-room:visible'))}
+    hiddenAt=null;
+  });
   const signedStreamName=chat.querySelector('turbo-cable-stream-source[channel="RoomMessagesChannel"]')?.getAttribute('signed-stream-name');
   const messageIdent=JSON.stringify({channel:'RoomMessagesChannel',signed_stream_name:signedStreamName});
   const typingIdent=JSON.stringify({channel:'TypingNotificationsChannel',room_id:roomId});
   const presenceIdent=JSON.stringify({channel:'PresenceChannel',room_id:roomId});
+  const heartbeatIdent=JSON.stringify({channel:'HeartbeatChannel'});
   const unreadIdent=JSON.stringify({channel:'UnreadRoomsChannel'});
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
@@ -441,13 +454,16 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     }
   }
   function connect() {
-    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/cable`, 'actioncable-v1-json');
-    socket.addEventListener('open', () => { catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,unreadIdent,readIdent,roomListIdent,...sidebarStreamIdents])socket.send(JSON.stringify({command:'subscribe',identifier})); });
-    socket.addEventListener('message', e => {
-      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===messageIdent)catchUp(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(sidebarStreamIdents.includes(frame.identifier)){if(typeof data==='string')applySidebarStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
+    if(socket?.readyState===WebSocket.OPEN||socket?.readyState===WebSocket.CONNECTING)return;
+    const connection=socket=new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/cable`, 'actioncable-v1-json');
+    const monitor=setInterval(()=>{if(connection.readyState===WebSocket.OPEN&&Date.now()-lastSocketBeat>6000)connection.close()},1000);
+    connection.addEventListener('open', () => { lastSocketBeat=Date.now();catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,heartbeatIdent,unreadIdent,readIdent,roomListIdent,...sidebarStreamIdents])connection.send(JSON.stringify({command:'subscribe',identifier})); });
+    connection.addEventListener('message', e => {
+      lastSocketBeat=Date.now();
+      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===heartbeatIdent)heartbeatConnected(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(sidebarStreamIdents.includes(frame.identifier)){if(typeof data==='string')applySidebarStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
       } catch {}
     });
-    socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});
+    connection.addEventListener('close', () => {clearInterval(monitor);if(socket!==connection)return;socket=null;for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();scheduleOffline();reconnectTimer=setTimeout(connect,1500);});
   }
   refreshSidebar();
   connect();
