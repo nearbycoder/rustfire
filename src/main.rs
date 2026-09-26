@@ -557,7 +557,37 @@ fn replace_mention_attachments(
     rendered.push_str(&input[consumed..]);
     Ok(rendered)
 }
+fn strip_unattached_images(input: &str) -> Option<String> {
+    if !input.as_bytes().windows(4).any(|bytes| bytes.eq_ignore_ascii_case(b"<img")) {
+        return None;
+    }
+    let mut document = ParsedHtml::parse_fragment(input);
+    let selector = Selector::parse("img").unwrap();
+    let untrusted = document
+        .select(&selector)
+        .filter(|image| !image.ancestors().any(|ancestor| {
+            ancestor.value().as_element().is_some_and(|element| {
+                element.name() == "action-text-attachment"
+                    || (element.name() == "figure" && element.attr("data-trix-attachment").is_some())
+            })
+        }))
+        .map(|image| image.id())
+        .collect::<Vec<_>>();
+    if untrusted.is_empty() {
+        return None;
+    }
+    for id in untrusted {
+        document.tree.get_mut(id).unwrap().detach();
+    }
+    Some(document.root_element().inner_html())
+}
+#[cfg(test)]
 fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
+    let cleaned = strip_unattached_images(input);
+    let input = cleaned.as_deref().unwrap_or(input);
+    rich_body_trusted(input, request_host)
+}
+fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String) {
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
         .link_rel(None)
@@ -4655,13 +4685,14 @@ fn insert_message(
     };
     let db = pool(s)?;
     let (plain, body_html) = if rich && !body.trim().is_empty() {
+        let cleaned = strip_unattached_images(body);
         let trusted = replace_mention_attachments(
-            body,
+            cleaned.as_deref().unwrap_or(body),
             &db,
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
         )?;
-        let (plain, html) = rich_body(&trusted, request_host);
+        let (plain, html) = rich_body_trusted(&trusted, request_host);
         (plain, Some(html))
     } else {
         (body.trim().to_string(), None)
@@ -5371,9 +5402,10 @@ async fn message_update(
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let (plain, body_html, body_source, used_inline) = if rich {
         let normalized = action_text_webhook_html(body);
+        let cleaned = strip_unattached_images(&normalized);
         let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
         let (inline, used) = render_imported_inline_files(
-            &normalized,
+            cleaned.as_deref().unwrap_or(&normalized),
             &db,
             mid,
             &s.mention_signing_key,
@@ -5387,7 +5419,7 @@ async fn message_update(
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
         )?;
-        let (plain, html) = rich_body(
+        let (plain, html) = rich_body_trusted(
             &trusted,
             headers
                 .get(header::HOST)
@@ -9902,11 +9934,12 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source, missing_search) in &batch {
-            let (inline, _) = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key, blob_key, true)
+            let cleaned = strip_unattached_images(source);
+            let (inline, _) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
-            let (plain, html) = rich_body(&trusted, None);
+            let (plain, html) = rich_body_trusted(&trusted, None);
             if *missing_search {
                 tx.execute("UPDATE messages SET body=?1,body_html=?2 WHERE id=?3", params![plain, html, id])?;
             } else {
@@ -10363,6 +10396,14 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(super::rich_body(input, None).0, expected, "{input}");
         }
+    }
+    #[test]
+    fn rich_text_removes_unattached_images() {
+        let (plain, html) = super::rich_body("<div>Hello <img src='https://evil.example/image.svg'>World</div>", None);
+        assert_eq!(plain, "Hello World");
+        assert!(!html.contains("<img") && !html.contains("evil.example"), "{html}");
+        let (_, preview) = super::rich_body("<div><action-text-attachment content-type='application/vnd.actiontext.opengraph-embed' href='https://example.com' url='https://example.com/image.png' filename='Example' caption='Description'></action-text-attachment></div>", None);
+        assert!(preview.contains("<img"), "{preview}");
     }
 
     #[test]

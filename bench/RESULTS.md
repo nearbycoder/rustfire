@@ -748,3 +748,7 @@ The optional read mode added 40 distinct solo URL previews to each disposable ap
 | Yes | 3,068 / 15.95 ms | 1,852 / 32.00 ms | 364,410 / 389,051 |
 
 Rustfire was faster on this checked preview-rich read route in both short runs. The complete page matches as parsed HTML under the stated normalizations, but the raw bytes differ and writes were outside the timed interval. This does not establish parity or a speed advantage for other rich-text constructs or the whole application.
+
+## Rich-text sanitization parity
+
+`python bench/paired_rich_filters.py` compared the complete parsed message presentation after posting four identical rich bodies to disposable Campfire and Rustfire instances. Both apps removed a standalone remote `<img>` while preserving surrounding text; stripped event-handler attributes and a data-URL link destination; and retained a normal link, bold/code text, and a list. Rustfire now filters submitted images before rendering verified mentions and imported inline attachments, so their generated avatars and previews remain visible. The full HTTP smoke and Campfire importer tests passed after this ordering change. This checks the four sampled cases, not every ActionText tag or attachment path, and adds no new performance result.
