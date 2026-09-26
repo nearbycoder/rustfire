@@ -185,10 +185,22 @@ if(newRoomPanel){
   if(savedName!==null&&nameInput){nameInput.value=savedName;sessionStorage.removeItem('rustfire-new-room-name');}
   const filterInput=newRoomPanel.querySelector('menu #search');
   if(filterInput){
-    const people=[...newRoomPanel.querySelectorAll('[data-filter-target="list"] > li[data-value]')];
+    const list=newRoomPanel.querySelector('[data-filter-target="list"]');
+    const menu=filterInput.closest('[data-controller~="filter"]');
+    const activeClass=menu?.dataset.filterActiveClass||'filter--active';
+    const selectedClass=menu?.dataset.filterSelectedClass||'selected';
+    let filterTimer;
     filterInput.addEventListener('input',()=>{
-      const query=filterInput.value.trim().toLocaleLowerCase();
-      for(const person of people)person.hidden=!person.dataset.value.includes(query);
+      clearTimeout(filterTimer);
+      filterTimer=setTimeout(()=>{
+        list.classList.remove(activeClass);
+        list.querySelectorAll(`.${selectedClass}`).forEach(person=>person.classList.remove(selectedClass));
+        if(filterInput.value==='')return;
+        let matches;
+        try{matches=list.querySelectorAll(`[data-value*=${filterInput.value.toLowerCase()}]`);}catch{return;}
+        matches.forEach(person=>person.classList.add(selectedClass));
+        list.classList.add(activeClass);
+      },300);
     });
   }
   newRoomPanel.querySelector('[data-turbo-action="replace"]')?.addEventListener('click',event=>{
