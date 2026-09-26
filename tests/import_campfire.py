@@ -122,6 +122,7 @@ def main():
             filtered_body = "<div>  Before<section><p>Nested <em>text</em></p></section>After  </div>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(10,'Message',11,'body',?,?,?)", (filtered_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
+            fixture.execute("UPDATE sqlite_sequence SET seq=20 WHERE name='boosts'")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
             file_bytes = b"x" * 1234
@@ -232,6 +233,7 @@ def main():
                 ("https://push.example.test/1", "rotated-p256dh", "rotated-auth"),
             ]
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='messages'").fetchone() == (20,)
+            assert imported.execute("SELECT last_id FROM id_sequences WHERE name='boosts'").fetchone() == (20,)
             assert imported.execute("SELECT count(*) FROM sqlite_master WHERE name='import_missing_search'").fetchone() == (0,)
             assert imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=1").fetchone() == (
                 "Hello\n• One\n• Two", source_body, source_body,

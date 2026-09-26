@@ -158,7 +158,8 @@ def main():
             assert code == 200 and return_url.endswith(f"/rooms/1/@{message['id']}") and "hello from smoke" in page, (code, return_url, page[:300])
             boost_since = int(time.time() * 1000)
             time.sleep(.02)
-            code, _, page = request(admin, base, f"/messages/{message['id']}/boosts", {"content": "👍"})
+            assert request(admin, base, f"/messages/{message['id']}/boosts", {"content": "ignored"})[0] == 400
+            code, _, page = request(admin, base, f"/messages/{message['id']}/boosts", {"boost[content]": "👍"})
             assert code == 200 and "👍" in page
             code, _, payload = request(admin, base, f"/rooms/1/refresh?since={boost_since}", headers={"Accept": "text/vnd.turbo-stream.html"})
             assert code == 200 and "action='replace' target='message_test-1'" in payload and "👍" in payload

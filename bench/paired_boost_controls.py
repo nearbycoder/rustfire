@@ -100,7 +100,28 @@ def check_app(name, port, cookie, csrf, database, samples):
     samples.joinpath(f"{name}-deleted.html").write_text(body)
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT count(*) FROM boosts WHERE message_id=1").fetchone() == (0,)
-    return status, anonymous
+    edge_results = []
+    for label, fields in (
+        ("missing", {}),
+        ("top-level", {"content": "ignored"}),
+        ("empty", {"boost[content]": ""}),
+        ("spaces", {"boost[content]": "   "}),
+        ("long", {"boost[content]": "x" * 20}),
+    ):
+        edge_status, _, _ = request(port, cookie, "POST", "/messages/1/boosts", csrf, fields)
+        edge_results.append((label, edge_status))
+    with sqlite3.connect(database) as db:
+        contents = [row[0] for row in db.execute("SELECT content FROM boosts WHERE message_id=1 ORDER BY id")]
+    assert edge_results == [
+        ("missing", 400), ("top-level", 400),
+        ("empty", 302), ("spaces", 302), ("long", 302),
+    ], (name, edge_results)
+    assert contents == ["", "   ", "x" * 20], (name, contents)
+    edge_status, _, edge_body = request(port, cookie, "GET", "/messages/1/boosts",
+                                        frame="boosting_message_boost-fixture")
+    assert edge_status == 200, (name, edge_status)
+    samples.joinpath(f"{name}-edge-list.html").write_text(edge_body)
+    return status, anonymous, edge_results, contents
 
 
 def main():
@@ -143,8 +164,9 @@ def main():
                                ("new", "new_boost_message_boost-fixture"),
                                ("index-direct", "boosting_message_boost-fixture"),
                                ("new-direct", "new_boost_message_boost-fixture"),
-                               ("created", "boosting_message_boost-fixture")):
-                ignore_csrf = key in ("created", "new-direct")
+                               ("created", "boosting_message_boost-fixture"),
+                               ("edge-list", "boosting_message_boost-fixture")):
+                ignore_csrf = key in ("created", "new-direct", "edge-list")
                 rust_markup = structure((temp / f"rustfire-{key}.html").read_text(), frame, ignore_csrf)
                 camp_markup = structure((temp / f"campfire-{key}.html").read_text(), frame, ignore_csrf)
                 mismatches = []
@@ -157,7 +179,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired boost index/new frames, create/delete actions, and anonymous redirect")
+    print("PASS paired boost frames, create/delete, anonymous redirect, and raw form edge cases")
 
 
 if __name__ == "__main__":

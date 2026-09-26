@@ -9755,16 +9755,9 @@ async fn boost_create(
         .map_err(db_err)?;
     let (rid, client_message_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     room_for(&s, u.id, rid)?;
-    let content = f
-        .get("boost[content]")
-        .or_else(|| f.get("content"))
-        .map(|s| s.as_str())
-        .unwrap_or("👍");
-    if content.trim().is_empty() || content.chars().count() > 16 {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let content = f.get("boost[content]").ok_or(StatusCode::BAD_REQUEST)?;
     db.execute(
-        "INSERT INTO boosts(message_id,booster_id,content,created_at) VALUES(?1,?2,?3,?4)",
+        "INSERT INTO boosts(id,message_id,booster_id,content,created_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM boosts))+1 FROM id_sequences WHERE name='boosts'),?1,?2,?3,?4)",
         params![mid, u.id, content, now()],
     )
     .map_err(db_err)?;
@@ -9897,7 +9890,7 @@ async fn bot_boost_create(
     let client_message_id = client_message_id.ok_or(StatusCode::NOT_FOUND)?;
     let created = now();
     db.execute(
-        "INSERT INTO boosts(message_id,booster_id,content,created_at) VALUES(?1,?2,?3,?4)",
+        "INSERT INTO boosts(id,message_id,booster_id,content,created_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM boosts))+1 FROM id_sequences WHERE name='boosts'),?1,?2,?3,?4)",
         params![mid, bot.id, content, created],
     )
     .map_err(db_err)?;
@@ -10247,6 +10240,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
+        INSERT INTO id_sequences(name,last_id) VALUES('boosts',COALESCE((SELECT MAX(id) FROM boosts),0)) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS boost_id_track AFTER INSERT ON boosts BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='boosts'; END;
         CREATE TABLE IF NOT EXISTS searches(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,query TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,query));
         CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id,id);CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id,created_at,id);CREATE INDEX IF NOT EXISTS idx_messages_room_updated ON messages(room_id,updated_at,id);CREATE INDEX IF NOT EXISTS idx_messages_creator_id ON messages(creator_id,id);CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);CREATE INDEX IF NOT EXISTS idx_boosts_message ON boosts(message_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS message_search_index USING fts5(body, tokenize=porter);
