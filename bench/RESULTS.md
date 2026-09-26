@@ -1117,7 +1117,14 @@ The same four-room rich-text workload was attempted at **12,000** authenticated 
 
 Rustfire passed a separate run on the same fixture and host: **70,741 checked reads, zero errors, 2,357 reads/s, and 54.00 ms read p95**. All 360 scheduled rich posts finished by 29.19 seconds, inside the 30-second window. Every expected **1,080,000 message appends**, **1,080,000 unread events**, and **4,506,000 presence read events** arrived. The run also checked saved message rows, final pages, and captured event IDs. Rustfire's sampled peak server PSS was 1,870.30 MiB. The compact [Rustfire result](results/rich-browser-12k-rust-only.json) and [Campfire failure reports](results/rich-browser-12k-camp-failures.json) retain the detailed counts.
 
-These are separate single-app runs because the paired harness stopped on Campfire's read failures before it could start Rustfire. The 12,000-socket Rustfire run did not compare append markup with Campfire at this point; the earlier 8,000-socket paired runs did. The two Campfire failures show it did not meet this workload's checked-read gate under these settings. The test still does not identify either app's maximum connections, quantify connection setup rate, prove long-term stability, or establish whole-app feature parity.
+The harness now records read and writer failures without aborting the second app. A subsequent **Campfire-first paired run** used the same 12,000-socket fixture, 64 checked readers, 30-second window, and 12 rich posts/s. Both apps saved all 360 posts and delivered all **1,080,000/1,080,000** message appends, **1,080,000/1,080,000** unread events, and **4,506,000/4,506,000** presence read events. All **1,440** paired captured append structures matched, and final pages and event IDs validated. Neither app had missing or unexpected socket events or early closes.
+
+| App | Successful reads/s | Read errors / p95 | Write p95 / last write | Peak server PSS |
+|---|---:|---:|---:|---:|
+| Campfire | 157 | 7 / 1,135.19 ms | 662.18 ms / 48.47 s | 6,998.00 MiB |
+| Rustfire | 2,230 | 0 / 56.02 ms | 43.23 ms / 29.20 s | 1,881.67 MiB |
+
+Rustfire served **14.22×** as many successful checked reads per second in this order, with zero errors, met the writer deadline, and used about **3.72× less sampled peak server PSS**. Campfire's first recorded read error was a timeout awaiting response headers. Its seven read errors and 18.47-second writer deadline miss make the paired harness exit nonzero; its successful-read rate is not a passing throughput result. The [paired report](results/rich-browser-12k-paired-camp-first.json) preserves per-room writes, every capture group, and the strict failure status. The earlier separate runs above remain useful evidence of variation, but this single paired trial does not identify either app's maximum connections, quantify connection setup rate, prove long-term stability, or establish whole-app feature parity. Repeat in reverse order and on separate hosts before using this as a deployment capacity claim.
 
 ## Push-subscription registration identity
 

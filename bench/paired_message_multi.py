@@ -143,7 +143,7 @@ def writer(port, rid, uid, cookie, csrf, count, seconds, result, rich_writes):
             samples.append((time.monotonic() - begun) * 1000)
         result.update({"room": rid, "user": uid, "writes": len(samples), "latencies": samples, "elapsed_s": time.monotonic() - started})
     except Exception as error:
-        result["error"] = repr(error)
+        result.update({"room": rid, "user": uid, "writes": len(samples), "latencies": samples, "elapsed_s": time.monotonic() - started, "error": repr(error)})
     finally:
         connection.close()
 
@@ -223,22 +223,28 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
             resource_stop.set()
             sampler.join()
             resource_samples.append(resource_snapshot(resource_pids))
-        assert all(not thread.is_alive() for thread in threads), "Writer did not finish"
-        assert all("error" not in item and item.get("writes") == count for item in writes), writes
-        deadline_met = all(item["elapsed_s"] <= seconds for item in writes)
+        writers_complete = all(not thread.is_alive() for thread in threads) and all("error" not in item and item.get("writes") == count for item in writes)
+        deadline_met = writers_complete and all(item["elapsed_s"] <= seconds for item in writes)
         report = json.loads(stdout.strip().splitlines()[-1])
         (event_dir / f"{label}-reader.json").write_text(json.dumps({"report": report, "stderr": stderr, "reader_exit_code": reader.returncode}, indent=2))
-        assert reader.returncode == 0 and report["errors"] == 0, (report, stderr)
-        latencies = sorted(sample for item in writes for sample in item["latencies"])
-        output = {"reads": report, "writes": {"count": len(latencies), "p95_ms": latencies[int(.95 * (len(latencies) - 1))], "max_elapsed_s": max(item["elapsed_s"] for item in writes), "deadline_met": deadline_met, "per_room": [{"room": item["room"], "user": item["user"], "count": item["writes"], "elapsed_s": round(item["elapsed_s"], 3)} for item in writes]}}
+        reads_complete = reader.returncode == 0 and report["errors"] == 0
+        latencies = sorted(sample for item in writes for sample in item.get("latencies", []))
+        output = {"reads": report, "reads_complete": reads_complete, "reader_exit_code": reader.returncode, "writes": {"count": len(latencies), "p95_ms": latencies[int(.95 * (len(latencies) - 1))] if latencies else None, "max_elapsed_s": max((item.get("elapsed_s", 0) for item in writes), default=0), "complete": writers_complete, "deadline_met": deadline_met, "per_room": [{"room": item.get("room", rid), "user": item.get("user"), "count": item.get("writes", 0), "elapsed_s": round(item.get("elapsed_s", 0), 3), **({"error": item["error"]} if "error" in item else {})} for rid, item in enumerate(writes, 1)]}}
         if captures:
             deliveries = []
             for rid, uid, capture in captures:
-                stdout, stderr = capture.communicate(timeout=max(90, seconds + 75))
-                delivery = json.loads(stdout.strip().splitlines()[-1])
-                deliveries.append({"room": rid, "user": uid, "capture_exit_code": capture.returncode, **delivery})
-            complete = all(item["capture_exit_code"] == 0 and item["missed"] == item["unexpected"] == item["closed_early"] == 0 for item in deliveries)
-            output["sockets"] = {"per_room": deliveries, "expected": sum(item["expected"] for item in deliveries), "received": sum(item["received"] for item in deliveries), "complete": complete}
+                try:
+                    capture_stdout, _ = capture.communicate(timeout=max(90, seconds + 75))
+                    delivery = json.loads(capture_stdout.strip().splitlines()[-1])
+                    deliveries.append({"room": rid, "user": uid, "capture_exit_code": capture.returncode, **delivery})
+                except (subprocess.TimeoutExpired, IndexError, json.JSONDecodeError) as error:
+                    if capture.poll() is None:
+                        capture.kill()
+                        capture.communicate()
+                    expected = sockets_per_room // socket_users_per_room * count
+                    deliveries.append({"room": rid, "user": uid, "capture_exit_code": capture.returncode, "expected": expected, "received": None, "missed": None, "unexpected": None, "closed_early": None, "error": repr(error)})
+            complete = all(item["capture_exit_code"] == 0 and item.get("missed") == item.get("unexpected") == item.get("closed_early") == 0 for item in deliveries)
+            output["sockets"] = {"per_room": deliveries, "expected": sum(item["expected"] for item in deliveries), "received": sum(item["received"] for item in deliveries if item["received"] is not None), "unreported_groups": sum(item["received"] is None for item in deliveries), "complete": complete}
         if resource_samples:
             output["resources"] = {
                 "server_cpu_seconds": round(resource_samples[-1][1] - resource_samples[0][1], 3),
@@ -342,6 +348,13 @@ def check_paired_socket_markup(camp_db, rust_db, directory, groups, count):
     return len(groups) * count
 
 
+def record_validation(result, name, check, *args):
+    try:
+        check(*args)
+    except Exception as error:
+        result.setdefault("validation_errors", []).append(f"{name}: {error!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rooms", type=int, default=4)
@@ -401,11 +414,11 @@ def main():
                     identities = {uid: ("session_token=benchmark-session", "benchmark-csrf") if uid == 1 else (f"session_token=multi-session-{uid}", f"multi-csrf-{uid}") for uid in range(1, args.users + 1)}
                     pages = [fetch(rust_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
                     result = measure(binary, rust_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "rustfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid,) if args.resources else (), args.rich_writes)
+                    record_validation(result, "final pages", check_final_pages, rust_port, identities[1][0], rust_db, args.rooms, False)
+                    if args.sockets_per_room and result["sockets"]["complete"]:
+                        record_validation(result, "socket events", check_socket_events, rust_db, event_dir, "rustfire", groups, count)
                     if args.sample_dir:
                         (event_dir / "rustfire-result.json").write_text(json.dumps(result, indent=2))
-                    check_final_pages(rust_port, identities[1][0], rust_db, args.rooms, False)
-                    if args.sockets_per_room and result["sockets"]["complete"]:
-                        check_socket_events(rust_db, event_dir, "rustfire", groups, count)
                     return pages, result
                 finally:
                     stop_server(process)
@@ -418,11 +431,11 @@ def main():
                         identities = {uid: campfire_login(camp_port, uid) for uid in range(1, args.users + 1)}
                         pages = [fetch(camp_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
                         result = measure(binary, camp_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "campfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid, redis.pid) if args.resources else (), args.rich_writes)
+                        record_validation(result, "final pages", check_final_pages, camp_port, identities[1][0], camp_db, args.rooms, True)
+                        if args.sockets_per_room and result["sockets"]["complete"]:
+                            record_validation(result, "socket events", check_socket_events, camp_db, event_dir, "campfire", groups, count)
                         if args.sample_dir:
                             (event_dir / "campfire-result.json").write_text(json.dumps(result, indent=2))
-                        check_final_pages(camp_port, identities[1][0], camp_db, args.rooms, True)
-                        if args.sockets_per_room and result["sockets"]["complete"]:
-                            check_socket_events(camp_db, event_dir, "campfire", groups, count)
                         return pages, result
                     except Exception:
                         log.flush()
@@ -445,8 +458,10 @@ def main():
             redis.wait(timeout=10)
             redis_log.close()
         if args.only_rustfire:
-            check_saved(rust_db, args.rooms, args.users, count, False)
-            complete = not args.sockets_per_room or rust_result["sockets"]["complete"]
+            record_validation(rust_result, "saved messages", check_saved, rust_db, args.rooms, args.users, count, False)
+            if args.sample_dir:
+                (event_dir / "rustfire-result.json").write_text(json.dumps(rust_result, indent=2))
+            complete = rust_result["reads_complete"] and rust_result["writes"]["complete"] and not rust_result.get("validation_errors") and (not args.sockets_per_room or rust_result["sockets"]["complete"])
             deadline = rust_result["writes"]["deadline_met"]
             print("PASS Rustfire single-app load point" if complete and deadline else "FAIL Rustfire single-app load point")
             print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "rustfire": rust_result}, sort_keys=True))
@@ -454,8 +469,10 @@ def main():
                 raise SystemExit(1)
             return
         if args.only_campfire:
-            check_saved(camp_db, args.rooms, args.users, count, True)
-            complete = not args.sockets_per_room or camp_result["sockets"]["complete"]
+            record_validation(camp_result, "saved messages", check_saved, camp_db, args.rooms, args.users, count, True)
+            if args.sample_dir:
+                (event_dir / "campfire-result.json").write_text(json.dumps(camp_result, indent=2))
+            complete = camp_result["reads_complete"] and camp_result["writes"]["complete"] and not camp_result.get("validation_errors") and (not args.sockets_per_room or camp_result["sockets"]["complete"])
             deadline = camp_result["writes"]["deadline_met"]
             print("PASS Campfire single-app load point" if complete and deadline else "FAIL Campfire single-app load point")
             print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "campfire": camp_result}, sort_keys=True))
@@ -464,14 +481,26 @@ def main():
             return
         for camp_page, rust_page in zip(camp_pages, rust_pages):
             check_message_markup(camp_page, rust_page, 40)
-        check_saved(rust_db, args.rooms, args.users, count, False)
-        check_saved(camp_db, args.rooms, args.users, count, True)
+        record_validation(rust_result, "saved messages", check_saved, rust_db, args.rooms, args.users, count, False)
+        record_validation(camp_result, "saved messages", check_saved, camp_db, args.rooms, args.users, count, True)
+        if args.sample_dir:
+            (event_dir / "rustfire-result.json").write_text(json.dumps(rust_result, indent=2))
+            (event_dir / "campfire-result.json").write_text(json.dumps(camp_result, indent=2))
         deliveries_complete = not args.sockets_per_room or rust_result["sockets"]["complete"] and camp_result["sockets"]["complete"]
-        checked_events = check_paired_socket_markup(camp_db, rust_db, event_dir, groups, count) if args.sockets_per_room and deliveries_complete else 0
+        reads_complete = rust_result["reads_complete"] and camp_result["reads_complete"]
+        checked_events = 0
+        paired_validation_errors = []
+        if args.sockets_per_room and deliveries_complete:
+            try:
+                checked_events = check_paired_socket_markup(camp_db, rust_db, event_dir, groups, count)
+            except Exception as error:
+                paired_validation_errors.append(f"paired socket markup: {error!r}")
         deadlines_met = rust_result["writes"]["deadline_met"] and camp_result["writes"]["deadline_met"]
-        print("PASS paired multi-room, multi-user mixed message workload" if deadlines_met and deliveries_complete else "FAIL paired workload missed a writer deadline or socket delivery")
-        print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "stream_markup_checked_events": checked_events, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
-        if not deadlines_met or not deliveries_complete:
+        validation_complete = not paired_validation_errors and not rust_result.get("validation_errors") and not camp_result.get("validation_errors")
+        passed = deadlines_met and deliveries_complete and reads_complete and validation_complete
+        print("PASS paired multi-room, multi-user mixed message workload" if passed else "FAIL paired workload missed a reader, writer deadline, socket delivery, or validation")
+        print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "stream_markup_checked_events": checked_events, "paired_validation_errors": paired_validation_errors, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
+        if not passed:
             raise SystemExit(1)
 
 
