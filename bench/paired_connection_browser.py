@@ -1,4 +1,4 @@
-"""Compare browser offline composer state and missed-message reconnect catch-up."""
+"""Compare room tab visibility, offline state, and missed-message catch-up."""
 
 from datetime import datetime, timezone
 import json
@@ -33,12 +33,42 @@ def seed_missed(database, rails):
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y-%m-%d %H:%M:%S.%f") if rails else now.isoformat()
     with sqlite3.connect(database) as db:
-        assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        message_id = db.execute("SELECT COALESCE(MAX(id),0)+1 FROM messages").fetchone()[0]
         if rails:
-            db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(1,1,1,'browser-missed',?1,?1)", (stamp,))
-            db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Missed while offline','Message',1,?1,?1)", (stamp,))
+            db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?1,1,1,'browser-missed',?2,?2)", (message_id, stamp))
+            db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body','Missed while offline','Message',?1,?2,?2)", (message_id, stamp))
         else:
-            db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,body,created_at,updated_at) VALUES(1,1,1,'browser-missed','Missed while offline',?1,?1)", (stamp,))
+            db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,body,created_at,updated_at) VALUES(?1,1,1,'browser-missed','Missed while offline',?2,?2)", (message_id, stamp))
+
+
+def membership(database):
+    with sqlite3.connect(database) as db:
+        return db.execute("SELECT connections,unread_at FROM memberships WHERE room_id=1 AND user_id=1").fetchone()
+
+
+def wait_connections(database, expected, seconds=15):
+    for _ in range(seconds * 4):
+        result = membership(database)
+        if result[0] == expected:
+            return result
+        time.sleep(0.25)
+    raise AssertionError((expected, result))
+
+
+def set_unread(database, rails):
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f" if rails else "%Y-%m-%dT%H:%M:%S.%fZ")
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE memberships SET unread_at=? WHERE room_id=1 AND user_id=1", (stamp,))
+
+
+def wait_post(database):
+    for _ in range(100):
+        with sqlite3.connect(database) as db:
+            row = db.execute("SELECT client_message_id FROM messages ORDER BY id DESC LIMIT 1").fetchone()
+        if row:
+            return row[0]
+        time.sleep(0.1)
+    raise AssertionError("Browser message was not saved")
 
 
 def check(session, port, database, rails, holder, restart):
@@ -51,7 +81,31 @@ def check(session, port, database, rails, holder, restart):
     browser(session, "wait", "--load", "networkidle")
     browser(session, "eval", "window.__connectionEvents=[];window.addEventListener('refresh-room:offline',()=>window.__connectionEvents.push('offline'));window.addEventListener('refresh-room:online',()=>window.__connectionEvents.push('online'))")
     wait_for(session, False)
+    wait_connections(database, 1)
     assert browser(session, "eval", "!!document.querySelector('#message_browser-missed')").strip() == "false"
+
+    browser(session, "fill", "#composer trix-editor", "Current room message")
+    browser(session, "press", "Enter")
+    posted_id = wait_post(database)
+    browser(session, "wait", f"#message_{posted_id}[data-message-id]")
+    time.sleep(0.5)
+    assert browser(session, "eval", "document.querySelector('#sidebar a[href=\"/rooms/1\"]')?.classList.contains('unread')").strip() == "false"
+
+    set_unread(database, rails)
+    browser(session, "tab", "new", "about:blank")
+    time.sleep(1)
+    browser(session, "tab", "close")
+    browser(session, "tab", "t1")
+    time.sleep(6)
+    assert membership(database)[0] == 1 and membership(database)[1] is not None, membership(database)
+
+    browser(session, "tab", "new", "about:blank")
+    wait_connections(database, 0)
+    set_unread(database, rails)
+    browser(session, "tab", "close")
+    browser(session, "tab", "t1")
+    wait_connections(database, 1)
+    assert membership(database)[1] is None, membership(database)
 
     stop_server(holder["process"])
     holder["process"] = None
@@ -114,7 +168,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS offline composer disabling and missed-message reconnect match Campfire")
+    print("PASS current-room unread, brief and long tab visibility, offline composer, and reconnect match Campfire")
 
 
 if __name__ == "__main__":

@@ -331,7 +331,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
   let sidebarStreamIdents=[];
-  const markRoom=(rid,unread)=>document.querySelectorAll(`#sidebar a[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
+  const markRoom=(rid,unread)=>document.querySelectorAll(`#sidebar a[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread&&rid!==roomId);if(unread&&rid!==roomId&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
     if(sidebarRefreshPending){sidebarRefreshAgain=true;return;}
@@ -409,9 +409,20 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   }
   const sendTyping=action=>{if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({command:'message',identifier:typingIdent,data:JSON.stringify({action})}));};
   const sendPresence=action=>{if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({command:'message',identifier:presenceIdent,data:JSON.stringify({action})}));};
-  setInterval(()=>{if(!document.hidden)sendPresence('refresh');},50000);
+  let presenceConnected=false;
+  let presenceWasVisible=true;
+  let presenceRefreshTimer=null;
+  const startPresenceRefresh=()=>{if(presenceRefreshTimer===null)presenceRefreshTimer=setInterval(()=>sendPresence('refresh'),50000)};
+  const stopPresenceRefresh=()=>{clearInterval(presenceRefreshTimer);presenceRefreshTimer=null};
   let visibilityTimer;
-  document.addEventListener('visibilitychange',()=>{clearTimeout(visibilityTimer);visibilityTimer=setTimeout(()=>sendPresence(document.hidden?'absent':'present'),5000);});
+  document.addEventListener('visibilitychange',()=>{
+    clearTimeout(visibilityTimer);
+    visibilityTimer=setTimeout(()=>{
+      if(!presenceConnected)return;
+      if(document.hidden&&presenceWasVisible){stopPresenceRefresh();sendPresence('absent');presenceWasVisible=false}
+      else if(!document.hidden&&!presenceWasVisible){sendPresence('present');startPresenceRefresh();presenceWasVisible=true;markRoom(roomId,false)}
+    },5000);
+  });
   function applyRoomStream(html){
     const streamDocument=new DOMParser().parseFromString(html,'text/html');
     for(const stream of streamDocument.querySelectorAll('turbo-stream')){
@@ -460,10 +471,10 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     connection.addEventListener('open', () => { lastSocketBeat=Date.now();catchingUp = false; for(const identifier of [messageIdent,typingIdent,presenceIdent,heartbeatIdent,unreadIdent,readIdent,roomListIdent,...sidebarStreamIdents])connection.send(JSON.stringify({command:'subscribe',identifier})); });
     connection.addEventListener('message', e => {
       lastSocketBeat=Date.now();
-      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===heartbeatIdent)heartbeatConnected(); if(frame.identifier===presenceIdent&&document.hidden)sendPresence('absent'); if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(sidebarStreamIdents.includes(frame.identifier)){if(typeof data==='string')applySidebarStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
+      try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===heartbeatIdent)heartbeatConnected(); if(frame.identifier===presenceIdent){presenceConnected=true;startPresenceRefresh();markRoom(roomId,false)} if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(sidebarStreamIdents.includes(frame.identifier)){if(typeof data==='string')applySidebarStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
       } catch {}
     });
-    connection.addEventListener('close', () => {clearInterval(monitor);if(socket!==connection)return;socket=null;for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();scheduleOffline();reconnectTimer=setTimeout(connect,1500);});
+    connection.addEventListener('close', () => {clearInterval(monitor);if(socket!==connection)return;socket=null;presenceConnected=false;stopPresenceRefresh();for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();scheduleOffline();reconnectTimer=setTimeout(connect,1500);});
   }
   refreshSidebar();
   connect();
