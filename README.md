@@ -116,6 +116,8 @@ The 400-socket mixed trial was also repeated with four distinct socket users in 
 
 A later 30-second, four-room rich-text workload with 4,000 sockets subscribed to eight browser channels delivered all 360,000 expected message appends and unread events per app in both server orders. Rustfire served 3.76–4.77× as many checked page reads per second. Rustfire met every writer deadline; Campfire missed one order's 30-second deadline by 15 ms. This is a sampled load point, not a reliable maximum-capacity or whole-app parity result.
 
+At 8,000 sockets under the same workload, both apps delivered all 720,000 expected message appends and unread events per trial. Rustfire met the 30-second writer deadline in both server orders; Campfire's last writer finished 5.14–6.33 seconds late. Rustfire served 8.47–11.79× as many checked reads per second. This demonstrates more capacity for the tested rich-text browser-channel mix, while maximum scale, longer steady-state behavior, and complete feature parity remain open.
+
 A separate 30-second JPEG upload/read trial with 100 signed room sockets, 64 checked readers, and 60 real multipart image uploads per app passed in both orders. Rustfire served 1.96–2.00× as many checked reads per second, had lower upload p95 in those socket runs, and both apps delivered all 6,000 expected image appends. The paired probe checked the final parsed page and original stored bytes; this remains a sampled workload rather than a full-app speed or capacity claim.
 
 ## Checks

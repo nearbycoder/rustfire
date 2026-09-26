@@ -1040,3 +1040,14 @@ The same command with `--sockets-per-room 1000` ran in both server orders: 4,000
 Rustfire served **3.76–4.77×** as many checked reads per second at this load, with lower read and write p95 in both orders. Campfire's 15 ms deadline miss is close to measurement noise, so these two runs do not establish a reliable write-capacity boundary. The apps and load clients shared one host; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Peak PSS includes the server processes and Campfire Redis, not the load clients. Setup time, connection rate, longer steady-state behavior, untested features, and maximum supported scale remain unmeasured.
 
 The full reports are in `bench/results/rich-browser-4k-camp-first.json` and `bench/results/rich-browser-4k-rust-first.json`. The latter records the strict writer-deadline failure even though all events arrived and markup comparisons passed.
+
+### Eight thousand browser-channel sockets
+
+The same four-room, 64-reader, 30-second rich-text workload ran in both orders with `--sockets-per-room 2000`: 8,000 authenticated sockets across four rooms, four identities per room, and eight browser channels per socket. Both apps saved all 360 rich posts and delivered **720,000/720,000** message appends, **720,000/720,000** unread events, and **2,004,000/2,004,000** presence read events during setup. All 1,440 paired captured append structures matched; neither app had checked read errors, missing or unexpected events, or early socket closes. Rustfire met the 30-second writer deadline in both orders. Campfire completed every write and delivery, but its last writer finished **5.14–6.33 seconds after** the deadline, so both paired trials returned a strict failure.
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 / last write | Rustfire peak PSS MiB | Campfire reads/s / read p95 | Campfire write p95 / last write | Campfire peak PSS MiB |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 2,616 / 43.29 ms | 44.69 ms / 29.20 s | 1,259.91 | 309 / 931.44 ms | 584.20 ms / 36.33 s | 5,714.23 |
+| Yes | 2,609 / 42.77 ms | 39.07 ms / 29.20 s | 1,264.07 | 221 / 898.65 ms | 618.77 ms / 35.14 s | 5,478.42 |
+
+Rustfire served **8.47–11.79×** as many checked reads per second at this sampled load. The two trials demonstrate that Rustfire sustained this specific 8,000-socket, 12-posts/s workload within its 30-second write window while Campfire did not under the same settings. All Campfire events still arrived; the failure is a throughput deadline, not data loss. Connection setup is outside the timed interval, and the apps and load clients shared one host. This does not establish maximum supported connections, a production deployment limit, hours-long stability, or a whole-app advantage at full parity. The full reports are in `bench/results/rich-browser-8k-camp-first.json` and `bench/results/rich-browser-8k-rust-first.json`.
