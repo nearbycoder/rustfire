@@ -19,9 +19,20 @@ const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const currentUserId=document.querySelector('meta[name="current-user-id"]')?.content||document.body.dataset.userId||'';
 document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
 document.addEventListener('keydown',event=>{
-  if(event.key!=='Enter'||(!event.ctrlKey&&!event.metaKey)||event.shiftKey||event.altKey)return;
-  const form=event.target instanceof Element?event.target.closest('.custom-styles-panel form'):null;
-  if(form){event.preventDefault();form.requestSubmit();}
+  const form=event.target instanceof Element?event.target.closest('form[data-controller~="form"]'):null;
+  if(!form||event.defaultPrevented||event.isComposing)return;
+  const actions=form.dataset.action||'';
+  if(event.key==='Escape'&&actions.includes('keydown.esc->form#cancel')){
+    form.querySelector('[data-form-target="cancel"]')?.click();
+  }else if(event.key==='Enter'){
+    const modifier=event.ctrlKey?'ctrl':event.metaKey?'meta':'';
+    const action=modifier?`keydown.${modifier}+enter->form#submit`:'keydown.enter->form#submit';
+    const targetActions=event.target.dataset?.action||'';
+    if(actions.includes(action)||targetActions.includes(action)){
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  }
 });
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatReplyLinks=root=>root.querySelectorAll('[data-reply-target="body"] a').forEach(link=>{link.target=link.href.startsWith(location.origin)?'_top':'_blank';});
@@ -760,7 +771,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   messages.addEventListener('submit', async e => {
     const deleteForm=e.target.closest('form[id^="delete_form_message_"]');
     if(deleteForm){
-      e.preventDefault();if(!confirm('Are you sure you want to delete this message?'))return;
+      e.preventDefault();
       const response=await fetch(deleteForm.action,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken}});
       if(response.ok){deleteForm.closest('.message').remove();formatMessageGroups()}
       else alert('Could not delete message');
@@ -919,13 +930,13 @@ document.addEventListener('change',event=>{
   const control=event.target;
   if(control instanceof HTMLInputElement){
     if(control.matches('form[data-auto-submit-file] input[type=file]')&&control.files?.length)control.form.requestSubmit();
-    if(control.matches('form[data-auto-submit-switch] input[type=checkbox],.account-settings input[data-action="change->form#submit"]'))control.form.requestSubmit();
+    if(control.matches('form[data-auto-submit-switch] input[type=checkbox],input[data-action~="change->form#submit"]'))control.form.requestSubmit();
     if(control.matches('#account_users input[data-action="form#submit"][name="user[role]"]'))control.form.requestSubmit();
   }
 });
 document.addEventListener('submit',event=>{
-  const confirmation=event.target instanceof HTMLFormElement?event.target.querySelector('button[data-turbo-confirm]'):null;
-  if(confirmation&&!window.confirm(confirmation.dataset.turboConfirm))event.preventDefault();
+  const confirmation=event.submitter?.getAttribute('data-turbo-confirm');
+  if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopImmediatePropagation();}
 },true);
 document.addEventListener('submit',async event=>{
   const form=event.target;
