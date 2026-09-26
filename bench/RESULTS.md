@@ -1,5 +1,20 @@
 # Preliminary Rustfire measurements
 
+## Paired QR code response parity
+
+`python bench/paired_qr.py` compared ten invitation-like URLs, alphanumeric strings, and numeric strings against pinned Campfire's `rqrcode` 3.2.0 renderer and running HTTP endpoint. The SVG bodies matched byte for byte, including source-selected masks, high error correction, and a numeric input that exactly fills a smaller QR version but causes Campfire to choose the next version. The actual routes returned matching content type, one-year public cache control, weak ETag, and Vary header; all ten conditional requests returned matching empty 304 responses. The parity probe does not check malformed IDs or every QR capacity transition.
+
+`python bench/paired_qr.py --benchmark --clients 32 --seconds 3 --campfire-workers 22 --report bench/results/qr-reads.json` then measured a warm **31,362-byte** invitation-shaped SVG in both server orders. One Rustfire release process and 22 Campfire Puma workers shared a 32-logical-CPU host with the load generator. Each of 32 keep-alive clients warmed its connection twice. Every measured 200 response matched the same SVG SHA-256 and ETag; every conditional 304 had an empty body and the same ETag. All trials had zero errors.
+
+| Rustfire first | Response | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| :---: | :---: | ---: | ---: |
+| Yes | 200 | 15,929 / 3.64 ms | 2,416 / 30.71 ms |
+| Yes | 304 | 33,224 / 2.04 ms | 2,958 / 17.88 ms |
+| No | 200 | 14,178 / 4.01 ms | 2,244 / 28.62 ms |
+| No | 304 | 32,457 / 2.13 ms | 2,866 / 19.74 ms |
+
+Rustfire served **6.32–6.59×** as many full QR reads and **11.23–11.33×** as many conditional reads in these three-second trials. The [raw report](results/qr-reads.json) contains counts and latencies. This is a single QR value, same-host, short read test; it does not measure multi-value QR traffic, page rendering, connection setup, resource use, maximum scale, or a whole-app advantage at full parity.
+
 ## Paired message attachment MIME detection
 
 `python bench/paired_attachment_mime.py` passed against pinned Campfire `91d294f`. The browser message POST path stored JPEG and PNG bytes labeled `text/plain` as `image/jpeg` and `image/png`, BMP bytes labeled `image/jpeg` as `image/bmp`, and QuickTime bytes labeled `text/plain` as `video/quicktime` in both apps. Each original saved file had the same SHA-256 as the submitted bytes, and each normalized Turbo message response had the same parsed presentation. A text file labeled JPEG caused HTTP 500 in both apps after the message and original attachment were persisted; the saved metadata and bytes matched. This probes four valid signatures and one malformed image. It does not compare error-page bodies, all media formats, or upload performance.

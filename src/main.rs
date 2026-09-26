@@ -29,7 +29,7 @@ use openssl::{
     pkey::PKey,
     sign::Signer,
 };
-use qrcodegen::{QrCode, QrCodeEcc};
+use qrcodegen::{Mask, QrCode, QrCodeEcc, QrSegment, QrSegmentMode, Version};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use regex::Regex;
@@ -2377,7 +2377,96 @@ async fn unfurl_link(
         None => Ok(StatusCode::NO_CONTENT.into_response()),
     }
 }
-async fn qr_code_show(Path(id): Path<String>) -> AppResult {
+fn campfire_qr_mask_score(code: &QrCode) -> f64 {
+    // RQRCode chooses a mask from a trial matrix with the format and version
+    // bits unset. Its four demerit rules differ from qrcodegen's mask scoring.
+    let size = code.size() as usize;
+    let mut modules = (0..size)
+        .flat_map(|y| (0..size).map(move |x| code.get_module(x as i32, y as i32)))
+        .collect::<Vec<_>>();
+    for i in 0..15 {
+        let row = if i < 6 { i } else if i < 8 { i + 1 } else { size - 15 + i };
+        let col = if i < 8 { size - i - 1 } else if i == 8 { 7 } else { 15 - i - 1 };
+        modules[row * size + 8] = false;
+        modules[8 * size + col] = false;
+    }
+    modules[(size - 8) * size + 8] = false;
+    if code.version().value() >= 7 {
+        for i in 0..18 {
+            modules[(i / 3) * size + i % 3 + size - 11] = false;
+            modules[(i % 3 + size - 11) * size + i / 3] = false;
+        }
+    }
+    let at = |x: usize, y: usize| modules[y * size + x];
+    let mut score = 0usize;
+    for y in 0..size {
+        for x in 0..size {
+            let dark = at(x, y);
+            let mut neighbors = 0;
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx != 0 || dy != 0)
+                        && x.checked_add_signed(dx).is_some_and(|nx| nx < size)
+                        && y.checked_add_signed(dy).is_some_and(|ny| ny < size)
+                        && at(x.checked_add_signed(dx).unwrap(), y.checked_add_signed(dy).unwrap()) == dark {
+                        neighbors += 1;
+                    }
+                }
+            }
+            if neighbors > 5 { score += 3 + neighbors - 5; }
+            if x + 1 < size && y + 1 < size
+                && dark == at(x + 1, y)
+                && dark == at(x, y + 1)
+                && dark == at(x + 1, y + 1) {
+                score += 3;
+            }
+        }
+    }
+    let pattern = [true, false, true, true, true, false, true];
+    for y in 0..size {
+        for x in 0..=size - 7 {
+            if (0..7).all(|offset| at(x + offset, y) == pattern[offset]) { score += 40; }
+            if (0..7).all(|offset| at(y, x + offset) == pattern[offset]) { score += 40; }
+        }
+    }
+    let dark_count = modules.iter().filter(|value| **value).count();
+    score as f64 + ((100.0 * dark_count as f64 / (size * size) as f64 - 50.0).abs() / 5.0) * 10.0
+}
+fn campfire_qr_code(url: &str) -> Result<QrCode, StatusCode> {
+    let segments = QrSegment::make_segments(url);
+    let segment = segments.first().ok_or(StatusCode::BAD_REQUEST)?;
+    // RQRCode's version search uses a strict less-than capacity check.
+    // Numeric input with 34 digits, for example, exactly fills version 2
+    // and therefore renders as version 3 in Campfire.
+    const HIGH_CAPACITY_BITS: [usize; 40] = [
+        72, 128, 208, 288, 368, 480, 528, 688, 800, 976,
+        1120, 1264, 1440, 1576, 1784, 2024, 2264, 2504, 2728, 3080,
+        3248, 3536, 3712, 4112, 4304, 4768, 5024, 5288, 5608, 5960,
+        6344, 6760, 7208, 7688, 7888, 8432, 8768, 9136, 9776, 10208,
+    ];
+    let version = HIGH_CAPACITY_BITS.iter().enumerate().find_map(|(index, capacity)| {
+        let count_bits = match segment.mode() {
+            QrSegmentMode::Numeric => [10, 12, 14],
+            QrSegmentMode::Alphanumeric => [9, 11, 13],
+            _ => [8, 16, 16],
+        }[(index + 1 > 26) as usize + (index + 1 > 9) as usize];
+        let used = 4 + count_bits + segment.data().len();
+        (used < *capacity).then(|| Version::new((index + 1) as u8))
+    }).ok_or(StatusCode::BAD_REQUEST)?;
+    let mut best: Option<(f64, QrCode)> = None;
+    for mask in 0..8 {
+        let code = QrCode::encode_segments_advanced(
+            &segments, QrCodeEcc::High, version, version,
+            Some(Mask::new(mask)), false,
+        ).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let score = campfire_qr_mask_score(&code);
+        if best.as_ref().is_none_or(|(lowest, _)| score < *lowest) {
+            best = Some((score, code));
+        }
+    }
+    Ok(best.unwrap().1)
+}
+async fn qr_code_show(Path(id): Path<String>, headers: HeaderMap) -> AppResult {
     if id.len() > 4096 {
         return Err(StatusCode::URI_TOO_LONG);
     }
@@ -2389,28 +2478,36 @@ async fn qr_code_show(Path(id): Path<String>) -> AppResult {
     if url.len() > 2048 || url.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let code = QrCode::encode_text(url, QrCodeEcc::Medium).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let code = campfire_qr_code(url)?;
     let size = code.size();
-    let extent = size + 8;
+    let extent = size * 11;
     let mut svg = format!(
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {extent} {extent}' role='img' aria-label='QR code'><path fill='#fff' d='M0 0h{extent}v{extent}H0z'/><path fill='#000' d='"
+        "<?xml version=\"1.0\" standalone=\"yes\"?><svg version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:ev=\"http://www.w3.org/2001/xml-events\" viewBox=\"0 0 {extent} {extent}\" shape-rendering=\"crispEdges\"><rect width=\"{extent}\" height=\"{extent}\" x=\"0\" y=\"0\" fill=\"white\"/>"
     );
     for y in 0..size {
         for x in 0..size {
             if code.get_module(x, y) {
-                svg.push_str(&format!("M{} {}h1v1h-1z", x + 4, y + 4));
+                svg.push_str(&format!("<rect width=\"11\" height=\"11\" x=\"{}\" y=\"{}\" fill=\"black\"/>", x * 11, y * 11));
             }
         }
     }
-    svg.push_str("'/></svg>");
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "public, max-age=31556952"),
-        ],
-        svg,
-    )
-        .into_response())
+    svg.push_str("</svg>");
+    let digest = openssl::sha::sha256(svg.as_bytes());
+    let etag = format!("W/\"{}\"", digest[..16].iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+    let fresh = headers.get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == "*" || candidate.trim_start_matches("W/") == etag.trim_start_matches("W/")
+        }));
+    let mut response = if fresh { StatusCode::NOT_MODIFIED.into_response() } else { svg.into_response() };
+    response.headers_mut().insert(header::CACHE_CONTROL, "max-age=31556952, public".parse().unwrap());
+    response.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+    if !fresh {
+        response.headers_mut().insert(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8".parse().unwrap());
+        response.headers_mut().insert(header::VARY, "Accept-Encoding".parse().unwrap());
+    }
+    Ok(response)
 }
 fn session_response(token: String, to: &str) -> Response {
     let mut r = found_redirect(to);

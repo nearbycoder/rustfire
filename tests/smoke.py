@@ -247,7 +247,7 @@ def main():
             qr = re.search(r"/qr_code/[\w-]+", page).group(0)
             assert base64.urlsafe_b64decode(qr.rsplit('/', 1)[1] + '===').decode() == f"{base}/join/{join}"
             code, _, svg = request(client(), base, qr)
-            assert code == 200 and "<svg" in svg and "QR code" in svg and "<path" in svg
+            assert code == 200 and '<svg version="1.1"' in svg and 'fill="white"' in svg and '<rect width="11"' in svg
             assert request(client(), base, "/qr_code/not-base64!")[0] == 400
             member = client()
             code, _, join_page = request(member, base, f"/join/{join}")
