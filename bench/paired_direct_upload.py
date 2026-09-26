@@ -195,6 +195,10 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
     for filename, content_type, data in (
         ("sample.html", "text/html", b"<script>alert(1)</script>\n"),
         ("pixel.png", "image/png", PNG),
+        ("vector.svg", "image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'></svg>\n"),
+        ("café résumé.txt", "text/plain", "a Unicode filename\n".encode()),
+        ("автомобиль.txt", "text/plain", b"a non-Latin filename\n"),
+        ("argh+!#&^`~.txt", "text/plain", b"punctuation in filename\n"),
     ):
         extra_path, observations = mime_case(port, cookie, csrf, database, upload_root, campfire,
                                               filename, content_type, data)

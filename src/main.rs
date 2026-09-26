@@ -1041,6 +1041,84 @@ fn encoded_blob_filename(filename: &str) -> String {
         })
         .collect::<String>()
 }
+fn rails_filename_approximation(character: char) -> &'static str {
+    match character {
+        c if "ÀÁÂÃÄÅĀĂĄ".contains(c) => "A",
+        'Æ' => "AE",
+        c if "ÇĆĈĊČ".contains(c) => "C",
+        c if "ÈÉÊËĒĔĖĘĚ".contains(c) => "E",
+        c if "ÌÍÎÏĨĪĬĮİ".contains(c) => "I",
+        c if "ÐĎĐ".contains(c) => "D",
+        c if "ÑŃŅŇ".contains(c) => "N",
+        c if "ÒÓÔÕÖØŌŎŐ".contains(c) => "O",
+        '×' => "x",
+        c if "ÙÚÛÜŨŪŬŮŰŲ".contains(c) => "U",
+        c if "ÝŶŸ".contains(c) => "Y",
+        'Þ' => "Th",
+        'ß' => "ss",
+        'ẞ' => "SS",
+        c if "àáâãäåāăą".contains(c) => "a",
+        'æ' => "ae",
+        c if "çćĉċč".contains(c) => "c",
+        c if "èéêëēĕėęě".contains(c) => "e",
+        c if "ìíîïĩīĭįı".contains(c) => "i",
+        c if "ðďđ".contains(c) => "d",
+        c if "ñńņň".contains(c) => "n",
+        c if "òóôõöøōŏő".contains(c) => "o",
+        c if "ùúûüũūŭůűų".contains(c) => "u",
+        c if "ýÿŷ".contains(c) => "y",
+        'þ' => "th",
+        c if "ĜĞĠĢ".contains(c) => "G",
+        c if "ĝğġģ".contains(c) => "g",
+        c if "ĤĦ".contains(c) => "H",
+        c if "ĥħ".contains(c) => "h",
+        'Ĳ' => "IJ",
+        'ĳ' => "ij",
+        'Ĵ' => "J",
+        'ĵ' => "j",
+        'Ķ' => "K",
+        c if "ķĸ".contains(c) => "k",
+        c if "ĹĻĽĿŁ".contains(c) => "L",
+        c if "ĺļľŀł".contains(c) => "l",
+        'ŉ' => "'n",
+        'Ŋ' => "NG",
+        'ŋ' => "ng",
+        'Œ' => "OE",
+        'œ' => "oe",
+        c if "ŔŖŘ".contains(c) => "R",
+        c if "ŕŗř".contains(c) => "r",
+        c if "ŚŜŞŠ".contains(c) => "S",
+        c if "śŝşš".contains(c) => "s",
+        c if "ŢŤŦ".contains(c) => "T",
+        c if "ţťŧ".contains(c) => "t",
+        'Ŵ' => "W",
+        'ŵ' => "w",
+        c if "ŹŻŽ".contains(c) => "Z",
+        c if "źżž".contains(c) => "z",
+        _ => "?",
+    }
+}
+fn rails_content_disposition(filename: &str, inline: bool) -> String {
+    let ascii = filename.chars().fold(String::new(), |mut result, character| {
+        if character.is_ascii() { result.push(character); }
+        else { result.push_str(rails_filename_approximation(character)); }
+        result
+    });
+    fn percent_escape(value: &str, allowed: &[u8]) -> String {
+        let mut encoded = String::new();
+        for byte in value.bytes() {
+            if allowed.contains(&byte) || byte.is_ascii_alphanumeric() {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        encoded
+    }
+    let traditional = percent_escape(&ascii, b" !\\#$+.^_`|~-");
+    let utf8 = percent_escape(filename, b"!\\#$&+.^_`|~-");
+    format!("{}; filename=\"{traditional}\"; filename*=UTF-8''{utf8}", if inline { "inline" } else { "attachment" })
+}
 fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> {
     let encoded_filename = encoded_blob_filename(filename);
     Ok(format!(
@@ -9714,14 +9792,14 @@ async fn signed_blob_get(
             let (actual_filename, content_type, storage_key, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
             if !uploaded { return Err(StatusCode::NOT_FOUND); }
             let (served_type, inline) = active_storage_serving(&content_type, query.get("disposition").map(String::as_str));
-            let disposition = format!("{}; filename=\"{actual_filename}\"; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, encoded_blob_filename(&actual_filename));
+            let disposition = rails_content_disposition(&actual_filename, inline);
             let token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"content_type":served_type,"disposition":disposition,"service_name":"local"})).map_err(db_err)?;
             return Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{token}/{}", encoded_blob_filename(&actual_filename)))));
         }
         Err(error) => return Err(error),
     };
     let (served_type, inline) = active_storage_serving(&content_type, query.get("disposition").map(String::as_str));
-    let disposition = format!("{}; filename=\"{filename}\"; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, encoded_blob_filename(&filename));
+    let disposition = rails_content_disposition(&filename, inline);
     let disk_token = disk_token(&s.blob_signing_key, "blob_key", json!({
         "key":stored,"attachment_id":id,"filename":filename,"content_type":served_type,
         "disposition":disposition,"service_name":"local"
@@ -9792,18 +9870,7 @@ async fn signed_blob_proxy(
     )
     .await?;
     strip_active_storage_stream_headers(&mut response);
-    if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
-        let disposition = value.to_str().map_err(db_err)?.to_owned();
-        response.headers_mut().insert(
-            header::CONTENT_DISPOSITION,
-            format!(
-                "{disposition}; filename*=UTF-8''{}",
-                encoded_blob_filename(&filename)
-            )
-            .parse()
-            .map_err(db_err)?,
-        );
-    }
+    response.headers_mut().insert(header::CONTENT_DISPOSITION,rails_content_disposition(&filename,inline).parse().map_err(db_err)?);
     if response.status() == StatusCode::OK {
         storage_proxy_cache_headers(&mut response, &etag, &last_modified);
     }
@@ -9917,10 +9984,7 @@ async fn direct_upload_disk_get(
         let (served_type, allowed_inline) = active_storage_serving(&content_type, if inline { None } else { Some("attachment") });
         let mut response = serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,served_type,&headers,inline && allowed_inline).await?;
         response.headers_mut().remove("content-security-policy");
-        if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
-            let disposition = value.to_str().map_err(db_err)?.to_owned();
-            response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(&actual_filename)).parse().map_err(db_err)?);
-        }
+        response.headers_mut().insert(header::CONTENT_DISPOSITION,rails_content_disposition(&actual_filename,inline).parse().map_err(db_err)?);
         return Ok(response);
     }
     if let Some(id) = data.get("attachment_id").and_then(Value::as_i64) {
@@ -9935,10 +9999,7 @@ async fn direct_upload_disk_get(
         }
         let mut response = serve_attachment(&std::path::Path::new(&dir).join(stored),&actual_filename,served_type,&headers,inline && allowed_inline).await?;
         response.headers_mut().remove("content-security-policy");
-        if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
-            let disposition = value.to_str().map_err(db_err)?.to_owned();
-            response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(&actual_filename)).parse().map_err(db_err)?);
-        }
+        response.headers_mut().insert(header::CONTENT_DISPOSITION,rails_content_disposition(&actual_filename,inline).parse().map_err(db_err)?);
         return Ok(response);
     }
     let variant_name = storage_key
@@ -9950,10 +10011,7 @@ async fn direct_upload_disk_get(
     let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
     let mut response = serve_attachment(&std::path::Path::new(&dir).join("variants").join(variant_name),actual_filename,content_type,&headers,inline).await?;
     response.headers_mut().remove("content-security-policy");
-    if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
-        let disposition = value.to_str().map_err(db_err)?.to_owned();
-        response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(actual_filename)).parse().map_err(db_err)?);
-    }
+    response.headers_mut().insert(header::CONTENT_DISPOSITION,rails_content_disposition(actual_filename,inline).parse().map_err(db_err)?);
     Ok(response)
 }
 async fn signed_representation_get(
@@ -10096,18 +10154,12 @@ async fn signed_representation_get(
         stream_headers.remove(header::RANGE);
         let mut response = serve_attachment(&output, &variant_filename, response_type, &stream_headers, inline).await?;
         strip_active_storage_stream_headers(&mut response);
-        if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
-            let disposition = value.to_str().map_err(db_err)?.to_owned();
-            response.headers_mut().insert(
-                header::CONTENT_DISPOSITION,
-                format!("{disposition}; filename*=UTF-8''{}", encoded_blob_filename(&variant_filename)).parse().map_err(db_err)?,
-            );
-        }
+        response.headers_mut().insert(header::CONTENT_DISPOSITION,rails_content_disposition(&variant_filename,inline).parse().map_err(db_err)?);
         storage_proxy_cache_headers(&mut response, &etag, &last_modified);
         return Ok(response);
     }
     let storage_key = format!("variants/{stored}-{kind}.{format}");
-    let disposition = format!("{}; filename=\"{variant_filename}\"; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, encoded_blob_filename(&variant_filename));
+    let disposition = rails_content_disposition(&variant_filename, inline);
     let disk_token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"disposition":disposition,"content_type":response_type,"service_name":"local","filename":variant_filename})).map_err(db_err)?;
     Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{disk_token}/{}", encoded_blob_filename(&variant_filename)))))
 }
