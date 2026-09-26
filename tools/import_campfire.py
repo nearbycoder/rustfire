@@ -55,10 +55,11 @@ def prepare_inline_image(uploads, stored, content_type, width, height):
         for field in ("width", "height"):
             result = subprocess.run(("vipsheader", "-f", field, str(uploads / stored)), capture_output=True, text=True, check=True)
             dimensions.append(int(result.stdout.strip()))
-        if dimensions != [width, height]:
+        if (width is not None and width != dimensions[0]) or (height is not None and height != dimensions[1]):
             raise ValueError(f"inline image {stored} dimensions do not match Active Storage metadata")
         subprocess.run(("vips", "thumbnail", str(uploads / stored), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
         os.replace(temporary, output)
+        return dimensions
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         raise ValueError(f"cannot render inline image {stored} ({content_type})") from error
     finally:
@@ -209,11 +210,11 @@ def import_data(source, target, source_files, uploads):
         if not target.execute("SELECT EXISTS(SELECT 1 FROM inline_blobs WHERE id=?)", (blob_id,)).fetchone()[0]:
             details = json.loads(metadata or "{}")
             width, height = details.get("width"), details.get("height")
-            if content_type in preview_images and (not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0):
-                raise ValueError(f"inline image blob {blob_id} is missing dimensions")
+            if content_type in preview_images and any(value is not None and (type(value) is not int or value <= 0) for value in (width, height)):
+                raise ValueError(f"inline image blob {blob_id} has invalid dimensions")
             stored = store_blob(source_files, uploads, key, size)
             if content_type in preview_images:
-                prepare_inline_image(uploads, stored, content_type, width, height)
+                width, height = prepare_inline_image(uploads, stored, content_type, width, height)
             elif content_type == "application/pdf":
                 prepare_inline_pdf(uploads, stored)
             elif content_type.startswith("video/"):

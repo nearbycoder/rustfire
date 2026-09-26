@@ -405,7 +405,13 @@ def main():
             fixture.execute("UPDATE active_storage_blobs SET metadata=? WHERE id=11", (json.dumps({"width": 2, "height": 1, "identified": True}),))
         invalid_image = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
         assert invalid_image.returncode != 0 and not bad_target.exists() and not bad_uploads.exists()
-        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; unsupported previews fail safely")
+        with sqlite3.connect(source_db) as fixture:
+            fixture.execute("UPDATE active_storage_blobs SET metadata='{}' WHERE id=11")
+        derived_image = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
+        assert derived_image.returncode == 0, derived_image.stderr
+        with sqlite3.connect(bad_target) as imported:
+            assert imported.execute("SELECT width,height FROM inline_blobs WHERE id=11").fetchone() == (1, 1)
+        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; missing image dimensions are derived and inconsistent metadata fails safely")
 
 
 if __name__ == "__main__":

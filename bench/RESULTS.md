@@ -722,3 +722,16 @@ The pinned source replaces each non-word character in a search query with a spac
 ## Inline boost controls and response parity
 
 `python bench/paired_boost_controls.py` now passes on a matched one-message fixture. The source and Rustfire returned the same parsed boost-list and editor frame tags, attribute names and values, and text for both Turbo-frame and direct GET requests. After a boost was created, the populated list frame also matched. The POST created the same saved boost and returned HTTP 302 to the boost list; the browser-style method-override delete removed it and returned HTTP 204 on both apps. Session-specific CSRF values were normalized in the editor; nonempty CSRF inputs were excluded from the cached populated list and direct-page comparison because their presence varied in the source. The existing live append/remove event checks still cover delivery. This verifies the sampled boost interaction, not every account/permission state or a new speed measurement.
+
+## Current-build mixed message rerun after link previews
+
+With Rustfire commit `7bae063` and pinned Campfire `91d294f`, the paired mixed probes were rerun in both server orders on disposable fixtures. The one-room run used 32 readers, 100 scheduled posts in ten seconds, and 100 subscribers. Every measured request passed, both apps saved all 100 posts and delivered 10,000/10,000 expected socket events in each order. Rustfire served 3,218–3,299 reads/s at 14.33–14.75 ms p95; Campfire served 1,448–1,475 reads/s at 40.47–46.18 ms p95. Write p95 was 7.20–8.88 ms for Rustfire and 60.70–92.39 ms for Campfire.
+
+The four-room, four-user rerun used 32 readers, 200 scheduled posts at five per second per room, and 100 subscribers per room. Initial pages, saved rows, final pages, and all 200 paired append structures passed the harness comparisons. Both trial orders completed all writes inside the ten-second read interval and delivered 20,000/20,000 events per app without missing events or early closes. Sampled peak PSS includes the Rustfire server process or Campfire's Puma process tree and isolated Redis; it excludes the local load generator and socket clients.
+
+| Rustfire first | Rustfire reads/s / p95 | Rustfire write p95 | Rustfire peak PSS | Campfire reads/s / p95 | Campfire write p95 | Campfire peak PSS |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 3,199 / 14.89 ms | 25.96 ms | 105.44 MiB | 1,434 / 45.75 ms | 106.67 ms | 3,166.68 MiB |
+| Yes | 3,210 / 14.54 ms | 25.42 ms | 106.73 MiB | 1,345 / 47.57 ms | 113.92 ms | 3,154.76 MiB |
+
+These are same-host, ten-second trials with one Rustfire process, 22 Campfire Puma workers, and one local load generator. They support a speed and sampled-memory advantage for this checked plain-message workload. The parsed structures match after the benchmark's documented normalization, but raw bytes, other message types, notification side effects, and the rest of the application are not yet equivalent. They do not establish whole-app speed or maximum sustainable scale.

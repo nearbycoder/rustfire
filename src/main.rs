@@ -10685,6 +10685,15 @@ mod tests {
         assert!(super::public_web_url("file:///etc/passwd").is_none());
     }
     #[test]
+    fn opengraph_metadata_removes_entity_encoded_markup() {
+        let encoded = "&#x3c;&#x69;&#x6d;&#x67;&#x20;&#x73;&#x72;&#x63;&#x3d;&#x61;&#x20;&#x6f;&#x6e;&#x65;&#x72;&#x72;&#x6f;&#x72;&#x3d;&#x70;&#x72;&#x6f;&#x6d;&#x70;&#x74;&#x28;&#x31;&#x29;&#x3e;";
+        let document = format!("<meta property='og:title' content='{encoded}Hey!'><meta property='og:description' content='{encoded}desc..'>");
+        let tags = super::og_attributes(&document);
+        assert_eq!(super::clean_og_text(tags.get("title").unwrap()), "Hey!");
+        assert_eq!(super::clean_og_text(tags.get("description").unwrap()), "desc..");
+        assert_eq!(super::clean_og_text("<img src='x' onerror='alert(1)'>"), "");
+    }
+    #[test]
     fn opengraph_attachment_content_survives_rich_text_sanitization() {
         let (_, html) = super::rich_body(
             "<figure data-trix-attachment='{}'><div class='og-embed'><a href='https://example.com'>Title</a><p>Description</p><img src='https://example.com/image.png' alt=''></div></figure>",
