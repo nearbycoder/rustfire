@@ -106,7 +106,7 @@ The importer currently stops if Campfire has unsupported or undecodable inline m
 - Content Security Policy and broader security review
 - Full upstream route and test compatibility
 
-See `bench/README.md` for the measurement procedure and `bench/RESULTS.md` for the preliminary Campfire comparison. The apps still produce different response content and side effects, so these measurements do not establish a speed or capacity advantage at feature parity.
+See `bench/README.md` for the measurement procedure and `bench/RESULTS.md` for the preliminary Campfire comparison. A checked four-room plain-message trial with 200 sockets subscribed to eight source-shaped channels showed about 2.18× Rustfire read throughput in both server orders, with all sampled appends, unread events, and presence read events delivered. The apps still produce different response content and side effects outside those checked paths, so these measurements do not establish a speed or capacity advantage at feature parity.
 
 ## Checks
 

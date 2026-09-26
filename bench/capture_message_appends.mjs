@@ -15,6 +15,7 @@ const roomId = Number(args.room ?? 1);
 const clientPrefix = args['client-prefix'] ?? 'mixed';
 const firstId = Number(args['first-id'] ?? 41);
 const timeoutMs = Number(args.timeout ?? 60000);
+const browserChannels = args['browser-channels'] === '1';
 if (!cookie || base.protocol !== 'http:' || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || !Number.isSafeInteger(roomId) || roomId < 1 || !Number.isSafeInteger(firstId) || firstId < 0 || !/^[A-Za-z0-9-]+$/.test(clientPrefix)) {
   throw new Error('Use --base http://host:port --cookie name=value --sockets N --messages N [--room N --client-prefix PREFIX --first-id N]');
 }
@@ -26,15 +27,37 @@ const source = page.match(/<turbo-cable-stream-source\b[^>]*>/gi)?.find(tag => /
 const signedName = source?.match(/\bsigned-stream-name=(['"])(.*?)\1/i)?.[2];
 if (!signedName) throw new Error('Signed room stream is missing');
 const identifier = JSON.stringify({ channel: 'RoomMessagesChannel', signed_stream_name: signedName });
+const readIdentifier = JSON.stringify({ channel: 'ReadRoomsChannel' });
+const unreadIdentifier = JSON.stringify({ channel: 'UnreadRoomsChannel' });
+let browserIdentifiers = [];
+if (browserChannels) {
+  const sidebarResponse = await fetch(new URL('/users/me/sidebar', base), { headers: { Cookie: cookie } });
+  if (!sidebarResponse.ok) throw new Error(`Sidebar returned ${sidebarResponse.status}`);
+  const sidebar = await sidebarResponse.text();
+  const names = [...sidebar.matchAll(/<turbo-cable-stream-source\b[^>]*channel=(['"])Turbo::StreamsChannel\1[^>]*signed-stream-name=(['"])(.*?)\2/gi)].map(match => match[3]);
+  if (names.length !== 2) throw new Error(`Expected two signed sidebar streams, found ${names.length}`);
+  browserIdentifiers = [
+    identifier,
+    JSON.stringify({ channel: 'TypingNotificationsChannel', room_id: roomId }),
+    JSON.stringify({ channel: 'PresenceChannel', room_id: roomId }),
+    unreadIdentifier,
+    JSON.stringify({ channel: 'HeartbeatChannel' }),
+    ...names.map(name => JSON.stringify({ channel: 'Turbo::StreamsChannel', signed_stream_name: name })),
+  ];
+}
 const streamPattern = new RegExp(`<turbo-stream\\b[^>]*\\baction=["']append["'][^>]*\\btarget=["']messages_rooms_open_${roomId}["']`);
 const clientPattern = new RegExp(`\\bid=["']message_${clientPrefix}-(\\d+)["']`);
 const sockets = [];
 const seen = Array.from({ length: socketCount }, () => new Set());
+const unreadSeen = Array(socketCount).fill(0);
+const readSeen = Array(socketCount).fill(0);
 const events = args['events-file'] ? Array(messageCount).fill(null) : null;
 let received = 0;
 let unexpected = 0;
 let closedEarly = 0;
 let sampled = false;
+let unreadReceived = 0;
+let readReceived = 0;
 
 function frame(value) {
   const data = Buffer.from(value);
@@ -56,6 +79,7 @@ function connect(index) {
     let buffer = Buffer.alloc(0);
     let handshake = false;
     let ready = false;
+    const confirmed = new Set();
     const timer = setTimeout(() => reject(new Error(`Socket ${index} timed out`)), timeoutMs);
     const fail = error => {
       if (!ready) { clearTimeout(timer); reject(error); }
@@ -89,12 +113,26 @@ function connect(index) {
         if (opcode !== 1) continue;
         let event;
         try { event = JSON.parse(body.toString()); } catch { unexpected++; continue; }
-        if (event.type === 'welcome') socket.write(frame(JSON.stringify({ command: 'subscribe', identifier })));
-        else if (event.type === 'confirm_subscription' && event.identifier === identifier) {
-          ready = true;
-          clearTimeout(timer);
-          resolve();
-        } else if (event.type === 'reject_subscription' && event.identifier === identifier) fail(new Error(`Socket ${index} rejected`));
+        if (event.type === 'welcome') socket.write(frame(JSON.stringify({ command: 'subscribe', identifier: browserChannels ? readIdentifier : identifier })));
+        else if (event.type === 'confirm_subscription' && (event.identifier === identifier || browserChannels && (event.identifier === readIdentifier || browserIdentifiers.includes(event.identifier)))) {
+          confirmed.add(event.identifier);
+          if (browserChannels && event.identifier === readIdentifier) {
+            for (const next of browserIdentifiers) socket.write(frame(JSON.stringify({ command: 'subscribe', identifier: next })));
+          }
+          if (!ready && confirmed.size === (browserChannels ? browserIdentifiers.length + 1 : 1)) {
+            ready = true;
+            clearTimeout(timer);
+            resolve();
+          }
+        } else if (event.type === 'reject_subscription') fail(new Error(`Socket ${index} rejected ${event.identifier}`));
+        else if (browserChannels && event.identifier === readIdentifier && event.message?.room_id === roomId) {
+          readSeen[index]++;
+          readReceived++;
+        } else if (browserChannels && event.identifier === unreadIdentifier && event.message?.roomId === roomId) {
+          unreadSeen[index]++;
+          unreadReceived++;
+          if (unreadSeen[index] > messageCount) unexpected++;
+        }
         else if (event.identifier === identifier && typeof event.message === 'string') {
           const html = event.message;
           const stream = streamPattern.test(html);
@@ -119,17 +157,18 @@ function connect(index) {
 }
 
 try {
-  for (let start = 0; start < socketCount; start += 50) {
-    await Promise.all(Array.from({ length: Math.min(50, socketCount - start) }, (_, index) => connect(start + index)));
+  for (let start = 0; start < socketCount; start += browserChannels ? 1 : 50) {
+    await Promise.all(Array.from({ length: Math.min(browserChannels ? 1 : 50, socketCount - start) }, (_, index) => connect(start + index)));
   }
   console.log('READY');
   const started = Date.now();
   const expected = socketCount * messageCount;
-  while (received < expected && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
-  if (received === expected) await new Promise(resolve => setTimeout(resolve, 100));
+  const expectedRead = browserChannels ? socketCount * (socketCount + 1) / 2 : 0;
+  while ((received < expected || browserChannels && unreadReceived < expected) && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
+  if (received === expected && (!browserChannels || unreadReceived === expected)) await new Promise(resolve => setTimeout(resolve, 100));
   if (events) fs.writeFileSync(args['events-file'], JSON.stringify(events));
-  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, unexpected, closed_early: closedEarly, sampled, elapsed_ms: Date.now() - started }));
-  if (received !== expected || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;
+  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, unexpected, closed_early: closedEarly, sampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
+  if (received !== expected || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;
 } finally {
   for (const socket of sockets) socket.destroy();
 }
