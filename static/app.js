@@ -51,23 +51,42 @@ document.addEventListener('click',async event=>{
     copy.classList.add(successClass);
   }catch{}
 });
-document.querySelectorAll('.account-settings [data-controller~="web-share"]').forEach(button=>{button.hidden=typeof navigator.canShare!=='function';});
+document.querySelectorAll('[data-controller~="web-share"]').forEach(button=>{button.hidden=typeof navigator.canShare!=='function';});
+const lightboxDialog=document.querySelector('dialog[data-lightbox-target="dialog"]');
+lightboxDialog?.addEventListener('close',()=>{
+  lightboxDialog.querySelector('[data-lightbox-target="zoomedImage"]').src='';
+  lightboxDialog.querySelector('[data-lightbox-target="download"]').href='';
+  lightboxDialog.querySelector('[data-lightbox-target="share"]').dataset.webShareFilesValue='';
+});
+document.addEventListener('click',event=>{
+  const link=event.target.closest('a[data-action~="lightbox#open"],a[data-lightbox]');
+  if(!link||!lightboxDialog)return;
+  event.preventDefault();
+  lightboxDialog.showModal();
+  lightboxDialog.querySelector('[data-lightbox-target="zoomedImage"]').src=link.href;
+  lightboxDialog.querySelector('[data-lightbox-target="download"]').href=link.dataset.lightboxUrlValue||'';
+  lightboxDialog.querySelector('[data-lightbox-target="share"]').dataset.webShareFilesValue=link.dataset.lightboxUrlValue||'';
+});
+document.addEventListener('click',async event=>{
+  const share=event.target.closest('[data-action~="web-share#share"]');
+  if(!share)return;
+  event.preventDefault();
+  const data={title:share.dataset.webShareTitleValue||'',text:share.dataset.webShareTextValue||''};
+  if(share.dataset.webShareUrlValue)data.url=share.dataset.webShareUrlValue;
+  try{
+    if(share.dataset.webShareFilesValue){
+      const response=await fetch(share.dataset.webShareFilesValue);
+      if(!response.ok)throw Error('Could not load shared file');
+      const blob=await response.blob();
+      const filename=`Campfire_${Math.random().toString(36).slice(2)}.${blob.type.split('/').pop()}`;
+      data.files=[new File([blob],filename,{type:blob.type})];
+    }
+    await navigator.share(data);
+  }catch(error){if(error.name!=='AbortError')alert('Could not share');}
+});
 let profileInstallPrompt;
 window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();profileInstallPrompt=event;document.querySelectorAll('.profile-settings [data-controller~="pwa-install"]').forEach(node=>node.classList.add('pwa--can-install'));});
 document.addEventListener('click',event=>{const button=event.target.closest('[data-action~="pwa-install#promptInstall"]');if(button&&profileInstallPrompt){event.preventDefault();profileInstallPrompt.prompt();profileInstallPrompt=undefined;}});
-document.addEventListener('click',async event=>{
-  const settings=event.target.closest('.account-settings, #system_welcome');
-  if(!settings)return;
-  const qr=event.target.closest('[data-action~="lightbox#open"]');
-  if(qr){
-    event.preventDefault();
-    let dialog=document.querySelector('.image-lightbox');
-    if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="Join link QR code">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',e=>{if(e.target===dialog)dialog.close()});document.body.append(dialog)}
-    dialog.querySelector('img').src=qr.href;dialog.showModal();return;
-  }
-  const share=event.target.closest('[data-action~="web-share#share"]');
-  if(share){event.preventDefault();try{await navigator.share({url:share.dataset.webShareUrlValue,title:share.dataset.webShareTitleValue,text:share.dataset.webShareTextValue})}catch(error){if(error.name!=='AbortError')alert('Could not share join link')};}
-});
 document.querySelectorAll('[data-controller~="upload-preview"]').forEach(control=>{
   const input=control.querySelector('[data-upload-preview-target="input"]');
   const image=control.querySelector('[data-upload-preview-target="image"]');
@@ -598,20 +617,6 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       frame.innerHTML=returned.innerHTML;
       if(details)details.open=false;
       frame.querySelector('[name="boost[content]"]')?.focus();
-      return;
-    }
-    const lightbox=e.target.closest('[data-action~="lightbox#open"],[data-lightbox]');
-    if(lightbox){e.preventDefault();let dialog=document.querySelector('.image-lightbox');if(!dialog){dialog=document.createElement('dialog');dialog.className='image-lightbox';dialog.innerHTML='<button type="button" aria-label="Close image">×</button><img alt="">';dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});document.body.append(dialog)}dialog.querySelector('img').src=lightbox.href;dialog.showModal();return;}
-    const share=e.target.closest('[data-action~="web-share#share"]');
-    if(share){
-      e.preventDefault();
-      try{
-        const response=await fetch(share.dataset.webShareFilesValue);
-        if(!response.ok)throw Error('Could not load attachment');
-        const blob=await response.blob();
-        const filename=`Campfire_${Math.random().toString(36).slice(2)}.${blob.type.split('/').pop()}`;
-        await navigator.share({title:share.dataset.webShareTitleValue||'',files:[new File([blob],filename,{type:blob.type})]});
-      }catch(error){if(error.name!=='AbortError')alert('Could not share attachment');}
       return;
     }
     const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }

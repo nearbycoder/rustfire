@@ -971,3 +971,7 @@ Rustfire served **2.12–2.13×** as many checked reads per second and had lower
 ## Only-administrator account behavior
 
 `python bench/paired_last_admin.py` passed against pinned Campfire on a disposable fixture with exactly one administrator. Both apps redirect to `/account/edit` and save the member role when that administrator submits an invalid or missing nested role value or explicitly demotes themselves. Both return 400 for a top-level role field on the source route and 403 for a subsequent administrator action after self-demotion. Both permit the administrator to deactivate themselves, removing their session and open-room membership. This verifies the sampled account mutation paths; it does not establish parity for every role, account state, or recovery workflow.
+
+## Browser lightbox interactions
+
+`python bench/paired_lightbox_browser.py` passed against pinned Campfire in local Chromium. The paired fixture posted the same JPEG to both apps. Opening the room invite QR, uploaded image, and profile QR used the existing dialog in both apps; the image source, download link, and share file URL matched each clicked link. Closing each dialog reset those values, and no separate ad hoc dialog was created. This checks three browser interactions only; it does not measure speed or establish broader media parity.
