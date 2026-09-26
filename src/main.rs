@@ -3956,28 +3956,59 @@ async fn involvement_get(
             |r| r.get(0),
         )
         .map_err(db_err)?;
-    let choices = [
-        ("everything", "Everything"),
-        ("mentions", "Mentions"),
-        ("nothing", "Nothing"),
-        ("invisible", "Invisible"),
-    ]
-    .iter()
-    .map(|(value, label)| {
-        format!(
-            "<option value='{value}' {}>{label}</option>",
-            if *value == current { "selected" } else { "" }
-        )
-    })
-    .collect::<String>();
-    Ok(render(
-        "Notifications",
-        &format!(
-            "<section class='form-card'><h1>{} notifications</h1><form method='post' action='/rooms/{rid}/involvement'><label>Notify me about<select name='involvement'>{choices}</select></label><button class='button'>Save</button></form><p><button type='button' class='button' data-enable-push>Enable browser notifications</button> <a href='/users/me/push_subscriptions'>Manage subscriptions</a></p><p data-push-status role='status'></p></section>",
-            esc(&room.name)
-        ),
-        Some(&u),
-    ))
+    let frame = involvement_frame_html(
+        rid,
+        &room.kind,
+        &current,
+        u.csrf_token.as_deref().unwrap_or(""),
+    );
+    if headers.contains_key("turbo-frame") {
+        let token = esc(u.csrf_token.as_deref().unwrap_or(""));
+        return Ok(Html(format!(
+            "<html><head><meta name=\"csrf-param\" content=\"authenticity_token\"><meta name=\"csrf-token\" content=\"{token}\"></head><body>{frame}</body></html>"
+        ))
+        .into_response());
+    }
+    Ok(render("Notifications", &frame, Some(&u)))
+}
+
+fn involvement_frame_html(rid: i64, kind: &str, current: &str, csrf_token: &str) -> String {
+    let direct = kind == "Rooms::Direct";
+    let order: &[&str] = if direct {
+        &["everything", "nothing"]
+    } else {
+        &["mentions", "everything", "nothing", "invisible"]
+    };
+    let position = order
+        .iter()
+        .position(|level| *level == current)
+        .unwrap_or(0);
+    let next = order[(position + 1) % order.len()];
+    let label = match current {
+        "mentions" => "Notifying about @ mentions",
+        "everything" => "Notifying about all messages",
+        "nothing" => "Notifications are off",
+        "invisible" => "Notifications are off and room invisible in sidebar",
+        _ => "Notifying about @ mentions",
+    };
+    let icon = match current {
+        "mentions" => "notification-bell-mentions-945d1b91.svg",
+        "everything" => "notification-bell-everything-cde41b14.svg",
+        "nothing" => "notification-bell-nothing-d8096c76.svg",
+        "invisible" => "notification-bell-invisible-8b495073.svg",
+        _ => "notification-bell-mentions-945d1b91.svg",
+    };
+    let room_id = match kind {
+        "Rooms::Direct" => format!("rooms_direct_{rid}"),
+        "Rooms::Closed" => format!("rooms_closed_{rid}"),
+        _ => format!("rooms_open_{rid}"),
+    };
+    let frame_id = format!("involvement_{room_id}");
+    let label_id = format!("involvement_label_{room_id}");
+    format!(
+        "<turbo-frame data-controller=\"turbo-frame\" data-action=\"notifications:ready@window-&gt;turbo-frame#load\" data-turbo-frame-url-param=\"/rooms/{rid}/involvement\" id=\"{frame_id}\">\n  <form class=\"button_to\" method=\"post\" action=\"/rooms/{rid}/involvement?involvement={next}\"><input type=\"hidden\" name=\"_method\" value=\"put\" /><button role=\"checkbox\" aria-checked=\"true\" aria-labelledby=\"{label_id}\" tabindex=\"0\" class=\"btn {current}\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/{icon}\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\" id=\"{label_id}\">{label}</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form>\n</turbo-frame>",
+        esc(csrf_token)
+    )
 }
 async fn push_subscriptions_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
