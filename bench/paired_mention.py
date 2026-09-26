@@ -15,15 +15,17 @@ from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, w
 from paired_link_preview import Presentation
 
 
-def mention_sgid(port, cookie, campfire):
+def mention_sgid(port, cookie, campfire, user_id=2):
     path = "/autocompletable/users.json?query=" if campfire else "/autocompletable/users?query="
+    if user_id == 3:
+        path += "User%203"
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
         connection.request("GET", path, headers={"Cookie": cookie, "Accept": "application/json"})
         response = connection.getresponse()
         body = response.read()
         assert response.status == 200, (response.status, body[:300])
-        return next(user["sgid"] for user in json.loads(body) if user["value"] == 2)
+        return next(user["sgid"] for user in json.loads(body) if user["value"] == user_id)
     finally:
         connection.close()
 
@@ -36,7 +38,7 @@ def post(port, cookie, csrf, sgid, case):
     else:
         content = ' content="&lt;span&gt;Untrusted name&lt;/span&gt;"' if case == "embedded-content" else ""
         attachment = f'<action-text-attachment sgid="{html.escape(sgid, quote=True)}" content-type="application/vnd.campfire.mention"{content}></action-text-attachment>'
-    message = f"<div>Hello {attachment}!</div>"
+    message = f"<div>Hello {attachment} {attachment}!</div>" if case == "duplicate" else f"<div>Hello {attachment}!</div>"
     body = urllib.parse.urlencode({"message[body]": message, "message[client_message_id]": client_id, "authenticity_token": csrf})
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
@@ -72,7 +74,8 @@ def main():
             try:
                 rust_cookie, rust_csrf = "session_token=benchmark-session", "benchmark-csrf"
                 rust_sgid = mention_sgid(rust_port, rust_cookie, False)
-                rust_markup = {case: post(rust_port, rust_cookie, rust_csrf, rust_sgid, case) for case in ("bare", "embedded-content", "trix-figure")}
+                rust_nonmember_sgid = mention_sgid(rust_port, rust_cookie, False, 3)
+                rust_markup = {case: post(rust_port, rust_cookie, rust_csrf, rust_nonmember_sgid if case == "nonmember" else rust_sgid, case) for case in ("bare", "embedded-content", "trix-figure", "duplicate", "nonmember")}
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -81,7 +84,8 @@ def main():
                     wait_for_server(camp_port, camp)
                     camp_cookie, camp_csrf = login_campfire(camp_port)
                     camp_sgid = mention_sgid(camp_port, camp_cookie, True)
-                    camp_markup = {case: post(camp_port, camp_cookie, camp_csrf, camp_sgid, case) for case in ("bare", "embedded-content", "trix-figure")}
+                    camp_nonmember_sgid = mention_sgid(camp_port, camp_cookie, True, 3)
+                    camp_markup = {case: post(camp_port, camp_cookie, camp_csrf, camp_nonmember_sgid if case == "nonmember" else camp_sgid, case) for case in ("bare", "embedded-content", "trix-figure", "duplicate", "nonmember")}
                 finally:
                     stop_server(camp)
         finally:
@@ -91,12 +95,21 @@ def main():
         with sqlite3.connect(rust_db) as rust, sqlite3.connect(camp_db) as camp:
             rust_search = rust.execute("SELECT body FROM message_search_index ORDER BY rowid").fetchall()
             camp_search = camp.execute("SELECT body FROM message_search_index ORDER BY rowid").fetchall()
-    assert rust_sgid == camp_sgid, (rust_sgid, camp_sgid)
+            rust_mentions = rust.execute("SELECT m.client_message_id,mm.user_id FROM messages m LEFT JOIN message_mentions mm ON mm.message_id=m.id ORDER BY m.id,mm.user_id").fetchall()
+        runner = 'require "json"; puts JSON.generate(Message.order(:id).map { |m| [m.client_message_id, m.mentionees.pluck(:id)] })'
+        camp_mentions_output = subprocess.check_output([str(RUBY), str(RUBY.parent / "bundle"), "exec", "rails", "runner", runner], cwd=REPOSITORY, env=camp_env, text=True, stderr=subprocess.PIPE)
+        camp_mentions = json.loads(camp_mentions_output.strip().splitlines()[-1])
+    assert (rust_sgid, rust_nonmember_sgid) == (camp_sgid, camp_nonmember_sgid)
     for case in rust_markup:
         assert rust_markup[case] == camp_markup[case], (case, rust_markup[case], camp_markup[case])
-        assert ("a", (("class", "btn avatar"), ("href", "/users/2"), ("title", "Rustfire Compare – Team lead"))) in rust_markup[case]
-    assert rust_search == camp_search == [("Hello @Rustfire Compare!",)] * 3, (rust_search, camp_search)
-    print("PASS signed mention presentation and searchable plain text match pinned Campfire for bare, embedded-content, and Trix figure attachments, including user bio")
+        if case != "nonmember":
+            assert ("a", (("class", "btn avatar"), ("href", "/users/2"), ("title", "Rustfire Compare – Team lead"))) in rust_markup[case]
+    expected_search = [("Hello @Rustfire Compare!",)] * 3 + [("Hello @Rustfire Compare @Rustfire Compare!",), ("Hello @User 3!",)]
+    assert rust_search == camp_search == expected_search, (rust_search, camp_search)
+    rust_mentions = [(client_id, [] if user_id is None else [user_id]) for client_id, user_id in rust_mentions]
+    expected_mentions = [[f"paired-mention-{case}", [2] if case != "nonmember" else []] for case in rust_markup]
+    assert rust_mentions == [tuple(row) for row in camp_mentions] == [tuple(row) for row in expected_mentions], (rust_mentions, camp_mentions)
+    print("PASS signed mention presentation, search text, duplicate recipient deduplication, and nonmember exclusion match pinned Campfire")
 
 
 if __name__ == "__main__":
