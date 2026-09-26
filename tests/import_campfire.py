@@ -64,6 +64,8 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
+            fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
+                VALUES(2,1,'https://push.example.test/1','rotated-p256dh','rotated-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
             for mid in range(1, 12):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             fixture.execute("UPDATE sqlite_sequence SET seq=20 WHERE name='messages'")
@@ -217,10 +219,14 @@ def main():
         result = json.loads(completed.stdout)
         assert result["messages"] == 11 and result["attachments"] == 1 and result["inline_embeds"] == 9, result
         assert result["reindexed_messages"] == 3, result
-        assert result["push_subscriptions"] == 1
+        assert result["push_subscriptions"] == 2
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
             assert imported.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert imported.execute("SELECT endpoint,p256dh_key,auth_key FROM push_subscriptions ORDER BY id").fetchall() == [
+                ("https://push.example.test/1", "test-p256dh", "test-auth"),
+                ("https://push.example.test/1", "rotated-p256dh", "rotated-auth"),
+            ]
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='messages'").fetchone() == (20,)
             assert imported.execute("SELECT count(*) FROM sqlite_master WHERE name='import_missing_search'").fetchone() == (0,)
             assert imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=1").fetchone() == (

@@ -4554,7 +4554,16 @@ async fn push_subscriptions_post(
         .unwrap_or("");
     let db = pool(&s)?;
     let t = now();
-    db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6) ON CONFLICT(user_id,endpoint) DO UPDATE SET p256dh_key=excluded.p256dh_key,auth_key=excluded.auth_key,user_agent=excluded.user_agent,updated_at=excluded.updated_at",params![u.id,value.endpoint,value.p256dh_key,value.auth_key,agent,t]).map_err(db_err)?;
+    let existing: Option<i64> = db.query_row(
+        "SELECT id FROM push_subscriptions WHERE user_id=?1 AND endpoint=?2 AND p256dh_key=?3 AND auth_key=?4 ORDER BY id LIMIT 1",
+        params![u.id, value.endpoint, value.p256dh_key, value.auth_key],
+        |row| row.get(0),
+    ).optional().map_err(db_err)?;
+    if let Some(id) = existing {
+        db.execute("UPDATE push_subscriptions SET updated_at=?1 WHERE id=?2", params![t, id]).map_err(db_err)?;
+    } else {
+        db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)", params![u.id, value.endpoint, value.p256dh_key, value.auth_key, agent, t]).map_err(db_err)?;
+    }
     s.has_push_subscriptions.store(true, Ordering::Relaxed);
     Ok(StatusCode::OK.into_response())
 }
@@ -10189,7 +10198,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         INSERT OR IGNORE INTO account_custom_styles(id,css) VALUES(1,'');
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT NOT NULL,email_address TEXT UNIQUE,password_digest TEXT,role INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 0,bot_token TEXT UNIQUE,bio TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS webhooks(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,url TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS push_subscriptions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,endpoint TEXT NOT NULL,p256dh_key TEXT NOT NULL,auth_key TEXT NOT NULL,user_agent TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,endpoint));
+        CREATE TABLE IF NOT EXISTS push_subscriptions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,endpoint TEXT NOT NULL,p256dh_key TEXT NOT NULL,auth_key TEXT NOT NULL,user_agent TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,token TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,last_active_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS bans(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,ip_address TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(ip_address);
@@ -10226,6 +10235,20 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
+    let old_push_unique: bool = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='push_subscriptions'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?.contains("UNIQUE(user_id,endpoint)");
+    if old_push_unique {
+        let tx = conn.transaction()?;
+        tx.execute_batch("CREATE TABLE push_subscriptions_new(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,endpoint TEXT NOT NULL,p256dh_key TEXT NOT NULL,auth_key TEXT NOT NULL,user_agent TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            INSERT INTO push_subscriptions_new(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) SELECT id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at FROM push_subscriptions;
+            DROP TABLE push_subscriptions;
+            ALTER TABLE push_subscriptions_new RENAME TO push_subscriptions;")?;
+        tx.commit()?;
+    }
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_keys ON push_subscriptions(user_id,endpoint,p256dh_key,auth_key)", [])?;
     let has_search_updated_at: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('searches') WHERE name='updated_at')",
         [],
