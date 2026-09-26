@@ -6,6 +6,7 @@ import html
 import http.client
 import json
 import pathlib
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -62,6 +63,22 @@ def normalized(payload):
             url = urllib.parse.urlsplit(target[key])
             target[key] = url.path + ("?" + url.query if url.query else "")
     return messages
+
+
+def normalized_wire(payload):
+    messages = json.loads(payload)
+    origins = {
+        urllib.parse.urlsplit(message["url"]).scheme + "://" + urllib.parse.urlsplit(message["url"]).netloc
+        for message in messages
+    }
+    assert len(origins) == 1, origins
+    body, timestamp_count = re.subn(
+        rb'"created_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"',
+        b'"created_at":"<timestamp>"',
+        payload.replace(origins.pop().encode(), b"<origin>"),
+    )
+    assert timestamp_count == len(messages), (timestamp_count, len(messages))
+    return body
 
 
 def measure(binary, port, clients, seconds, expected):
@@ -140,12 +157,13 @@ def main():
     rust_messages, camp_messages = normalized(rust_body), normalized(camp_body)
     assert len(rust_messages) == len(camp_messages) == 40
     assert rust_messages == camp_messages, next(((left, right) for left, right in zip(rust_messages, camp_messages) if left != right), None)
+    assert normalized_wire(rust_body) == normalized_wire(camp_body), "Rich-mention JSON bytes differ after origin and creation-time normalization"
     assert all("<action-text-attachment" in item["body"]["html"] for item in rust_messages)
     if args.sample_dir:
         args.sample_dir.mkdir(parents=True, exist_ok=True)
         (args.sample_dir / "rustfire-rich-mentions.json").write_bytes(rust_body)
         (args.sample_dir / "campfire-rich-mentions.json").write_bytes(camp_body)
-    print("PASS all 40 normalized rich-mention bot messages match pinned Campfire; every timed GET matched its own warmed body hash")
+    print("PASS all 40 rich-mention bot messages match pinned Campfire as normalized JSON bytes; every timed GET matched its own warmed body hash")
     def report(body, reads):
         result = {"body_bytes": len(body), "reads": reads}
         if args.slo_ms is not None:

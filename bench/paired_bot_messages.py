@@ -179,6 +179,16 @@ def normalized(payload):
     return messages
 
 
+def normalized_wire(payload):
+    messages = json.loads(payload)
+    origins = {
+        urllib.parse.urlsplit(message["url"]).scheme + "://" + urllib.parse.urlsplit(message["url"]).netloc
+        for message in messages
+    }
+    assert len(origins) == 1, origins
+    return payload.replace(origins.pop().encode(), b"<origin>")
+
+
 def page(port, query):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     try:
@@ -267,10 +277,12 @@ def main():
                 if rust_message != camp_message:
                     raise AssertionError(("Message JSON differs", rust_message, camp_message))
             raise AssertionError("Message-list length differs")
+        assert normalized_wire(rust_body) == normalized_wire(camp_body), "Message-list JSON bytes differ after origin normalization"
         for direction, rust_page, camp_page in zip(("before", "after"), rust_pages, camp_pages):
             if normalized(rust_page) != normalized(camp_page):
                 raise AssertionError((f"{direction} page differs", [item["id"] for item in normalized(rust_page)], [item["id"] for item in normalized(camp_page)]))
-        print(f"messages={args.messages} returned=40 iterations={args.iterations} campfire_workers={args.campfire_workers} attachments={args.include_attachments} scrambled={args.scramble_timestamps} normalized_json_equal=true")
+            assert normalized_wire(rust_page) == normalized_wire(camp_page), f"{direction} page JSON bytes differ after origin normalization"
+        print(f"messages={args.messages} returned=40 iterations={args.iterations} campfire_workers={args.campfire_workers} attachments={args.include_attachments} scrambled={args.scramble_timestamps} normalized_json_equal=true normalized_wire_equal=true")
         print(f"rustfire_median_ms={rust_median:.3f} rustfire_p95_ms={rust_p95:.3f} body_bytes={len(rust_body)}")
         print(f"campfire_median_ms={camp_median:.3f} campfire_p95_ms={camp_p95:.3f} body_bytes={len(camp_body)}")
         for clients in args.clients:

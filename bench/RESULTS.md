@@ -72,6 +72,19 @@ The pinned Campfire build and Rustfire each received 40 signed-mention messages 
 
 Rustfire delivered about **2.2–3.0×** as many checked reads per second in these trials. With an illustrative 250 ms p95 objective, Rustfire met it at all three tested client counts; Campfire met it at 32 clients. This establishes an advantage for this matched read path at the sampled concurrency levels. It does not establish a maximum user count, long-running capacity, or a speed advantage at complete application parity. The client, Redis, SQLite, and servers shared one host; repeat on separate hosts for deployment-scale claims. Reproduce with `python bench/paired_mention_reads.py --clients 32 128 256 --seconds 10 --campfire-workers 22 --slo-ms 250` and `--campfire-first`.
 
+The bot JSON serializer now preserves field order. In a fresh 10-second sweep, the complete 40-message rich-mention response matched Campfire **byte for byte** after replacing only the local server origin and each independently generated `created_at` timestamp. Both raw bodies were 53,003 bytes. Every timed read matched its own warmed SHA-256, with zero errors:
+
+| Clients | Order | Campfire reads/s | Rustfire reads/s | Campfire p95 | Rustfire p95 |
+|---:|---|---:|---:|---:|---:|
+| 32 | Rustfire first | 1,525 | 3,331 | 50.4 ms | 13.8 ms |
+| 32 | Campfire first | 1,110 | 3,145 | 64.5 ms | 14.6 ms |
+| 128 | Rustfire first | 1,405 | 3,109 | 149.9 ms | 65.9 ms |
+| 128 | Campfire first | 1,374 | 3,065 | 138.9 ms | 66.7 ms |
+| 256 | Rustfire first | 1,152 | 3,132 | 336.3 ms | 137.6 ms |
+| 256 | Campfire first | 1,153 | 3,138 | 357.7 ms | 138.8 ms |
+
+Rustfire served **2.18–2.83×** as many checked reads/s in these two orders. With the same illustrative 250 ms p95 objective, Rustfire met it through the largest sampled count of 256 clients; Campfire met it through 128 in these runs. The difference from the earlier Campfire 128-client result shows run variation. These 10-second, same-host trials do not establish maximum supported clients, deployment capacity, or whole-app parity. The [Rustfire-first report](results/rich-mention-reads-wire-rust-first.json) and [Campfire-first report](results/rich-mention-reads-wire-camp-first.json) retain the counts and latencies.
+
 After Rustfire added the five Rails default security headers, the same paired probe ran for five seconds per client count in both trial orders. Every timed response matched its own warmed SHA-256, both response bodies were 53,003 bytes, all 40 normalized messages matched, and neither app returned an error.
 
 | Clients | Order | Campfire reads/s | Rustfire reads/s | Campfire p95 | Rustfire p95 |
@@ -411,6 +424,8 @@ With 10,000 seeded messages and the latest 40 returned, `bench/paired_bot_messag
 | 22 | 128 | 3 s | 3,850 | 1,225 | 53.6 ms | 151.0 ms |
 
 All listed runs had zero HTTP errors. Under a 100 ms p95 threshold for **this read endpoint**, Rustfire met the threshold at every tested concurrency through 128 clients; the 22-worker Campfire run met it through 32 and exceeded it at 64 and 128. A longer trial, independent load generator, more routes, and full feature parity are still required before claiming a general speed or scale advantage for the application.
+
+A later serializer change aligned JSON field order. With 10,000 seeded messages, the latest 40-message responses were both 20,385 bytes and matched byte for byte after replacing only their local origins; the before/after page responses matched under the same normalization. A separate 1,000-message fixture with a text-file attachment and scrambled timestamps also passed the raw-byte check, with both latest-page bodies at 19,879 bytes. The earlier unequal response sizes in the table above describe that historical build. Three serial iterations of the 10,000-message case measured Rustfire median/p95 at 0.577/0.636 ms and Campfire at 22.911/24.300 ms; that small sample is a parity check, not a throughput or capacity estimate.
 
 ## Account logo parity and cached PNG reads
 

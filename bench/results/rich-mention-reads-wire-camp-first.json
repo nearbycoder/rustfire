@@ -1,0 +1,86 @@
+{
+  "campfire": {
+    "body_bytes": 53003,
+    "largest_sampled_clients_under_slo": 128,
+    "reads": {
+      "128": {
+        "clients": 128,
+        "errors": 0,
+        "median_ms": 86.023983,
+        "p95_ms": 138.936847,
+        "p99_ms": 161.969727,
+        "rps": 1374.1993142644849,
+        "seconds": 10.082234692,
+        "successes": 13855
+      },
+      "256": {
+        "clients": 256,
+        "errors": 0,
+        "median_ms": 196.672263,
+        "p95_ms": 357.684519,
+        "p99_ms": 408.153286,
+        "rps": 1152.900328627397,
+        "seconds": 10.253271429,
+        "successes": 11821
+      },
+      "32": {
+        "clients": 32,
+        "errors": 0,
+        "median_ms": 23.777549,
+        "p95_ms": 64.480335,
+        "p99_ms": 110.687054,
+        "rps": 1110.090621650802,
+        "seconds": 10.023505994,
+        "successes": 11127
+      }
+    }
+  },
+  "campfire_first": true,
+  "campfire_workers": 22,
+  "clients": [
+    32,
+    128,
+    256
+  ],
+  "normalized_wire_equal": true,
+  "rustfire": {
+    "body_bytes": 53003,
+    "largest_sampled_clients_under_slo": 256,
+    "reads": {
+      "128": {
+        "clients": 128,
+        "errors": 0,
+        "median_ms": 40.928992,
+        "p95_ms": 66.724119,
+        "p99_ms": 78.676272,
+        "rps": 3065.4369782170756,
+        "seconds": 10.038046849,
+        "successes": 30771
+      },
+      "256": {
+        "clients": 256,
+        "errors": 0,
+        "median_ms": 79.37344,
+        "p95_ms": 138.839064,
+        "p99_ms": 170.657246,
+        "rps": 3138.0536475730096,
+        "seconds": 10.078540252,
+        "successes": 31627
+      },
+      "32": {
+        "clients": 32,
+        "errors": 0,
+        "median_ms": 10.193796,
+        "p95_ms": 14.644889,
+        "p99_ms": 16.616599,
+        "rps": 3145.3820463048214,
+        "seconds": 10.006733534,
+        "successes": 31475
+      }
+    }
+  },
+  "seconds": 10.0,
+  "slo_ms": 250.0,
+  "source_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "wire_normalization": "local URL origin and generated created_at timestamp per message"
+}
