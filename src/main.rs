@@ -5189,9 +5189,14 @@ fn action_text_webhook_html(input: &str) -> String {
                     .as_str()
                     .map(str::to_owned)
                     .unwrap_or_else(|| value.to_string());
+                let escaped = if attribute == "content" {
+                    text.replace('&', "&amp;").replace('"', "&quot;")
+                } else {
+                    html_escape::encode_double_quoted_attribute(&text).into_owned()
+                };
                 Some(format!(
                     " {attribute}=\"{}\"",
-                    html_escape::encode_double_quoted_attribute(&text)
+                    escaped
                 ))
             })
             .collect::<String>();
@@ -10621,6 +10626,11 @@ mod tests {
             "<div><action-text-attachment content-type=\"application/vnd.actiontext.opengraph-embed\" url=\"https://example.com/i.png\" href=\"https://example.com\" filename=\"Example\" caption=\"Some text\"></action-text-attachment></div>"
         );
         assert_eq!(super::action_text_webhook_html("First post!"), "First post!");
+        let mention_with_content = r#"<div><figure data-trix-attachment="{&quot;contentType&quot;:&quot;application/vnd.campfire.mention&quot;,&quot;sgid&quot;:&quot;signed-id&quot;,&quot;content&quot;:&quot;&lt;span class=\&quot;mention\&quot;&gt;Robot &amp; Co&lt;/span&gt;&quot;}">Robot</figure></div>"#;
+        assert_eq!(
+            super::action_text_webhook_html(mention_with_content),
+            "<div><action-text-attachment sgid=\"signed-id\" content-type=\"application/vnd.campfire.mention\" content=\"<span class=&quot;mention&quot;>Robot &amp; Co</span>\"></action-text-attachment></div>"
+        );
     }
 
     #[test]
