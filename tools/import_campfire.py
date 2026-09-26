@@ -168,9 +168,9 @@ def import_data(source, target, source_files, uploads):
     counts["reindexed_messages"] = target.execute("SELECT count(*) FROM import_missing_search").fetchone()[0]
     counts["boosts"] = copy_table(source, target, "boosts", tables["boosts"])
     counts["searches"] = 0
-    for search in rows(source, "SELECT id,user_id,query,updated_at FROM searches ORDER BY updated_at,id"):
-        target.execute("""INSERT INTO searches(id,user_id,query,created_at) VALUES(?,?,?,?)
-            ON CONFLICT(user_id,query) DO UPDATE SET created_at=excluded.created_at""", tuple(search))
+    for search in rows(source, "SELECT id,user_id,query,created_at,updated_at FROM searches ORDER BY updated_at,id"):
+        target.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at) VALUES(?,?,?,?,?)
+            ON CONFLICT(user_id,query) DO UPDATE SET updated_at=excluded.updated_at""", tuple(search))
         counts["searches"] += 1
 
     blobs = rows(source, """SELECT attachment.record_id,blob.id,blob.key,blob.filename,

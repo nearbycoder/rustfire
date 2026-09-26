@@ -5927,18 +5927,14 @@ async fn search_get(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let query = q.get("q").cloned().unwrap_or_default();
+    let raw_query = q.get("q").cloned().unwrap_or_default();
+    let query = search_query(&raw_query);
     let db = pool(&s)?;
     let mut messages = Vec::new();
-    let terms = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !terms.is_empty() {
+    if !query.trim().is_empty() {
         let mut stmt=db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN users u ON u.id=m.creator_id JOIN memberships mem ON mem.room_id=m.room_id LEFT JOIN attachments a ON a.message_id=m.id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100").map_err(db_err)?;
         messages = stmt
-            .query_map(params![u.id, terms], chat_message_from_row)
+            .query_map(params![u.id, query], chat_message_from_row)
             .map_err(db_err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -5962,7 +5958,7 @@ async fn search_get(
         .map(|message| message_html(&s, message, Some(&headers)))
         .collect::<String>();
     let mut recent_query = db
-        .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT 10")
+        .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 10")
         .map_err(db_err)?;
     let recent = recent_query
         .query_map([u.id], |r| r.get::<_, String>(0))
@@ -5988,7 +5984,7 @@ async fn search_get(
         .filter(|id| room_for(&s, u.id, *id).is_ok())
         .or_else(|| rooms_for(&s, u.id).ok()?.first().map(|room| room.id));
     let back_href = back_room.map_or("/".to_string(), |id| format!("/rooms/{id}"));
-    let query_heading = if query.is_empty() {
+    let query_heading = if query.trim().is_empty() {
         "Search".to_string()
     } else {
         format!("“{}” <small>{}</small>", esc(&query), messages.len())
@@ -5997,10 +5993,17 @@ async fn search_get(
         "Search",
         &format!(
             "<div class='app-shell search-shell'><aside class='sidebar search-sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/icons/menu.svg' alt=''></button><div class='search-sidebar-head'><strong>Recent searches</strong>{clear_button}</div><nav>{recent}</nav><div class='search-sidebar-footer'><a href='{back_href}'>Back to room</a></div></aside><section class='search-main'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{query_heading}</h1><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div><div id='message-area' class='message-area'><div id='search-results' class='messages searches__results' data-controller='search-results' data-search-results-target='messages'>{results}</div></div><footer class='search-footer'><a href='{back_href}' class='search-exit' aria-label='Exit search'><img src='/static/icons/arrow-left.svg' alt=''></a><form method='post' action='/searches'><input name='q' value='{}' role='searchbox' aria-label='Search messages' placeholder='Search messages' autofocus required><a href='/searches' class='search-reset' aria-label='Clear search field'><img src='/static/icons/remove.svg' alt=''></a><button class='search-submit' type='submit' aria-label='Search'><img src='/static/icons/arrow-up.svg' alt=''></button></form></footer></section></div>",
-            esc(&query)
+            esc(&raw_query)
         ),
         Some(&u),
     ))
+}
+fn search_query(raw: &str) -> String {
+    static NON_WORD: OnceLock<Regex> = OnceLock::new();
+    NON_WORD
+        .get_or_init(|| Regex::new(r"[^\w]").unwrap())
+        .replace_all(raw, " ")
+        .into_owned()
 }
 #[derive(Deserialize)]
 struct SearchForm {
@@ -6012,26 +6015,23 @@ async fn search_post(
     Form(f): Form<SearchForm>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let query = f.q.trim().chars().take(200).collect::<String>();
-    if query.is_empty() {
-        return Ok(Redirect::to("/searches").into_response());
-    }
+    let query = search_query(&f.q);
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
-    tx.execute("INSERT INTO searches(user_id,query,created_at) VALUES(?1,?2,?3) ON CONFLICT(user_id,query) DO UPDATE SET created_at=excluded.created_at",params![u.id,query,now()]).map_err(db_err)?;
-    tx.execute("DELETE FROM searches WHERE user_id=?1 AND id NOT IN (SELECT id FROM searches WHERE user_id=?1 ORDER BY created_at DESC,id DESC LIMIT 10)", [u.id]).map_err(db_err)?;
+    tx.execute("INSERT INTO searches(user_id,query,created_at,updated_at) VALUES(?1,?2,?3,?3) ON CONFLICT(user_id,query) DO UPDATE SET updated_at=excluded.updated_at",params![u.id,query,now()]).map_err(db_err)?;
+    tx.execute("DELETE FROM searches WHERE user_id=?1 AND id NOT IN (SELECT id FROM searches WHERE user_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 10)", [u.id]).map_err(db_err)?;
     tx.commit().map_err(db_err)?;
     let encoded = form_urlencoded::Serializer::new(String::new())
         .append_pair("q", &query)
         .finish();
-    Ok(Redirect::to(&format!("/searches?{encoded}")).into_response())
+    Ok(found_redirect(&format!("/searches?{encoded}")))
 }
 async fn search_clear(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
     pool(&s)?
         .execute("DELETE FROM searches WHERE user_id=?1", [u.id])
         .map_err(db_err)?;
-    Ok(Redirect::to("/searches").into_response())
+    Ok(found_redirect("/searches"))
 }
 fn account_user_item(
     u: &User,
@@ -9420,12 +9420,21 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_logos(id INTEGER PRIMARY KEY CHECK(id=1),stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS boosts(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,booster_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,content TEXT NOT NULL,created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS searches(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,query TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(user_id,query));
+        CREATE TABLE IF NOT EXISTS searches(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,query TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,query));
         CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id,id);CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id,created_at,id);CREATE INDEX IF NOT EXISTS idx_messages_room_updated ON messages(room_id,updated_at,id);CREATE INDEX IF NOT EXISTS idx_messages_creator_id ON messages(creator_id,id);CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);CREATE INDEX IF NOT EXISTS idx_boosts_message ON boosts(message_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS message_search_index USING fts5(body, tokenize=porter);
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
+    let has_search_updated_at: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('searches') WHERE name='updated_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_search_updated_at {
+        conn.execute("ALTER TABLE searches ADD COLUMN updated_at TEXT", [])?;
+        conn.execute("UPDATE searches SET updated_at=created_at", [])?;
+    }
     let has_custom_styles: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('accounts') WHERE name='custom_styles')",
         [],

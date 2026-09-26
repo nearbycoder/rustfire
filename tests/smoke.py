@@ -99,8 +99,8 @@ def main():
             assert code == 200 and "Campfire" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
             assert "href='/webmanifest.json'" in page
             assert "id='system_welcome'" in page and "Welcome to Rustfire" in page and "id='invite_url'" in page
-            assert "data-room-notification data-room-id='1' data-room-kind='shared'" in page
-            assert "class='room-notifications-dialog'" in page and "Notifications aren’t allowed" in page
+            assert 'data-controller="notifications"' in page and 'data-turbo-frame-url-param="/rooms/1/involvement"' in page
+            assert 'data-notifications-target="notAllowedNotice"' in page and "Notifications aren’t allowed" in page
             assert "id='composer-filelist'" in page and "name='message[attachment]' multiple" in page
             assert request(admin, base, "/rooms/1/messages")[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"http://127.0.0.1/secret"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
@@ -910,7 +910,7 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT type FROM rooms WHERE id=?", (converted_room,)).fetchone()[0] == "Rooms::Closed"
                 assert check_db.execute("SELECT id,involvement FROM memberships WHERE room_id=? AND user_id=1", (converted_room,)).fetchone() == (original_membership, "everything")
-                check_db.execute("INSERT INTO searches(user_id,query,created_at) VALUES(2,'before deactivation','2026-01-01T00:00:00Z')")
+                check_db.execute("INSERT INTO searches(user_id,query,created_at,updated_at) VALUES(2,'before deactivation','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
                 check_db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,created_at,updated_at) VALUES(2,'https://example.com/deactivation','key','auth','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
             code, _, _ = request(admin, base, "/account/users/2", {"_method": "delete"}, method="POST")
             assert code == 200

@@ -282,7 +282,7 @@ def main():
             stored = imported.execute("SELECT stored_name FROM attachments WHERE id=7").fetchone()[0]
             assert (target_uploads / stored).read_bytes() == file_bytes
             assert imported.execute("SELECT count(*) FROM boosts").fetchone() == (1,)
-            assert imported.execute("SELECT query,created_at FROM searches WHERE id=1").fetchone() == ("One", "2026-01-02 00:00:00")
+            assert imported.execute("SELECT query,created_at,updated_at FROM searches WHERE id=1").fetchone() == ("One", "2025-01-01 00:00:00", "2026-01-02 00:00:00")
             assert imported.execute("SELECT restrict_room_creation FROM account_settings").fetchone() == (1,)
             assert imported.execute("SELECT css FROM account_custom_styles").fetchone() == ("body { color: navy; }",)
             assert imported.execute("SELECT custom_styles FROM accounts").fetchone() == ("body { color: navy; }",)
