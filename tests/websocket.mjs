@@ -24,13 +24,13 @@ try{
   const streamToken='IloybGtPaTh2WTJGdGNHWnBjbVV2VW05dmJYTTZPazl3Wlc0dk1ROm1lc3NhZ2VzIg==--dcc17cfeecb1f593debdd6f13d526df3c6d3b2fe59ab972a8fe1e7c038384efd';
   const signedStream=(kind,id)=>{const gid=Buffer.from(`gid://campfire/${kind}/${id}`).toString('base64url');const encoded=Buffer.from(JSON.stringify(`${gid}:messages`)).toString('base64');const key=crypto.pbkdf2Sync('test-secret-key-base','turbo/signed_stream_verifier_key',1000,64,'sha256');return `${encoded}--${crypto.createHmac('sha256',key).update(encoded).digest('hex')}`;};
   assert.equal(signedStream('Rooms::Open',1),streamToken);
-  assert(roomHtml.includes(`signed-stream-name='${streamToken}'`));
+  assert(roomHtml.includes(`signed-stream-name="${streamToken}"`));
   const deniedOrigin=await new Promise((resolve,reject)=>{const probe=net.createConnection({host:'127.0.0.1',port});probe.on('connect',()=>probe.write(`GET /cable HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: https://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nCookie: ${cookie}\r\n\r\n`));probe.once('data',data=>{resolve(data.toString().split('\r\n')[0]);probe.destroy()});probe.once('error',reject)});
   assert.match(deniedOrigin,/403/);
   const socket=net.createConnection({host:'127.0.0.1',port});
-  const frames=[];let handshake=false;let buffer=Buffer.alloc(0);let resolveFrame;let rejectFrame;let pingCount=0;
+  const frames=[];let handshake=false;let buffer=Buffer.alloc(0);let resolveFrame;let rejectFrame;let pingCount=0;let lastCommand='handshake';
   const nextRawFrame=()=>new Promise((resolve,reject)=>{if(frames.length)resolve(frames.shift());else{resolveFrame=resolve;rejectFrame=reject;}});
-  const nextFrame=async()=>{for(;;){const frame=await nextRawFrame();if(frame.type!=='ping')return frame;}};
+  const nextFrame=async()=>{let timeout;try{return await Promise.race([(async()=>{for(;;){const frame=await nextRawFrame();if(frame.type!=='ping')return frame;}})(),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error(`timed out waiting for frame after ${lastCommand}`)),5000)})])}finally{clearTimeout(timeout)}};
   socket.on('data',chunk=>{
     buffer=Buffer.concat([buffer,chunk]);if(!handshake){const end=buffer.indexOf('\r\n\r\n');if(end<0)return;const head=buffer.subarray(0,end).toString();assert(head.startsWith('HTTP/1.1 101'),head);buffer=buffer.subarray(end+4);handshake=true;}
     while(buffer.length>=2){let length=buffer[1]&127;let offset=2;if(length===126){if(buffer.length<4)return;length=buffer.readUInt16BE(2);offset=4}else if(length===127){if(buffer.length<10)return;length=Number(buffer.readBigUInt64BE(2));offset=10}if(buffer.length<offset+length)return;const opcode=buffer[0]&15;const payload=buffer.subarray(offset,offset+length).toString();buffer=buffer.subarray(offset+length);if(opcode===1){const value=JSON.parse(payload);if(value.type==='ping'){assert.equal(typeof value.message,'number');pingCount++;}if(resolveFrame){resolveFrame(value);resolveFrame=null}else frames.push(value)}}
@@ -38,7 +38,7 @@ try{
   socket.on('error',e=>{if(rejectFrame)rejectFrame(e)});
   const key=crypto.randomBytes(16).toString('base64');socket.write(`GET /cable HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${cookie}\r\n\r\n`);
   const welcome=await nextFrame();assert.equal(welcome.type,'welcome');
-  const sendCommand=command=>{const payload=Buffer.from(JSON.stringify(command));const length=payload.length;assert(length<65536);const long=length>=126;const maskOffset=long?4:2;const packet=Buffer.alloc(maskOffset+4+length);packet[0]=0x81;packet[1]=0x80|(long?126:length);if(long)packet.writeUInt16BE(length,2);const mask=crypto.randomBytes(4);mask.copy(packet,maskOffset);for(let i=0;i<length;i++)packet[maskOffset+4+i]=payload[i]^mask[i%4];socket.write(packet);};
+  const sendCommand=command=>{lastCommand=JSON.stringify(command);const payload=Buffer.from(lastCommand);const length=payload.length;assert(length<65536);const long=length>=126;const maskOffset=long?4:2;const packet=Buffer.alloc(maskOffset+4+length);packet[0]=0x81;packet[1]=0x80|(long?126:length);if(long)packet.writeUInt16BE(length,2);const mask=crypto.randomBytes(4);mask.copy(packet,maskOffset);for(let i=0;i<length;i++)packet[maskOffset+4+i]=payload[i]^mask[i%4];socket.write(packet);};
   const identifier=JSON.stringify({channel:'RoomMessagesChannel',room_id:1});
   sendCommand({command:'subscribe',identifier});
   const confirmation=await nextFrame();assert.equal(confirmation.type,'confirm_subscription');
@@ -54,7 +54,8 @@ try{
   const heartbeatIdentifier=JSON.stringify({channel:'HeartbeatChannel'});
   sendCommand({command:'subscribe',identifier:heartbeatIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
-  const listSources=[...roomHtml.matchAll(/<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="([^"]+)"/g)].map(match=>match[1]);
+  const sidebarHtml=await (await fetch(base+'/users/me/sidebar',{headers:{Cookie:cookie}})).text();
+  const listSources=[...sidebarHtml.matchAll(/<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="([^"]+)"/g)].map(match=>match[1]);
   assert.equal(listSources.length,2);
   const globalListIdentifier=JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:listSources[0]});
   const userListIdentifier=JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:listSources[1]});
@@ -134,6 +135,15 @@ try{
   const connections=()=>Number(execFileSync('python',['-c','import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute("select connections from memberships where room_id=1 and user_id=1").fetchone()[0])',path.join(temp,'test.db')]).toString().trim());
   for(let i=0;i<30&&connections()!==1;i++)await new Promise(r=>setTimeout(r,20));
   assert.equal(connections(),1);
+  const secondPresenceIdentifier=JSON.stringify({channel:'PresenceChannel',room_id:1,tab:'second'});
+  sendCommand({command:'message',identifier:secondPresenceIdentifier,data:JSON.stringify({action:'absent'})});
+  sendCommand({command:'subscribe',identifier:secondPresenceIdentifier});
+  assert.equal((await nextFrame()).type,'confirm_subscription');
+  for(let i=0;i<30&&connections()!==2;i++)await new Promise(r=>setTimeout(r,20));
+  assert.equal(connections(),2,'each presence subscription increments the connection count');
+  sendCommand({command:'unsubscribe',identifier:secondPresenceIdentifier});
+  for(let i=0;i<30&&connections()!==1;i++)await new Promise(r=>setTimeout(r,20));
+  assert.equal(connections(),1,'unsubscribing one presence channel leaves the other connected');
   sendCommand({command:'message',identifier:presenceIdentifier,data:JSON.stringify({action:'absent'})});
   for(let i=0;i<30&&connections()!==0;i++)await new Promise(r=>setTimeout(r,20));
   assert.equal(connections(),0);
@@ -164,6 +174,14 @@ try{
   sendCommand({command:'message',identifier:presenceIdentifier,data:JSON.stringify({action:'present'})});
   for(let i=0;i<30&&connections()!==1;i++)await new Promise(r=>setTimeout(r,20));
   assert.equal(connections(),1);
+  const membershipDb=path.join(temp,'test.db');
+  const membershipSql=(sql)=>execFileSync('python',['-c','import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);value=db.execute(sys.argv[2]).fetchone();print(value[0] if value else "")',membershipDb,sql]).toString().trim();
+  execFileSync('python',['-c','import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("update memberships set unread_at = ? where room_id=1 and user_id=1",("2025-01-01T00:00:00Z",));db.commit()',membershipDb]);
+  const connectedBeforeRefresh=membershipSql('select connected_at from memberships where room_id=1 and user_id=1');
+  sendCommand({command:'message',identifier:presenceIdentifier,data:JSON.stringify({action:'refresh'})});
+  for(let i=0;i<30&&membershipSql('select connected_at from memberships where room_id=1 and user_id=1')===connectedBeforeRefresh;i++)await new Promise(r=>setTimeout(r,20));
+  assert.notEqual(membershipSql('select connected_at from memberships where room_id=1 and user_id=1'),connectedBeforeRefresh,'presence refresh updates the connection timestamp');
+  assert.equal(membershipSql('select unread_at from memberships where room_id=1 and user_id=1'),'2025-01-01T00:00:00Z','presence refresh preserves the unread marker');
   const post=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'live test','message[client_message_id]':'ws-1'})});assert.equal(post.status,201);
   let delivered;
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no room event')),3000))]);if(frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='live test'){delivered=frame;break;}}

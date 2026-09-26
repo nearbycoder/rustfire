@@ -2556,14 +2556,14 @@ fn presence_update(s: &AppState, uid: i64, rid: i64, action: &str) -> Result<(),
             db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>?1 THEN connections+1 ELSE 1 END,connected_at=?2,unread_at=NULL WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         "refresh" => {
-            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>?1 THEN connections ELSE 1 END,connected_at=?2,unread_at=NULL WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
+            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>?1 THEN connections ELSE 1 END,connected_at=?2 WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         "absent" => {
             db.execute("UPDATE memberships SET connections=MAX(0,connections-1),connected_at=CASE WHEN connections<=1 THEN NULL ELSE connected_at END WHERE room_id=?1 AND user_id=?2",params![rid,uid]).map_err(db_err)?;
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     }
-    if action == "present" || action == "refresh" {
+    if action == "present" {
         s.read_events.send(Event {
             room_id: uid,
             payload: json!({"room_id":rid}).to_string(),
@@ -9675,7 +9675,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
         return;
     }
     let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
-    let mut presence_rooms: HashSet<i64> = HashSet::new();
+    let mut presence_subscriptions: HashMap<String, (i64, bool)> = HashMap::new();
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(3),
         std::time::Duration::from_secs(3),
@@ -9705,7 +9705,10 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     let accepted=signed_valid && (channel!="Turbo::StreamsChannel" || list_valid) && (hub.is_some() || channel=="PresenceChannel" || channel=="HeartbeatChannel") && (user_channel || channel=="Turbo::StreamsChannel" || (rid>0 && room_for(&s,u.id,rid).is_ok()));
                     if accepted {
                         if channel=="PresenceChannel" {
-                            if presence_rooms.insert(rid) { let _=presence_update(&s,u.id,rid,"present"); }
+                            if !presence_subscriptions.contains_key(ident) {
+                                presence_subscriptions.insert(ident.to_string(), (rid, true));
+                                let _=presence_update(&s,u.id,rid,"present");
+                            }
                         } else if let Some(hub)=hub { if let std::collections::hash_map::Entry::Vacant(entry)=subscriptions.entry(ident.to_string()) {
                             let mut room_events=hub.channel(if user_channel {u.id} else {rid}).subscribe();
                             let tx=event_tx.clone();
@@ -9719,7 +9722,11 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     if sender.send(WsMessage::Text(json!({"identifier":ident,"type":response}).to_string().into())).await.is_err(){break}
                 } else if action=="unsubscribe" {
                     if let Some(task)=subscriptions.remove(ident){task.abort();}
-                    if channel=="PresenceChannel" && presence_rooms.remove(&rid) { let _=presence_update(&s,u.id,rid,"absent"); }
+                    if channel=="PresenceChannel" {
+                        if let Some((room_id, true))=presence_subscriptions.remove(ident) {
+                            let _=presence_update(&s,u.id,room_id,"absent");
+                        }
+                    }
                 } else if action=="message" && channel=="TypingNotificationsChannel" && subscriptions.contains_key(ident) && room_for(&s,u.id,rid).is_ok() {
                     let data=cmd.get("data").and_then(Value::as_str).and_then(|raw|serde_json::from_str::<Value>(raw).ok()).unwrap_or(Value::Null);
                     if let Some(action)=data.get("action").and_then(Value::as_str).filter(|action| *action=="start" || *action=="stop") {
@@ -9727,10 +9734,12 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     }
                 } else if action=="message" && channel=="PresenceChannel" && room_for(&s,u.id,rid).is_ok() {
                     let data=cmd.get("data").and_then(Value::as_str).and_then(|raw|serde_json::from_str::<Value>(raw).ok()).unwrap_or(Value::Null);
-                    if let Some(action)=data.get("action").and_then(Value::as_str) {
-                        if action=="absent" && presence_rooms.remove(&rid) {let _=presence_update(&s,u.id,rid,"absent");}
-                        else if action=="present" && presence_rooms.insert(rid) {let _=presence_update(&s,u.id,rid,"present");}
-                        else if action=="refresh" && presence_rooms.contains(&rid) {let _=presence_update(&s,u.id,rid,"refresh");}
+                    if let (Some(action), Some((room_id, present)))=(data.get("action").and_then(Value::as_str),presence_subscriptions.get_mut(ident)) {
+                        if *room_id==rid {
+                            if action=="absent" && *present {*present=false;let _=presence_update(&s,u.id,rid,"absent");}
+                            else if action=="present" && !*present {*present=true;let _=presence_update(&s,u.id,rid,"present");}
+                            else if action=="refresh" && *present {let _=presence_update(&s,u.id,rid,"refresh");}
+                        }
                     }
                 }
             },
@@ -9740,8 +9749,10 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     for (_, task) in subscriptions {
         task.abort();
     }
-    for rid in presence_rooms {
-        let _ = presence_update(&s, u.id, rid, "absent");
+    for (_, (rid, present)) in presence_subscriptions {
+        if present {
+            let _ = presence_update(&s, u.id, rid, "absent");
+        }
     }
 }
 async fn health() -> impl IntoResponse {
