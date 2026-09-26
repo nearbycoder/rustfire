@@ -2206,6 +2206,14 @@ fn og_attributes(document: &str) -> HashMap<String, String> {
     }
     attributes
 }
+fn allowed_og_image_content_type(value: &str) -> bool {
+    // Campfire lowercases the whole HEAD Content-Type header and compares it
+    // directly; a parameterized value does not match its four allowed types.
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    )
+}
 fn media_link(input: &str) -> bool {
     // Opengraph::Location checks the original URL string, including queries,
     // with a case-sensitive pattern rather than only the parsed path suffix.
@@ -2280,16 +2288,8 @@ async fn unfurl_url(input: &str) -> Option<Value> {
                     .headers()
                     .get(header::CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
-                    .unwrap_or("")
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_ascii_lowercase();
-                if matches!(
-                    kind.as_str(),
-                    "image/jpeg" | "image/png" | "image/gif" | "image/webp"
-                ) {
+                    .unwrap_or("");
+                if allowed_og_image_content_type(kind) {
                     Some(candidate.clone())
                 } else {
                     None
@@ -11434,6 +11434,17 @@ mod tests {
             "HTTPS://example.com/video.mp4",
         ] {
             assert!(!super::media_link(url), "{url}");
+        }
+    }
+    #[test]
+    fn preview_image_content_type_matches_campfire_exact_header_check() {
+        for content_type in ["image/jpeg", "image/png", "image/gif", "image/webp", "IMAGE/PNG"] {
+            assert!(super::allowed_og_image_content_type(content_type), "{content_type}");
+        }
+        for content_type in [
+            "image/svg+xml", "text/html", "image/png; charset=UTF-8", "image/png ", "",
+        ] {
+            assert!(!super::allowed_og_image_content_type(content_type), "{content_type}");
         }
     }
     #[test]
