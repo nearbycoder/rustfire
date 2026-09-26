@@ -8762,13 +8762,16 @@ async fn bot_messages_get(
             |r| r.get(0),
         )
         .map_err(db_err)?;
-    let mut r = Json(
-        messages
-            .iter()
-            .map(|m| bot_message_json(&s, m, &headers, &db))
-            .collect::<Result<Vec<_>, _>>()?,
-    )
-    .into_response();
+    let body = messages
+        .iter()
+        .map(|m| bot_message_json(&s, m, &headers, &db))
+        .collect::<Result<Vec<_>, _>>()?;
+    let json = serde_json::to_string(&body)
+        .map_err(db_err)?
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e");
+    let mut r = ([(header::CONTENT_TYPE, "application/json")], json).into_response();
     r.headers_mut()
         .insert("x-total-count", count.to_string().parse().unwrap());
     if let (Some(first), Some(last)) = (messages.first(), messages.last()) {

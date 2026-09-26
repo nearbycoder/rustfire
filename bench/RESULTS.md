@@ -11,6 +11,21 @@ The 10-second write trial inserted 98,244 messages. The database contained 421,8
 
 The older HTTP results above used a different fixture and should not be compared with Campfire. A later matched-fixture trial appears below.
 
+## Paired rich-mention bot API reads
+
+The pinned Campfire build and Rustfire each received 40 signed-mention messages through the same browser POST route. Their bot message-list JSON matched after normalizing generated timestamps and URL origins, including ActionText mention HTML. Both responses were **53,003 bytes**. A Go client then checked every timed GET against that app's warmed response SHA-256. Campfire used its packaged 22 Puma workers; Rustfire used one release process. Both apps and the client shared the 32-logical-CPU host. Each trial lasted 10 seconds, with no response errors.
+
+| Clients | Order | Campfire reads/s | Rustfire reads/s | Campfire p95 | Rustfire p95 |
+|---:|---|---:|---:|---:|---:|
+| 32 | Rustfire first | 1,267 | 2,788 | 55.56 ms | 16.34 ms |
+| 32 | Campfire first | 1,209 | 2,836 | 51.40 ms | 16.23 ms |
+| 128 | Rustfire first | 1,226 | 2,767 | 259.43 ms | 73.64 ms |
+| 128 | Campfire first | 997 | 2,804 | 265.00 ms | 72.19 ms |
+| 256 | Rustfire first | 1,060 | 2,855 | 363.12 ms | 152.69 ms |
+| 256 | Campfire first | 921 | 2,792 | 419.02 ms | 154.76 ms |
+
+Rustfire delivered about **2.2–3.0×** as many checked reads per second in these trials. With an illustrative 250 ms p95 objective, Rustfire met it at all three tested client counts; Campfire met it at 32 clients. This establishes an advantage for this matched read path at the sampled concurrency levels. It does not establish a maximum user count, long-running capacity, or a speed advantage at complete application parity. The client, Redis, SQLite, and servers shared one host; repeat on separate hosts for deployment-scale claims. Reproduce with `python bench/paired_mention_reads.py --clients 32 128 256 --seconds 10 --campfire-workers 22 --slo-ms 250` and `--campfire-first`.
+
 ## Turbo route format parity
 
 `python bench/paired_turbo_formats.py` passed on disposable instances of the pinned source and Rustfire. The room refresh and account user pagination routes now agree on HTTP status and media type for absent, HTML, JSON, wildcard, and Turbo Stream Accept headers, and for explicit `.turbo_stream` paths. Both return the same JSON 406 body when the refresh route is requested as JSON, and treat a nonnumeric `since` value as zero. Empty room refresh responses contain a newline as in the source. Rustfire's browser applies Turbo refresh responses for edits and uses a separate JSON `refresh_state` route for backlog pagination. This is a route behavior check, not a timing result.

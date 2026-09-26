@@ -41,7 +41,7 @@ class Receiver(BaseHTTPRequestHandler):
         pass
 
 
-def seed_bot(database, campfire, url):
+def seed_bot(database, campfire, url, with_webhooks=True):
     stamp = "2026-01-01 00:00:00.000000" if campfire else "2026-01-01T00:00:00Z"
     with sqlite3.connect(database) as db:
         if campfire:
@@ -55,15 +55,17 @@ def seed_bot(database, campfire, url):
             db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(1,53,'mentions',?1,?1)", (stamp,))
             db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(2,?1,'everything',?2,?2)", [(1, stamp), (BOT_ID, stamp)])
             db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(3,?1,'everything',?2,?2)", [(BOT_ID, stamp), (PEER_ID, stamp)])
-            db.execute("INSERT INTO webhooks(user_id,url,created_at,updated_at) VALUES(52,?1,?2,?2)", (url, stamp))
-            db.execute("INSERT INTO webhooks(user_id,url,created_at,updated_at) VALUES(53,?1,?2,?2)", (url.replace("/hook", "/peer"), stamp))
+            if with_webhooks:
+                db.execute("INSERT INTO webhooks(user_id,url,created_at,updated_at) VALUES(52,?1,?2,?2)", (url, stamp))
+                db.execute("INSERT INTO webhooks(user_id,url,created_at,updated_at) VALUES(53,?1,?2,?2)", (url.replace("/hook", "/peer"), stamp))
         else:
             db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,52,'mentions',?1)", (stamp,))
             db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,53,'mentions',?1)", (stamp,))
             db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(2,?1,'everything',?2)", [(1, stamp), (BOT_ID, stamp)])
             db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(3,?1,'everything',?2)", [(BOT_ID, stamp), (PEER_ID, stamp)])
-            db.execute("INSERT INTO webhooks(user_id,url) VALUES(52,?1)", (url,))
-            db.execute("INSERT INTO webhooks(user_id,url) VALUES(53,?1)", (url.replace("/hook", "/peer"),))
+            if with_webhooks:
+                db.execute("INSERT INTO webhooks(user_id,url) VALUES(52,?1)", (url,))
+                db.execute("INSERT INTO webhooks(user_id,url) VALUES(53,?1)", (url.replace("/hook", "/peer"),))
 
 
 def bot_sgid(port, cookie, campfire, bot_id=BOT_ID):
