@@ -2996,7 +2996,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
                     .to_string();
                 let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
                 if !bytes.is_empty() {
-                    avatar = Some((bytes.to_vec(), sniff_avatar_content_type(&bytes, &content_type).to_string()));
+                    avatar = Some((bytes.to_vec(), sniff_upload_content_type(&bytes, &content_type).to_string()));
                 }
             } else if matches!(
                 name.as_str(),
@@ -4121,10 +4121,10 @@ fn variable_avatar_image(content_type: &str) -> bool {
         "image/png" | "image/gif" | "image/jpeg" | "image/tiff" |
         "image/webp" | "image/avif" | "image/heic" | "image/heif")
 }
-fn sniff_avatar_content_type<'a>(bytes: &[u8], declared: &'a str) -> &'a str {
+fn sniff_upload_content_type<'a>(bytes: &[u8], declared: &'a str) -> &'a str {
     // Active Storage uses Marcel to identify uploads from their bytes rather
-    // than trusting the multipart Content-Type. Cover its variable image types
-    // and the three formats Campfire deliberately leaves as fallback avatars.
+    // than trusting the multipart Content-Type. Cover its image types used by
+    // both avatars and message attachments.
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { return "image/png"; }
     if bytes.starts_with(b"\xff\xd8\xff") { return "image/jpeg"; }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { return "image/gif"; }
@@ -4138,8 +4138,13 @@ fn sniff_avatar_content_type<'a>(bytes: &[u8], declared: &'a str) -> &'a str {
             b"avif" | b"avis" => return "image/avif",
             b"heic" | b"heix" | b"hevc" | b"hevx" => return "image/heic",
             b"mif1" | b"msf1" => return "image/heif",
+            b"qt  " => return "video/quicktime",
+            b"isom" | b"iso2" | b"mp41" | b"mp42" | b"M4V " => return "video/mp4",
             _ => {}
         }
+    }
+    if bytes.len() >= 8 && matches!(&bytes[4..8], b"moov" | b"mdat" | b"free" | b"skip" | b"pnot") {
+        return "video/quicktime";
     }
     declared
 }
@@ -5088,11 +5093,14 @@ fn insert_message(
     rid: i64,
     body: &str,
     client_id: Option<String>,
-    upload: Option<Upload>,
+    mut upload: Option<Upload>,
     rich: bool,
     request_headers: Option<&HeaderMap>,
     allow_blank: bool,
 ) -> Result<ChatMessage, StatusCode> {
+    if let Some(file) = upload.as_mut() {
+        file.content_type = sniff_upload_content_type(&file.bytes, &file.content_type).to_string();
+    }
     let request_host = request_headers
         .and_then(|headers| headers.get(header::HOST))
         .and_then(|value| value.to_str().ok());
@@ -5164,6 +5172,7 @@ fn insert_message(
     }
     let cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
     db.execute("UPDATE memberships SET unread_at=?1 WHERE room_id=?2 AND user_id!=?3 AND involvement!='invisible' AND (connected_at IS NULL OR connected_at<?4)", params![t, rid, u.id, cutoff]).map_err(db_err)?;
+    let mut attachment_processing_failed = false;
     let attachment = if let Some(file) = upload {
         let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
         std::fs::create_dir_all(&dir).map_err(db_err)?;
@@ -5172,12 +5181,25 @@ fn insert_message(
         std::fs::write(&input, file.bytes).map_err(db_err)?;
         let (width, height) = if let Some(format) = image_format(&file.content_type) {
             let (width, height) = analyze_image_and_thumbnail(&input, &stored, "thumb", format);
+            attachment_processing_failed = width.is_none()
+                || height.is_none()
+                || !std::path::Path::new(&dir)
+                    .join("variants")
+                    .join(format!("{stored}-thumb.{format}"))
+                    .is_file();
             (
                 width.map(|value| value as f64),
                 height.map(|value| value as f64),
             )
         } else if safe_inline_video(&file.content_type) {
-            analyze_video_and_poster(&input, &stored)
+            let dimensions = analyze_video_and_poster(&input, &stored);
+            attachment_processing_failed = dimensions.0.is_none()
+                || dimensions.1.is_none()
+                || !std::path::Path::new(&dir)
+                    .join("variants")
+                    .join(format!("{stored}-poster.webp"))
+                    .is_file();
+            dimensions
         } else {
             (None, None)
         };
@@ -5192,6 +5214,9 @@ fn insert_message(
     } else {
         None
     };
+    if attachment_processing_failed {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
     let room_name = message_room_display_name(&db, rid)?;
     let m = ChatMessage {
         id,
@@ -8192,7 +8217,7 @@ fn save_avatar(
     bytes: Vec<u8>,
     content_type: String,
 ) -> Result<(), StatusCode> {
-    let content_type = sniff_avatar_content_type(&bytes, &content_type).to_string();
+    let content_type = sniff_upload_content_type(&bytes, &content_type).to_string();
     let dir = std::path::PathBuf::from(
         env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
     )

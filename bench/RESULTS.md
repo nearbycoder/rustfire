@@ -1,5 +1,9 @@
 # Preliminary Rustfire measurements
 
+## Paired message attachment MIME detection
+
+`python bench/paired_attachment_mime.py` passed against pinned Campfire `91d294f`. The browser message POST path stored JPEG and PNG bytes labeled `text/plain` as `image/jpeg` and `image/png`, BMP bytes labeled `image/jpeg` as `image/bmp`, and QuickTime bytes labeled `text/plain` as `video/quicktime` in both apps. Each original saved file had the same SHA-256 as the submitted bytes, and each normalized Turbo message response had the same parsed presentation. A text file labeled JPEG caused HTTP 500 in both apps after the message and original attachment were persisted; the saved metadata and bytes matched. This probes four valid signatures and one malformed image. It does not compare error-page bodies, all media formats, or upload performance.
+
 ## Paired avatar upload and rendering parity
 
 `python bench/paired_avatar.py` passed against pinned Campfire `91d294f`. The probe uploaded the source's `moon.jpg` and `pixel.bmp` through the profile form, then compared the served avatar type and parsed initials SVG or exact WebP bytes. Campfire and Rustfire both accepted the BMP but rendered initials; after reproducing the source image-processing sharpening convolution, their JPEG WebPs were byte-identical. JPEG and PNG bot avatars uploaded with a misleading `text/plain` multipart type were both detected from file bytes, saved with matching content types, and served as byte-identical WebPs. All sampled avatar reads had weak ETags and matching cache-control values; conditional reads returned 304 with empty bodies, and each new upload invalidated the prior validator. This checks selected formats, upload paths, and cache transitions. It does not establish all MIME-detection behavior, other image formats, or raw ETag equality.
