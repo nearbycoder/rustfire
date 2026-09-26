@@ -990,3 +990,14 @@ Rustfire served **2.10–2.15×** as many checked reads per second at the same s
 ## Browser composer previews and mixed attachments
 
 `python bench/paired_composer_browser.py` passed against pinned Campfire in local Chromium. Both apps sorted queued PNG/JPEG cards the same way, rendered the same preview-card elements and visible labels, removed and re-added the first file, showed a pending upload after Send, cleared the queue, and displayed all three saved text and attachment messages. The saved 47 MB PNG and 13 KB JPEG matched the source fixture bytes in both storage systems. The first Rustfire run exposed its former 25 MB request limit; the release build now accepts this fixture under a 128 MB limit. This is one browser flow and not a throughput test or proof of behavior for larger files, interrupted uploads, or other browsers.
+
+## Thirty-second image uploads with readers and room sockets
+
+`python bench/paired_image_mix.py --clients 64 --seconds 30 --write-rate 2 --campfire-workers 22 --sockets 100` passed against pinned Campfire in both server orders (`--rustfire-first` for the reverse). Each disposable app began with 40 matching text messages, then saved 60 multipart uploads of the same 505,420-byte JPEG. The probe verified every write response, all 60 saved IDs and original file bytes, every measured read's HTTP status, content type, and 40 message roots, and the final 7,202 parsed page tokens after normalizing generated times, origins, signed blobs, and CSRF inputs. Both apps delivered **6,000/6,000** expected image appends to 100 subscribed sockets in each run with zero misses, duplicates, or early closes. The 60 first-socket stream samples matched in parsed structure and stable values after the same normalizations.
+
+| Rustfire first | Rustfire reads/s / p95 | Rustfire upload p95 | Campfire reads/s / p95 | Campfire upload p95 |
+| :---: | ---: | ---: | ---: | ---: |
+| No | 3,059 / 29.79 ms | 257.08 ms | 1,560 / 77.56 ms | 350.19 ms |
+| Yes | 3,128 / 28.98 ms | 249.75 ms | 1,567 / 85.03 ms | 325.00 ms |
+
+Rustfire served **1.96–2.00×** as many checked reads per second and had lower upload p95 in these two socket trials. The same 30-second upload/read workload without sockets also passed in both orders, at 3,103 / 1,585 and 3,007 / 1,551 Rustfire / Campfire reads per second; upload p95 was 250 / 214 and 264 / 270 ms, so the no-socket runs do not show a consistent upload latency advantage. Both servers ran serially on one host; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Socket setup was outside the timed interval. These runs use one account and room, do not measure connection setup, CPU or peak memory, and do not establish maximum sustained capacity, upload performance for other media, or full application parity.

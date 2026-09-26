@@ -114,6 +114,8 @@ See `bench/README.md` for the measurement procedure and `bench/RESULTS.md` for t
 
 The 400-socket mixed trial was also repeated with four distinct socket users in each room. Both server orders passed all delivery and checked read/write assertions; Rustfire served 2.10–2.15× as many checked reads per second. The 30-second trial still does not establish maximum or sustained capacity.
 
+A separate 30-second JPEG upload/read trial with 100 signed room sockets, 64 checked readers, and 60 real multipart image uploads per app passed in both orders. Rustfire served 1.96–2.00× as many checked reads per second, had lower upload p95 in those socket runs, and both apps delivered all 6,000 expected image appends. The paired probe checked the final parsed page and original stored bytes; this remains a sampled workload rather than a full-app speed or capacity claim.
+
 ## Checks
 
 ```sh
