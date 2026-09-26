@@ -7920,6 +7920,9 @@ async fn user_show(
         .optional()
         .map_err(db_err)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    let has_logo: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0))
+        .map_err(db_err)?;
     let name_html = esc(&name);
     let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
     let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
@@ -7971,7 +7974,7 @@ async fn user_show(
     };
     let banned = if status == 2 { "banned" } else { "" };
     let body = format!("<section class='panel txt-align-center'><div class='flex flex-column gap {banned}'><div class='avatar txt-xx-large center' style='background: white'><img alt='Profile avatar' class='avatar' src='{}'></div>{identity}</div></section>", esc(&avatar));
-    Ok(render_source_page(&name, &body, &nav, Some(&u), u.csrf_token.as_deref().unwrap_or("")))
+    Ok(render_source_page_sections(&name, &body, &nav, "", "", "", if has_logo { "account-has-logo" } else { "" }, "", Some(&u), u.csrf_token.as_deref().unwrap_or("")))
 }
 async fn user_ban(
     State(s): State<Arc<AppState>>,

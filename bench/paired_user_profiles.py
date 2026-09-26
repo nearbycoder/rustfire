@@ -6,6 +6,7 @@ and bot profile views, plus the browser's form-based unban request.
 
 from html.parser import HTMLParser
 import pathlib
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -14,6 +15,7 @@ import urllib.parse
 from direct_lookup import free_port, start_server, stop_server
 from paired_bot_admin import request
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_room_shell import post_account_logo, section
 
 
 REPOSITORY = pathlib.Path("/tmp/once-campfire-reference")
@@ -81,7 +83,28 @@ def profile(port, cookie, csrf, user_id=2):
     panel = ProfilePanel()
     panel.feed(body.decode())
     assert panel.tokens and panel.tokens[0][:2] == ("start", "section")
-    return panel.tokens
+    return body, panel.tokens
+
+
+def compare_profile(label, rust_page, camp_page):
+    rust_body, rust_panel = rust_page
+    camp_body, camp_panel = camp_page
+    if rust_panel != camp_panel:
+        for index, (left, right) in enumerate(zip(rust_panel, camp_panel)):
+            if left != right:
+                raise AssertionError(f"{label} panel token {index}: rustfire={left!r} campfire={right!r}")
+        raise AssertionError(f"{label}: different panel token counts {len(rust_panel)} != {len(camp_panel)}")
+    print(f"{label} panel: {len(rust_panel)} matching parsed tokens")
+    for part in ("nav", "footer", "sidebar"):
+        expected = section(camp_body, part)
+        actual = section(rust_body, part)
+        for index, (left, right) in enumerate(zip(expected, actual)):
+            assert left == right, (label, part, index, left, right)
+        assert len(expected) == len(actual), (label, part, len(expected), len(actual))
+        print(f"{label} {part}: {len(actual)} matching parsed tokens")
+    rust_classes = re.search(rb'<body class="([^"]*)"', rust_body).group(1)
+    camp_classes = re.search(rb'<body class="([^"]*)"', camp_body).group(1)
+    assert rust_classes == camp_classes, (label, rust_classes, camp_classes)
 
 
 def set_state(database, role, status):
@@ -100,6 +123,10 @@ def main():
         env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         seed_profile(rust_db)
         seed_profile(camp_db)
+        with sqlite3.connect(camp_db) as db:
+            db.execute("UPDATE users SET password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
+        with sqlite3.connect(rust_db) as db:
+            db.execute("INSERT INTO sessions(user_id,token,csrf_token,created_at,last_active_at) VALUES(2,'member-session','member-csrf',?1,?1)", [STAMP])
         rust_process = start_server(rust_db, rust_port)
         log = open(temp / "puma.log", "w+")
         camp_process = subprocess.Popen(
@@ -111,8 +138,7 @@ def main():
             camp_cookie, camp_csrf = login_campfire(camp_port)
             rust = profile(rust_port, "session_token=benchmark-session", "benchmark-csrf", 1)
             camp = profile(camp_port, camp_cookie, camp_csrf, 1)
-            assert rust == camp, "administrator's own profile panel differs"
-            print(f"administrator's own profile: {len(rust)} matching parsed tokens")
+            compare_profile("administrator's own profile", rust, camp)
             for label, role, status in (
                 ("active member", 0, 0),
                 ("banned member", 0, 2),
@@ -124,12 +150,7 @@ def main():
                 set_state(camp_db, role, status)
                 rust = profile(rust_port, "session_token=benchmark-session", "benchmark-csrf")
                 camp = profile(camp_port, camp_cookie, camp_csrf)
-                if rust != camp:
-                    for index, (left, right) in enumerate(zip(rust, camp)):
-                        if left != right:
-                            raise AssertionError(f"{label} token {index}: rustfire={left!r} campfire={right!r}")
-                    raise AssertionError(f"{label}: different token counts {len(rust)} != {len(camp)}")
-                print(f"{label}: {len(rust)} matching parsed tokens")
+                compare_profile(label, rust, camp)
             set_state(rust_db, 0, 2)
             set_state(camp_db, 0, 2)
             data = urllib.parse.urlencode({"_method": "delete"}).encode()
@@ -143,6 +164,21 @@ def main():
                     saved = db.execute("SELECT status FROM users WHERE id=2").fetchone()[0]
                 results.append((status, urllib.parse.urlsplit(location).path, saved))
             assert results == [(302, "/users/2", 0)] * 2, results
+            jpeg = (REPOSITORY / "test/fixtures/files/moon.jpg").read_bytes()
+            post_account_logo(camp_port, camp_cookie, camp_csrf, jpeg)
+            post_account_logo(rust_port, "session_token=benchmark-session", "benchmark-csrf", jpeg)
+            compare_profile(
+                "administrator with account logo",
+                profile(rust_port, "session_token=benchmark-session", "benchmark-csrf", 1),
+                profile(camp_port, camp_cookie, camp_csrf, 1),
+            )
+            member_cookie, member_csrf = login_campfire(camp_port, "profile@example.test", "benchmark-password")
+            for label, user_id in (("member's own profile with logo", 2), ("member viewing administrator with logo", 1)):
+                compare_profile(
+                    label,
+                    profile(rust_port, "session_token=member-session", "member-csrf", user_id),
+                    profile(camp_port, member_cookie, member_csrf, user_id),
+                )
             print("PASS paired profile panels and form-based unban")
         except Exception:
             log.flush()
