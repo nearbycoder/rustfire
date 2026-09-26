@@ -2,7 +2,8 @@
 
 Run after cargo build --release and with Redis running. This checks the last
 100 result IDs and message text before reporting warm, serial GET latency.
-The apps' HTML still differs, so the timing is a search-page observation.
+The fixture gives both apps the same simple rich-text body. Raw HTML bytes
+still differ, so the timing is a search-page observation.
 """
 
 import argparse
@@ -35,8 +36,8 @@ def seed_messages(rust_path, camp_path, count):
         rust.execute("UPDATE users SET name=?1,updated_at=?2 WHERE id=1", [name, updated_at])
         rust.execute("UPDATE rooms SET name=? WHERE id=1", [room_name])
         rust.executemany(
-            "INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?1,1,1,?2,?3,?4,?5,?4,?5)",
-            ((i, f"benchmark message {i}", f"fixture-{i}", rust_stamp, stamp_ns) for i, _, rust_stamp, stamp_ns in stamps),
+            "INSERT INTO messages(id,room_id,creator_id,body,body_html,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?1,1,1,?2,?3,?4,?5,?6,?5,?6)",
+            ((i, f"benchmark message {i}", f"<div>benchmark message {i}</div>", f"fixture-{i}", rust_stamp, stamp_ns) for i, _, rust_stamp, stamp_ns in stamps),
         )
         camp.executemany(
             "INSERT INTO messages(id,client_message_id,created_at,creator_id,room_id,updated_at) VALUES(?1,?2,?3,1,1,?3)",

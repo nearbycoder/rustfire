@@ -805,7 +805,24 @@ At a provisional 250 ms p95 read target, Rustfire passed at all three sampled co
 
 ## Search page shell
 
-`python bench/paired_search_shell.py` passed against pinned Campfire on a disposable fixture with one recent search and three matching messages. The parsed empty page matched across navigation (19 tokens), sidebar (19), message area (9), and composer footer (29). The populated page matched across navigation (29), sidebar (19), message area (564), and footer (29) after normalizing generated CSRF values, signed avatar paths, timestamps, and local origins. A local Chromium check showed all three results visible, the source-style composer and sidebar present, and no page errors after constraining room-only JavaScript to room pages. This verifies two search-page states, not all queries, roles, or visual environments; no search throughput measurement was taken for this revision.
+`python bench/paired_search_shell.py --messages 100` passed against pinned Campfire on a disposable fixture with one recent search. The parsed empty page matched across navigation (19 tokens), sidebar (19), message area (9), and composer footer (29). The no-match page also matched. The 100-result page matched across navigation (29), sidebar (19), message area (18,509), and footer (29) after normalizing generated CSRF values, signed avatar paths, timestamps, and local origins. A local Chromium check on the preceding three-result fixture showed all results visible, the source-style composer and sidebar present, and no page errors after constraining room-only JavaScript to room pages. This does not cover all queries, roles, or visual environments.
+
+The first 10,000-message concurrent sweep exposed a Rustfire search bottleneck: the query loaded attachments and boosts for all matching rows before retaining the latest 100, and the handler held a database connection while looking up a return room through a second connection. At 64 clients, the latter exhausted the 32-connection pool and stalled warmup. Rustfire now releases the connection before rendering or looking up the return room and materializes the latest 100 visible IDs before loading full message data. On the same disposable 10,000-message fixture, each server returned 100 results whose parsed search-page sections matched before load. The Go keep-alive client checked every timed response for HTTP 200, HTML content type, and 100 message roots. Both servers stayed running, with only one receiving load at a time; Campfire used 22 Puma workers and Rustfire one process. Each measured trial lasted five seconds. All measured runs completed with zero response errors.
+
+| Clients | First server | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+|---:|---|---:|---:|
+| 16 | Rustfire | 1,445.1 / 16.63 ms | 274.4 / 131.24 ms |
+| 16 | Campfire | 1,367.5 / 17.32 ms | 318.3 / 111.75 ms |
+| 64 | Rustfire | 1,509.1 / 58.38 ms | 324.1 / 435.65 ms |
+| 64 | Campfire | 1,505.0 / 57.96 ms | 312.3 / 468.33 ms |
+| 128 | Rustfire | 1,502.0 / 130.89 ms | 352.9 / 633.61 ms |
+| 128 | Campfire | 1,478.9 / 132.64 ms | 318.3 / 685.26 ms |
+| 256 | Rustfire | 1,470.4 / 283.95 ms | 371.0 / 1,023.63 ms |
+| 256 | Campfire | 1,477.6 / 297.50 ms | 314.9 / 1,309.74 ms |
+
+These runs show roughly 4–5× higher checked search-page read throughput in Rustfire and substantially lower p95 latency at every sampled client count. At a provisional 250 ms p95 read target, Rustfire passed at 128 clients and exceeded it at 256; Campfire passed at 16 and exceeded it at 64. The precise threshold between those samples, sustained capacity, write behavior, memory use, and whole-app advantage at full parity remain unmeasured. The client shared the server host, raw HTML bytes differ, and each timed response was checked for status, type, and message count rather than fully parsed equality.
+
+The warm serial `python bench/paired_search.py --messages 10000 --requests 20` probe on the same code checked all 100 ordered result IDs and body texts in every response. Rustfire measured **3.82 ms median / 4.46 ms p95** with an 866,254-byte response; Campfire measured **24.98 ms median / 63.75 ms p95** with a 1,050,197-byte response. This is a one-client observation, separate from the concurrent sweep.
 
 ## Mixed rich-text reads, writes, and room fanout
 
