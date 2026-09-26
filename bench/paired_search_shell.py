@@ -10,13 +10,15 @@ import argparse
 import json
 import pathlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
+import uuid
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
-from paired_room_shell import Section, get_room
+from paired_room_shell import Section, get_room, post_message
 from paired_search import seed_messages
 
 
@@ -72,6 +74,36 @@ def measure_search(binary, port, cookie, clients, seconds):
     return report
 
 
+def browser_search(port):
+    session = f"search-scroll-{uuid.uuid4().hex[:8]}"
+    def command(*arguments):
+        result = subprocess.run(["agent-browser", "--session", session, *arguments], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (arguments, result.stdout, result.stderr)
+        return result.stdout
+    try:
+        command("open", f"http://127.0.0.1:{port}/session/new")
+        assert 'button "Go"' in command("snapshot", "-i")
+        command("fill", 'input[name="email_address"]', "benchmark@example.invalid")
+        command("fill", 'input[name="password"]', "benchmark-password")
+        command("click", 'button[name="log_in"]')
+        command("wait", "--url", "**/rooms/1")
+        command("open", f"http://127.0.0.1:{port}/searches?q=benchmark")
+        command("wait", "#search-results .message")
+        command("wait", "--load", "networkidle")
+        assert 'searchbox "search"' in command("snapshot", "-i")
+        return json.loads(command("eval", """(() => {
+          const results = document.querySelector('#search-results');
+          const links = [...results.querySelectorAll('[data-reply-target="body"] a')];
+          return {count: results.querySelectorAll('.message').length,
+                  top: results.scrollTop, height: results.scrollHeight,
+                  viewport: results.clientHeight,
+                  externalTarget: links.find(link => link.href.startsWith('https://example.com/'))?.target,
+                  internalTarget: links.find(link => link.href.startsWith(location.origin))?.target};
+        })()"""))
+    finally:
+        subprocess.run(["agent-browser", "--session", session, "close"], capture_output=True, timeout=15)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--messages", type=int, default=3)
@@ -79,11 +111,14 @@ def main():
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--rustfire-first", action="store_true")
+    parser.add_argument("--browser", action="store_true", help="compare search-result scroll position in local Chromium")
     args = parser.parse_args()
     if args.messages < 1 or args.seconds <= 0 or args.campfire_workers < 1 or any(client < 1 for client in args.read_clients):
         parser.error("messages, seconds, worker count, and client counts must be positive")
     if args.read_clients and args.messages < 100:
         parser.error("concurrent search reads require at least 100 seeded messages")
+    if args.browser and (args.messages < 100 or not shutil.which("agent-browser")):
+        parser.error("browser search checks require at least 100 messages and the agent-browser CLI")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-search-shell-") as directory:
         temp = pathlib.Path(directory)
@@ -92,6 +127,10 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         seed_messages(rust_db, camp_db, args.messages)
+        if args.browser:
+            with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
+                digest = camp.execute("SELECT password_digest FROM users WHERE id=1").fetchone()[0]
+                rust.execute("UPDATE users SET email_address='benchmark@example.invalid',password_digest=? WHERE id=1", [digest])
         for database in (rust_db, camp_db):
             with sqlite3.connect(database) as db:
                 db.execute("INSERT INTO searches(user_id,query,created_at,updated_at) VALUES(1,'benchmark','2026-01-02 00:00:00','2026-01-02 00:00:00')")
@@ -101,11 +140,22 @@ def main():
             camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=REPOSITORY, env=env, stdout=log, stderr=log)
             try:
                 wait_for_server(camp_port, camp)
-                camp_cookie, _ = login_campfire(camp_port)
+                camp_cookie, camp_csrf = login_campfire(camp_port)
                 for label, path in (("empty", "/searches"), ("no matches", "/searches?q=unmatched"), ("results", "/searches?q=benchmark")):
                     source = get_room(camp_port, camp_cookie, path)
                     target = get_room(rust_port, "session_token=benchmark-session", path)
                     compare(source, target, label)
+                if args.browser:
+                    rich = '<div>benchmark links <a href="https://example.com/page">external</a> <a href="/rooms/1">internal</a></div>'
+                    post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rich, "search-link-fixture")
+                    post_message(camp_port, camp_cookie, camp_csrf, rich, "search-link-fixture")
+                    rust_view = browser_search(rust_port)
+                    camp_view = browser_search(camp_port)
+                    for name, view in (("rustfire", rust_view), ("campfire", camp_view)):
+                        assert view["count"] == min(args.messages, 100) and view["height"] > view["viewport"], (name, view)
+                        assert view["height"] - view["viewport"] - view["top"] <= 2, (name, view)
+                        assert (view["externalTarget"], view["internalTarget"]) == ("_blank", "_top"), (name, view)
+                    print(f"search browser scroll: Rustfire={rust_view}, Campfire={camp_view}")
                 if args.read_clients:
                     binary = temp / "checked_get"
                     subprocess.run(["go", "build", "-o", str(binary), "bench/checked_get.go"], check=True)

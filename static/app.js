@@ -24,6 +24,7 @@ document.addEventListener('keydown',event=>{
   if(form){event.preventDefault();form.requestSubmit();}
 });
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
+const formatReplyLinks=root=>root.querySelectorAll('[data-reply-target="body"] a').forEach(link=>{link.target=link.href.startsWith(location.origin)?'_top':'_blank';});
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
 const searchResults=document.querySelector('#search-results');
@@ -35,6 +36,8 @@ if(searchResults){
     message.classList.add('message--formatted');
   }
   results.querySelectorAll('[data-controller~="web-share"]').forEach(node=>{node.hidden=typeof navigator.canShare!=='function';});
+  formatReplyLinks(results);
+  results.scrollTo({top:results.scrollHeight});
 }
 document.addEventListener('click',async event=>{
   const copy=event.target.closest('[data-action~="copy-to-clipboard#copy"]');
@@ -188,7 +191,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       else{content?.removeAttribute('tabindex');content?.removeAttribute('aria-describedby');}
     });
     messages.querySelectorAll('[data-controller~="web-share"]').forEach(node=>{node.hidden=typeof navigator.canShare!=='function';});
-    messages.querySelectorAll('[data-reply-target="body"] a').forEach(link=>{link.target=link.href.startsWith(location.origin)?'_top':'_blank';});
+    formatReplyLinks(messages);
   };
   const formatMessageGroups=()=>{
     let previous=null,previousDay=null;
