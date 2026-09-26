@@ -685,7 +685,7 @@ fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String
         } else {
             html.clone()
         };
-    (action_text_plain(&plain_input).trim().to_string(), html)
+    (action_text_plain_body(&plain_input), html)
 }
 fn has_preview_card(html: Option<&str>) -> bool {
     html.is_some_and(|html| html.contains("class=\"og-embed gap\""))
@@ -759,6 +759,14 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
 fn action_text_plain(input: &str) -> String {
     let document = ParsedHtml::parse_fragment(input);
     trim_plain_newlines(&action_text_plain_node(document.tree.root())).to_string()
+}
+fn action_text_plain_body(input: &str) -> String {
+    let plain = action_text_plain(input);
+    if plain.trim().is_empty() {
+        String::new()
+    } else {
+        plain
+    }
 }
 fn mention_signature(
     key: &[u8],
@@ -2675,7 +2683,7 @@ async fn reject_banned_ip(
             .headers()
             .get(header::ACCEPT)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("text/html"));
+            .is_none_or(|value| value.contains("text/html") || value.contains("*/*"));
     let bot_api_request = {
         let segments: Vec<_> = request.uri().path().split('/').filter(|part| !part.is_empty()).collect();
         segments.len() >= 4
@@ -4075,7 +4083,7 @@ async fn room_show_with_target(
 ) -> AppResult {
     let u = match user(&s, &headers) {
         Ok(user) => user,
-        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(StatusCode::UNAUTHORIZED) => return Err(StatusCode::UNAUTHORIZED),
         Err(error) => return Err(error),
     };
     let room = match room_for(&s, u.id, rid) {
@@ -4951,7 +4959,7 @@ fn insert_message(
                 s.imported_mention_signing_key.as_deref(),
                 s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
             )?;
-            plain = action_text_plain(&original_plain).trim().to_string();
+            plain = action_text_plain_body(&original_plain);
         }
         (plain, Some(html))
     } else {
@@ -5500,7 +5508,7 @@ async fn message_create(
             matches!(f.format.as_deref(), None | Some("html")),
         )
     };
-    let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), false)?;
+    let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), true)?;
     if s.webhooks_enabled {
         if let Err(error) = enqueue_webhooks(&s, &m) {
             eprintln!("Rustfire webhook dispatch error: {error}");
@@ -5667,15 +5675,12 @@ async fn message_update(
                 s.imported_mention_signing_key.as_deref(),
                 s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
             )?;
-            plain = action_text_plain(&original_plain).trim().to_string();
+            plain = action_text_plain_body(&original_plain);
         }
         (plain, Some(html), Some(normalized), used)
     } else {
         (body.to_string(), None, None, Vec::new())
     };
-    if plain.trim().is_empty() && !has_preview_card(body_html.as_deref()) {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
     let updated_at = now();
     let updated_at_ns =
         message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -10380,7 +10385,7 @@ fn render_imported_rich_text(
             if *missing_search && cleaned.is_some() {
                 let (_, original_plain) = replace_mention_attachments(source, &tx, signing_key, imported_key, avatar_key)
                     .map_err(|status| format!("reading imported message {id}: {status}"))?;
-                plain = action_text_plain(&original_plain).trim().to_string();
+                plain = action_text_plain_body(&original_plain);
             }
             if *missing_search {
                 tx.execute("UPDATE messages SET body=?1,body_html=?2 WHERE id=?3", params![plain, html, id])?;

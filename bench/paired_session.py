@@ -80,6 +80,10 @@ def check(port, database):
     assert (status, location) == (302, "/"), (status, location)
     assert session_count(database) == starting_sessions
     assert request(opener, port, "/")[:2] == (302, "/session/new")
+    assert request(opener, port, "/rooms/1")[:2] == (302, "/session/new")
+    status, _, sign_in_page = request(opener, port, "/session/new")
+    assert status == 200
+    assert request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "benchmark-password"}, token(sign_in_page))[:2] == (302, "/rooms/1")
     return original_shape
 
 
@@ -125,7 +129,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired sign-in form, rejection, session, and sign-out")
+    print("PASS paired sign-in form, rejection, session, sign-out, and return to a requested room")
 
 
 if __name__ == "__main__":

@@ -38,6 +38,32 @@ CASES = [
     ("event-handler", "<div><a href='/x' onmouseover='alert(1)'>x</a> <span onclick='alert(2)'>y</span></div>"),
     ("data-link", "<div><a href='data:text/html,pwned'>x</a></div>"),
     ("formatting", "<div><a href='https://example.com'>example</a> <strong>bold</strong> <code>code</code><ul><li>one</li><li>two</li></ul></div>"),
+    ("two-paragraphs", "<div><p>First</p><p>Second</p></div>"),
+    ("heading-paragraph", "<h2>Heading</h2><p>Following paragraph</p>"),
+    ("blockquote-paragraph", "<blockquote><p>Quoted paragraph</p></blockquote><p>After</p>"),
+    ("pre-linebreak", "<pre>First\nSecond</pre><div>After</div>"),
+    ("nested-list", "<ul><li>One<ul><li>Nested</li></ul></li><li>Two</li></ul>"),
+    ("ordered-list", "<ol><li>First</li><li>Second</li></ol>"),
+    ("definition-list", "<dl><dt>Term</dt><dd>Definition</dd></dl><p>After</p>"),
+    ("unknown-paragraph-wrapper", "<div>Before<section><p>Inside</p></section>After</div>"),
+    ("linebreak-run", "<div>Before<br><br>After</div>"),
+    ("mixed-inline", "<div>Left<strong>Bold</strong><em>Italic</em><code>Code</code>Right</div>"),
+    ("leading-trailing-space", "<div>  Leading and trailing  </div>"),
+    ("repeated-spaces", "<div>A   B&nbsp;&nbsp;C</div>"),
+    ("encoded-entities", "<div>One &amp; two &lt; three &#169; &#x1F600;</div>"),
+    ("leading-break", "<div><br>After</div>"),
+    ("trailing-break", "<div>Before<br></div>"),
+    ("empty-paragraph", "<p>Before</p><p></p><p>After</p>"),
+    ("empty-div", "<div>Before</div><div></div><div>After</div>"),
+    ("nested-blockquotes", "<blockquote><div>Outer<blockquote><div>Inner</div></blockquote>End</div></blockquote>"),
+    ("mixed-nested-lists", "<ol><li>First<ul><li>Inner</li></ul></li><li>Second</li></ol>"),
+    ("malformed-unclosed-div", "<div>Before<div>Inside"),
+    ("malformed-unclosed-paragraph", "<p>Before<p>After"),
+    ("malformed-table", "<div>Before<table><tr><td>Cell</table>After</div>"),
+    ("comment-between", "<div>Before<!-- comment -->After</div>"),
+    ("invisible-block", "<div>Before<div hidden>Hidden</div>After</div>"),
+    ("soft-hyphen", "<div>One&shy;Two</div>"),
+    ("unicode-lines", "<div>Line one\u2028Line two\u2029Line three</div>"),
 ]
 
 
@@ -111,6 +137,29 @@ def post(port, cookie, csrf, case):
         connection.close()
 
 
+def post_blank(port, cookie, csrf, name, body):
+    client_id = f"paired-rich-filter-{name}"
+    fields = urllib.parse.urlencode({
+        "message[body]": body,
+        "message[client_message_id]": client_id,
+        "authenticity_token": csrf,
+    })
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("POST", "/rooms/1/messages", fields, {
+            "Cookie": cookie,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/vnd.turbo-stream.html, text/html",
+        })
+        response = connection.getresponse()
+        payload = response.read()
+        presentation = Presentation(client_id)
+        presentation.feed(payload.decode())
+        return response.status, presentation.structure
+    finally:
+        connection.close()
+
+
 def indexed_texts(database, cases):
     with sqlite3.connect(database) as db:
         return {
@@ -122,12 +171,12 @@ def indexed_texts(database, cases):
         }
 
 
-def edit_table(port, cookie, csrf, database):
+def edit_message(port, cookie, csrf, database, name, body):
     with sqlite3.connect(database) as db:
-        message_id = db.execute("SELECT id FROM messages WHERE client_message_id='paired-rich-filter-table'").fetchone()[0]
+        message_id = db.execute("SELECT id FROM messages WHERE client_message_id=?", (f"paired-rich-filter-{name}",)).fetchone()[0]
     fields = urllib.parse.urlencode({
         "_method": "patch",
-        "message[body]": "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>",
+        "message[body]": body,
         "authenticity_token": csrf,
     })
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
@@ -139,7 +188,7 @@ def edit_table(port, cookie, csrf, database):
         })
         response = connection.getresponse()
         response.read()
-        return response.status, urllib.parse.urlsplit(response.getheader("Location") or "").path, indexed_texts(database, [("table", "")])["table"]
+        return response.status, urllib.parse.urlsplit(response.getheader("Location") or "").path, indexed_texts(database, [(name, "")])[name]
     finally:
         connection.close()
 
@@ -149,6 +198,7 @@ def main():
     parser.add_argument("--sweep", action="store_true", help="include allowed-tag, attribute, and URL-scheme matrices")
     args = parser.parse_args()
     cases = CASES + (sweep_cases() if args.sweep else [])
+    blank_cases = [("spaces-only-div", "<div>  </div>"), ("break-only-div", "<div><br></div>"), ("empty-div", "<div></div>"), ("empty-raw", "")]
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-rich-filters-") as scratch:
         temp = pathlib.Path(scratch)
@@ -167,8 +217,11 @@ def main():
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
             try:
                 rust_results = [post(rust_port, "session_token=benchmark-session", "benchmark-csrf", case) for case in cases]
+                rust_blank = {name: post_blank(rust_port, "session_token=benchmark-session", "benchmark-csrf", name, body) for name, body in blank_cases}
                 rust_plain = indexed_texts(rust_db, cases)
-                rust_edit = edit_table(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db)
+                rust_blank_plain = indexed_texts(rust_db, blank_cases)
+                rust_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "table", "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>")
+                rust_blank_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "spaces-only-div", "<div></div>")
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -177,8 +230,11 @@ def main():
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
                     camp_results = [post(camp_port, cookie, csrf, case) for case in cases]
+                    camp_blank = {name: post_blank(camp_port, cookie, csrf, name, body) for name, body in blank_cases}
                     camp_plain = indexed_texts(camp_db, cases)
-                    camp_edit = edit_table(camp_port, cookie, csrf, camp_db)
+                    camp_blank_plain = indexed_texts(camp_db, blank_cases)
+                    camp_edit = edit_message(camp_port, cookie, csrf, camp_db, "table", "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>")
+                    camp_blank_edit = edit_message(camp_port, cookie, csrf, camp_db, "spaces-only-div", "<div></div>")
                 finally:
                     stop_server(camp)
         finally:
@@ -193,8 +249,13 @@ def main():
     assert not mismatches, mismatches
     plain_mismatches = {name: (rust_plain[name], camp_plain[name]) for name, _ in cases if rust_plain[name] != camp_plain[name]}
     assert not plain_mismatches, plain_mismatches
+    assert rust_blank == camp_blank, (rust_blank, camp_blank)
+    assert all(status == 200 for status, _ in rust_blank.values()), rust_blank
+    assert rust_blank_plain == camp_blank_plain, (rust_blank_plain, camp_blank_plain)
     assert rust_edit == camp_edit == (302, "/rooms/1/messages/2", ("EditedCellEnd",)), (rust_edit, camp_edit)
-    print(f"PASS {len(cases)} paired rich-text presentations and search-index bodies, plus edited table text")
+    assert rust_blank_edit == camp_blank_edit, (rust_blank_edit, camp_blank_edit)
+    assert rust_blank_edit[0] == 302 and rust_blank_edit[2] == ("",), rust_blank_edit
+    print(f"PASS {len(cases)} paired rich-text presentations and search-index bodies, four blank creates, and two edits")
 
 
 if __name__ == "__main__":

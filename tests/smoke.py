@@ -147,14 +147,15 @@ def main():
             code, login_url, _ = request(browser_visitor, base, f"/rooms/1/@{message['id']}", headers={"Accept": "text/html"})
             assert code == 200 and login_url.endswith("/session/new")
             code, return_url, page = request(browser_visitor, base, "/session", {"email_address": "admin@example.com", "password": "password123"})
-            assert code == 200 and return_url.endswith(f"/rooms/1/@{message['id']}") and "hello from smoke" in page
+            assert code == 200 and return_url.endswith(f"/rooms/1/@{message['id']}") and "hello from smoke" in page, (code, return_url, page[:300])
             boost_since = int(time.time() * 1000)
             time.sleep(.02)
             code, _, page = request(admin, base, f"/messages/{message['id']}/boosts", {"content": "👍"})
             assert code == 200 and "👍" in page
             code, _, payload = request(admin, base, f"/rooms/1/refresh?since={boost_since}", headers={"Accept": "text/vnd.turbo-stream.html"})
             assert code == 200 and "action='replace' target='message_test-1'" in payload and "👍" in payload
-            assert request(client(),base,f"/messages/{message['id']}/boosts")[0]==401
+            anonymous_boost_status, anonymous_boost_url, _ = request(client(),base,f"/messages/{message['id']}/boosts")
+            assert anonymous_boost_status == 200 and anonymous_boost_url.endswith("/session/new")
             assert "Add a boost" in request(admin,base,f"/messages/{message['id']}/boosts/new")[2]
             code,_,page=request(admin,base,f"/messages/{message['id']}/boosts",{"boost[content]":"🔥"})
             assert code==200 and "🔥" in page
@@ -220,7 +221,7 @@ def main():
             refresh_since = int(time.time() * 1000)
             time.sleep(.02)
             code, _, page = request(admin, base, f"/rooms/1/messages/{message['id']}", {"message[body]": "hello edited"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             code, _, payload = request(admin, base, f"/rooms/1/refresh?since={refresh_since}", headers={"Accept": "text/vnd.turbo-stream.html"})
             assert code == 200 and "action='replace' target='message_test-1'" in payload and "hello edited" in payload
             code, _, page = request(admin, base, "/rooms/1")
@@ -580,7 +581,8 @@ def main():
             assert code == 200 and "href='/account/bots/new'" in page
             code, _, page = request(admin, base, "/account/bots/new")
             assert code == 200 and "name='user[avatar]'" in page and "name='user[name]'" in page and "name='user[webhook_url]'" in page
-            assert request(client(), base, "/account/bots/new")[0] == 401
+            anonymous_bot_status, anonymous_bot_url, _ = request(client(), base, "/account/bots/new")
+            assert anonymous_bot_status == 200 and anonymous_bot_url.endswith("/session/new")
             code, _, page = request(admin, base, "/account/bots", {"name": "Robot"})
             key = bot_key_from_page(page)
             assert f"curl -d 'Hello!' {base}/rooms/1/{key}/messages" in html.unescape(page)
@@ -702,15 +704,22 @@ def main():
             local_sgid = f"{local_encoded}--{hmac.new(local_key, local_encoded.encode(), hashlib.sha1).hexdigest()}"
             assert local_sgid != imported_sgid
             local_body = mention_html(3).replace(bot_suggestion["sgid"], local_sgid)
+            expected_webhooks = len(webhook_requests) + 1
             code, _, local_response = request(admin, base, "/rooms/1/messages", {"message[body]":local_body,"message[format]":"html"}, headers={"Accept":"application/json"})
             assert code == 201
             local_id = json.loads(local_response)["id"]
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(local_id,)).fetchone() == (3,)
+            for _ in range(100):
+                if len(webhook_requests) >= expected_webhooks:
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError("local mention webhook did not arrive")
             edit_page = request(admin, base, f"/rooms/1/messages/{structured_id}/edit")[2]
             assert "data-trix-attachment" in html.unescape(edit_page)
-            assert request(admin, base, f"/rooms/1/messages/{structured_id}", {"message[body]":mention_html(3).replace("selected mention", "edited mention"),"message[format]":"html"}, method="PATCH")[0] == 303
+            assert request(admin, base, f"/rooms/1/messages/{structured_id}", {"message[body]":mention_html(3).replace("selected mention", "edited mention"),"message[format]":"html"}, method="PATCH")[0] == 302
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(structured_id,)).fetchone() == (3,)
-            assert request(admin, base, f"/rooms/1/messages/{structured_id}", {"message[body]":"No mention now"}, method="PATCH")[0] == 303
+            assert request(admin, base, f"/rooms/1/messages/{structured_id}", {"message[body]":"No mention now"}, method="PATCH")[0] == 302
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM message_mentions WHERE message_id=?",(structured_id,)).fetchone() == (0,)
             prior_webhooks = len(webhook_requests)
             assert request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(999),"message[format]":"html"}, headers={"Accept":"application/json"})[0] == 201
@@ -831,7 +840,7 @@ def main():
             assert "formatted text" in formatted["body"]["plain_text"]
             assert "<strong>formatted</strong>" in request(admin, base, "/rooms/1")[2]
             code, _, _ = request(admin, base, f"/rooms/1/messages/{formatted['id']}", {"message[body]": "<div><em>changed</em></div>"}, method="PATCH")
-            assert code == 303
+            assert code == 302
             assert "<em>changed</em>" in request(admin, base, "/rooms/1")[2]
             preview = "<div><action-text-attachment content-type='application/vnd.actiontext.opengraph-embed' href='javascript:alert(1)' url='data:image/svg+xml;base64,PHN2Zy8+' filename='Free cookies' caption='Cookies here'></action-text-attachment></div>"
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": preview, "message[format]": "html"}, headers={"Accept": "application/json"})
@@ -873,7 +882,6 @@ def main():
             moved = client()
             code, _, page = request(moved, base, transfer)
             assert code == 200 and "data-controller='auto-submit'" in page and "name='_method' value='put'" in page
-            transfer_csrf = CSRF[moved]
             code, _, _ = request(moved, base, transfer, {}, method="PUT")
             assert code == 302, code
             assert request(moved, base, "/rooms/1")[0] == 200
@@ -888,10 +896,11 @@ def main():
             banned_ip = client()
             assert request(banned_ip, base, "/session/new")[0] == 200
             assert request(banned_ip, base, "/session", {"email_address": "none@example.com", "password": "bad"}, headers={"X-Forwarded-For": "8.8.8.8"})[0] == 429
-            assert request(member, base, "/rooms/1")[0] == 401
-            assert request(second_session, base, "/rooms/1")[0] == 401
-            assert request(moved, base, "/rooms/1")[0] == 401
-            assert request(moved, base, transfer, {}, method="PUT", headers={"X-CSRF-Token": transfer_csrf})[0] == 400
+            for revoked_session in (member, second_session, moved):
+                status, url, _ = request(revoked_session, base, "/rooms/1")
+                assert status == 200 and url.endswith("/session/new")
+            revoked_transfer = request(moved, base, transfer, {}, method="PUT", headers={"X-CSRF-Token": CSRF[moved]})
+            assert revoked_transfer[0] == 400, revoked_transfer[:2]
             for _ in range(100):
                 with sqlite3.connect(f"{tmp}/test.db") as ban_db:
                     remaining = ban_db.execute("SELECT COUNT(*) FROM messages WHERE creator_id=2 AND body='ban removes this message'").fetchone()[0]
@@ -957,8 +966,8 @@ def main():
             assert code == 200 and "Member Two" in retained_page
             assert f'id="list_rooms_direct_{retained_direct}"' in request(admin, base, "/users/me/sidebar")[2]
             assert request(admin, base, f"/rooms/{converted_room}")[0] == 200
-            code, _, _ = request(member, base, "/rooms/1")
-            assert code == 401
+            code, member_url, _ = request(member, base, "/rooms/1")
+            assert code == 200 and member_url.endswith("/session/new")
             throttle=client()
             assert request(throttle,base,"/session/new")[0]==200
             for _ in range(10):
@@ -986,7 +995,8 @@ def main():
             assert signout[0] == 302, signout
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM push_subscriptions WHERE user_id=1 AND endpoint=?", (push_keys["endpoint"],)).fetchone()[0] == 0
-            assert request(admin, base, "/rooms/1")[0] == 401
+            signed_out_status, signed_out_url, _ = request(admin, base, "/rooms/1")
+            assert signed_out_status == 200 and signed_out_url.endswith("/session/new")
             process.terminate()
             process.wait(timeout=5)
             with sqlite3.connect(f"{tmp}/test.db") as check_db:

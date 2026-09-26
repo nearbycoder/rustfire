@@ -113,7 +113,7 @@ def main():
                 body = f'<div>{label} <action-text-attachment sgid="{signed}" content-type="{content_type}" filename="{filename}"></action-text-attachment></div>'
                 fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(?,'Message',?,'body',?,?,?)", (rich_id, message_id, body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
                 fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(?,?)", (message_id, f"{label} [{filename}]"))
-            filtered_body = "<div>Before<section><p>Nested <em>text</em></p></section>After</div>"
+            filtered_body = "<div>  Before<section><p>Nested <em>text</em></p></section>After  </div>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(10,'Message',11,'body',?,?,?)", (filtered_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
@@ -230,8 +230,8 @@ def main():
             assert imported.execute("SELECT body FROM messages WHERE id=2").fetchone() == ("",)
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=2").fetchone() == ("imported.txt",)
             filtered_plain, filtered_source, filtered_html = imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=11").fetchone()
-            assert filtered_plain == "BeforeNested text\n\nAfter" and filtered_source == filtered_body, (filtered_plain, filtered_source)
-            assert "Nested" not in filtered_html and "BeforeAfter" in filtered_html, filtered_html
+            assert filtered_plain == "  BeforeNested text\n\nAfter  " and filtered_source == filtered_body, (filtered_plain, filtered_source)
+            assert "Nested" not in filtered_html and "BeforeAfter" in filtered_html.replace("  ", ""), filtered_html
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=11").fetchone() == (filtered_plain,)
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
             mention_plain, mention_html = imported.execute("SELECT body,body_html FROM messages WHERE id=3").fetchone()

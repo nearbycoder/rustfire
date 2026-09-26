@@ -20,9 +20,11 @@ BUNDLE = pathlib.Path("/tmp/rustfire-baseline/bundle")
 REVISION = "91d294f4a09f9bbe37f9548959bfcb43645678fb"
 
 
-def request(port, cookie, method, path, csrf=None, fields=None, frame=None):
+def request(port, cookie, method, path, csrf=None, fields=None, frame=None, accept="text/html"):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
-    headers = {"Cookie": cookie, "Accept": "text/html"}
+    headers = {"Cookie": cookie}
+    if accept is not None:
+        headers["Accept"] = accept
     body = None
     if fields is not None:
         body = urllib.parse.urlencode([*fields.items(), ("authenticity_token", csrf)])
@@ -75,6 +77,8 @@ def structure(page, frame_id, ignore_cached_csrf=False):
 
 
 def check_app(name, port, cookie, csrf, database, samples):
+    anonymous_status, anonymous_location, _ = request(port, "", "GET", "/messages/1/boosts", accept=None)
+    anonymous = anonymous_status, urllib.parse.urlsplit(anonymous_location).path
     for key, path, frame in (("index", "/messages/1/boosts", "boosting_message_boost-fixture"),
                              ("new", "/messages/1/boosts/new", "new_boost_message_boost-fixture"),
                              ("index-direct", "/messages/1/boosts", None),
@@ -96,7 +100,7 @@ def check_app(name, port, cookie, csrf, database, samples):
     samples.joinpath(f"{name}-deleted.html").write_text(body)
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT count(*) FROM boosts WHERE message_id=1").fetchone() == (0,)
-    return status
+    return status, anonymous
 
 
 def main():
@@ -153,7 +157,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired boost index/new frames and create/delete actions")
+    print("PASS paired boost index/new frames, create/delete actions, and anonymous redirect")
 
 
 if __name__ == "__main__":
