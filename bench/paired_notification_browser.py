@@ -1,4 +1,4 @@
-"""Compare failed browser push opt-in behavior with pinned Campfire."""
+"""Compare browser push opt-in, denial, and first-run behavior with Campfire."""
 
 import json
 import pathlib
@@ -14,7 +14,7 @@ from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 from paired_reply_browser import browser
 
 
-def check_browser(session, port):
+def check_browser(session, port, scenario):
     browser(session, "open", f"http://127.0.0.1:{port}/session/new")
     browser(session, "fill", 'input[name="email_address"]', "benchmark@example.invalid")
     browser(session, "fill", 'input[name="password"]', "benchmark-password")
@@ -22,8 +22,14 @@ def check_browser(session, port):
     browser(session, "wait", "--url", "**/rooms/*")
     browser(session, "wait", '.button_to_change_notifying [data-notifications-target="bell"]')
     browser(session, "wait", "--load", "networkidle")
+    native_registration = json.loads(browser(session, "eval", "(async()=>!!(await navigator.serviceWorker.getRegistration(location.origin)))()"))
+    initial_bell = json.loads(browser(session, "eval", """(() => {
+      const bell=document.querySelector('.button_to_change_notifying [data-notifications-target=bell]');
+      return {pulsing:bell.classList.contains('btn--pulsing'),images:[...bell.querySelectorAll('img')].map(image=>image.hidden)};
+    })()"""))
     browser(session, "eval", """(() => {
       window.__pushEvents=[];
+      const scenario=%s;
       const subscription={
         toJSON:()=>({endpoint:'https://fcm.googleapis.com/fcm/send/paired-browser',keys:{p256dh:'key',auth:'auth'}}),
         unsubscribe:async()=>{window.__pushEvents.push('unsubscribe');return true}
@@ -32,7 +38,11 @@ def check_browser(session, port):
         getSubscription:async()=>{window.__pushEvents.push('getSubscription');return null},
         subscribe:async()=>{window.__pushEvents.push('subscribe');return subscription}
       }};
-      Object.defineProperty(window,'Notification',{configurable:true,value:{permission:'granted'}});
+      Object.defineProperty(window,'Notification',{configurable:true,value:{permission:scenario==='pwa-denied'?'denied':'granted'}});
+      if(scenario==='pwa-denied'){
+        const originalMatchMedia=window.matchMedia.bind(window);
+        window.matchMedia=query=>query==='(display-mode: standalone)'?{matches:true}:originalMatchMedia(query);
+      }
       Object.defineProperty(navigator.serviceWorker,'getRegistration',{configurable:true,value:async()=>{
         window.__pushEvents.push('getRegistration');return registration;
       }});
@@ -40,25 +50,34 @@ def check_browser(session, port):
       window.fetch=(input,options)=>{
         if(String(input).includes('/users/me/push_subscriptions')){
           window.__pushEvents.push('post');
-          return Promise.resolve(new Response('',{status:500}));
+          if(scenario==='rejected')return Promise.resolve(new Response('',{status:500}));
         }
         return originalFetch(input,options);
       };
-    })()""")
+    })()""" % json.dumps(scenario))
     browser(session, "click", '.button_to_change_notifying [data-notifications-target="bell"]')
-    browser(session, "wait", "--fn", "window.__pushEvents.includes('unsubscribe')")
+    if scenario == "rejected":
+        browser(session, "wait", "--fn", "window.__pushEvents.includes('unsubscribe')")
+    elif scenario == "success":
+        browser(session, "wait", "--fn", "window.__pushEvents.includes('post') && !document.querySelector('.button_to_change_notifying [data-notifications-target=bell]')")
+    else:
+        browser(session, "wait", "--fn", "document.querySelector('[data-notifications-target=notAllowedNotice]').open")
     result = json.loads(browser(session, "eval", """(() => ({
       events:window.__pushEvents,
       dialogOpen:document.querySelector('[data-notifications-target="notAllowedNotice"]')?.open,
-      firstRunSeen:document.cookie.includes('notifications-first-run-seen=true')
+      firstRunSeen:document.cookie.includes('notifications-first-run-seen=true'),
+      pwaFirstRunSeen:document.cookie.includes('notifications-pwa-first-run-seen=true'),
+      bellGone:!document.querySelector('.button_to_change_notifying [data-notifications-target=bell]')
     }))()"""))
+    result["nativeRegistration"] = native_registration
+    result["initialBell"] = initial_bell
     return result
 
 
 def main():
     assert shutil.which("agent-browser"), "agent-browser CLI is required"
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
-    sessions = [f"notification-rust-{uuid.uuid4().hex[:8]}", f"notification-camp-{uuid.uuid4().hex[:8]}"]
+    sessions = [f"notification-{scenario}-{app}-{uuid.uuid4().hex[:8]}" for scenario in ("rejected", "success", "pwa-denied") for app in ("rust", "camp")]
     with tempfile.TemporaryDirectory(prefix="paired-notification-browser-") as scratch:
         temp = pathlib.Path(scratch)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
@@ -78,10 +97,16 @@ def main():
                     camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=REPOSITORY, env=environment, stdout=log, stderr=log)
                     try:
                         wait_for_server(camp_port, camp)
-                        rust_result = check_browser(sessions[0], rust_port)
-                        camp_result = check_browser(sessions[1], camp_port)
-                        print(json.dumps({"rust": rust_result, "camp": camp_result}, indent=2))
-                        assert rust_result == camp_result, "Browser push opt-in differs from Campfire"
+                        for index, scenario in enumerate(("rejected", "success", "pwa-denied")):
+                            rust_result = check_browser(sessions[2 * index], rust_port, scenario)
+                            camp_result = check_browser(sessions[2 * index + 1], camp_port, scenario)
+                            print(json.dumps({"scenario": scenario, "rust": rust_result, "camp": camp_result}, indent=2))
+                            assert rust_result == camp_result, f"Browser push {scenario} differs from Campfire"
+                        with sqlite3.connect(rust_db) as db:
+                            rust_rows = db.execute("SELECT user_id,endpoint,p256dh_key,auth_key FROM push_subscriptions").fetchall()
+                        with sqlite3.connect(camp_db) as db:
+                            camp_rows = db.execute("SELECT user_id,endpoint,p256dh_key,auth_key FROM push_subscriptions").fetchall()
+                        assert rust_rows == camp_rows == [(1, "https://fcm.googleapis.com/fcm/send/paired-browser", "key", "auth")], (rust_rows, camp_rows)
                     finally:
                         stop_server(camp)
             finally:
@@ -92,7 +117,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS failed browser push opt-in matches Campfire")
+    print("PASS browser push failure, success, and standalone denial match Campfire")
 
 
 if __name__ == "__main__":

@@ -880,13 +880,16 @@ if(notificationsControl){
       if(visible.length===1)visible[0].open=true;
     }
   };
+  const firstRunCookie=()=>window.matchMedia('(display-mode: standalone)').matches?'notifications-pwa-first-run-seen':'notifications-first-run-seen';
+  const pulseBell=()=>{
+    if(!document.cookie.split('; ').some(cookie=>cookie.startsWith(`${firstRunCookie()}=`)))roomBell?.classList.add('btn--pulsing');
+  };
   const showAlert=()=>{
     roomBell?.querySelectorAll('img').forEach(image=>image.hidden=!image.hidden);
-    if(!document.cookie.includes('notifications-first-run-seen='))roomBell?.classList.add('btn--pulsing');
   };
   const markSeen=()=>{
     roomBell?.classList.remove('btn--pulsing');
-    document.cookie='notifications-first-run-seen=true; SameSite=Lax; Path=/; Max-Age=31536000';
+    document.cookie=`${firstRunCookie()}=true; path=/; expires=${new Date(Date.now()+20*365*24*60*60*1000).toUTCString()}`;
   };
   const loadFrame=async()=>{
     const response=await fetch(frame.dataset.turboFrameUrlParam,{headers:{'Turbo-Frame':frame.id,'Accept':'text/html'}});
@@ -898,13 +901,14 @@ if(notificationsControl){
     frame=replacement;
   };
   const hasSubscription=async()=>{
-    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)||Notification.permission!=='granted')return false;
+    if(!('serviceWorker' in navigator)||!('Notification' in window))return false;
     const registration=await navigator.serviceWorker.getRegistration(window.location.origin);
-    return !!(await registration?.pushManager?.getSubscription());
+    const existingSubscription=await registration?.pushManager?.getSubscription();
+    return Notification.permission==='granted'&&!!registration&&!!existingSubscription;
   };
-  hasSubscription().then(enabled=>enabled?loadFrame():showAlert()).catch(showAlert);
+  hasSubscription().then(enabled=>{pulseBell();return enabled?loadFrame():showAlert()}).catch(showAlert);
   const subscribe=async()=>{
-    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))return false;
+    if(!('serviceWorker' in navigator)||!('Notification' in window))return false;
     const registration=await navigator.serviceWorker.getRegistration(window.location.origin)||await navigator.serviceWorker.register('/service-worker.js');
     if(Notification.permission==='denied')return false;
     const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
@@ -915,7 +919,7 @@ if(notificationsControl){
     const {endpoint,keys:{p256dh,auth}}=subscription.toJSON();
     fetch('/users/me/push_subscriptions',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({push_subscription:{endpoint,p256dh_key:p256dh,auth_key:auth}})}).then(response=>{
       if(!response.ok)subscription.unsubscribe();
-    }).catch(()=>subscription.unsubscribe());
+    });
     return true;
   };
   roomBell?.addEventListener('click',async()=>{
@@ -946,7 +950,6 @@ if(notificationsControl){
   });
   dialog?.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});
 }
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker').catch(() => {});
 document.addEventListener('change',event=>{
   const control=event.target;
   if(control instanceof HTMLInputElement){
