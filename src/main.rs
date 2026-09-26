@@ -2564,13 +2564,13 @@ fn presence_update(s: &AppState, uid: i64, rid: i64, action: &str) -> Result<(),
     let current = now();
     match action {
         "present" => {
-            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>?1 THEN connections+1 ELSE 1 END,connected_at=?2,unread_at=NULL WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
+            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN connections+1 ELSE 1 END,connected_at=?2,unread_at=NULL WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         "refresh" => {
-            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>?1 THEN connections ELSE 1 END,connected_at=?2 WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
+            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN connections ELSE 1 END,connected_at=?2 WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         "absent" => {
-            db.execute("UPDATE memberships SET connections=MAX(0,connections-1),connected_at=CASE WHEN connections<=1 THEN NULL ELSE connected_at END WHERE room_id=?1 AND user_id=?2",params![rid,uid]).map_err(db_err)?;
+            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN MAX(0,connections-1) ELSE 0 END,connected_at=CASE WHEN connected_at>=?1 AND connections>1 THEN connected_at ELSE NULL END WHERE room_id=?2 AND user_id=?3",params![cutoff,rid,uid]).map_err(db_err)?;
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     }
@@ -10324,6 +10324,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref(), imported_blob_signing_key.as_deref().unwrap_or(&blob_signing_key), imported_avatar_signing_key.as_deref().unwrap_or(&avatar_signing_key))?;
         return Ok(());
     }
+    let presence_cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
+    db.get()?.execute("UPDATE memberships SET connections=0,connected_at=NULL WHERE connected_at>=?1", [presence_cutoff])?;
     let custom_styles: Option<String> = db
         .get()?
         .query_row("SELECT custom_styles FROM accounts LIMIT 1", [], |row| row.get(0))

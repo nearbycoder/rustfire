@@ -107,6 +107,25 @@ try {
   await waitFor(frame => frame.type === 'welcome', 'Action Cable welcome');
   send({ command: 'subscribe', identifier: read });
   await confirm(read);
+  if (args.mode === 'stale') {
+    const staleTime = '2020-01-01 00:00:00';
+    const marker = '2025-01-01 00:00:00';
+    sql('update memberships set connections=3,connected_at=?,unread_at=? where room_id=1 and user_id=1', [staleTime, marker]);
+    send({ command: 'subscribe', identifier: first });
+    await confirm(first);
+    await readEvent();
+    await until(() => state()[0] === 1, 'stale subscription reset');
+    if (state()[2] !== null) throw new Error('Stale subscription did not clear unread marker');
+    sql('update memberships set connections=3,connected_at=?,unread_at=? where room_id=1 and user_id=1', [staleTime, marker]);
+    send({ command: 'message', identifier: first, data: JSON.stringify({ action: 'refresh' }) });
+    await until(() => state()[1] !== staleTime, 'stale refresh');
+    if (state()[0] !== 1 || state()[2] !== marker) throw new Error(`Stale refresh state differs: ${JSON.stringify(state())}`);
+    sql('update memberships set connections=3,connected_at=?,unread_at=? where room_id=1 and user_id=1', [staleTime, marker]);
+    send({ command: 'unsubscribe', identifier: first });
+    await until(() => state()[0] === 0, 'stale unsubscribe reset');
+    if (state()[1] !== null || state()[2] !== marker) throw new Error(`Stale unsubscribe state differs: ${JSON.stringify(state())}`);
+    console.log(JSON.stringify({ stale_subscribe: 1, stale_refresh: 1, stale_unsubscribe: 0, unread_preserved_on_refresh_and_unsubscribe: true }));
+  } else {
   const pageMarker = '2025-01-01 00:00:00';
   sql('update memberships set unread_at=? where room_id=1 and user_id=1', [pageMarker]);
   const page = await fetch(new URL('/rooms/1', base), { headers: { Cookie: cookie } });
@@ -143,6 +162,7 @@ try {
   const ended = state();
   if (ended[1] !== null || ended[2] !== marker) throw new Error(`Unsubscribe changed unread marker or remained connected: ${JSON.stringify(ended)}`);
   console.log(JSON.stringify({ connections: [1, 2, 2, 1, 0], read_events: 2, room_get_preserved_unread: true, room_get_read_event: false, presence_cleared_unread: true, refresh_preserved_unread: true, refresh_read_event: false, final_unread: marker }));
+  }
 } finally {
   socket.destroy();
 }
