@@ -90,6 +90,7 @@ struct AppState {
     imported_turbo_stream_signing_key: Option<Vec<u8>>,
     imported_cookie_signing_key: Option<Vec<u8>>,
     push_slots: Arc<Semaphore>,
+    push_queue_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
     login_attempts: Mutex<HashMap<IpAddr, VecDeque<std::time::Instant>>>,
@@ -5076,29 +5077,39 @@ fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCo
     } else {
         room_name
     };
-    let body = if direct {
-        message.body.clone()
-    } else {
-        format!("{}: {}", message.creator_name, message.body)
-    };
-    let body: String = body.chars().take(2500).collect();
+    let body = push_message_body(message, direct);
     for (subscription, user_id, badge, involvement) in rows {
         if involvement == "mentions" && !message.mention_ids.contains(&user_id) {
             continue;
         }
-        let Ok(permit) = s.push_slots.clone().try_acquire_owned() else {
+        let Ok(queue_permit) = s.push_queue_slots.clone().try_acquire_owned() else {
             break;
         };
         let state = s.clone();
         let payload=json!({"title":title,"options":{"body":body,"icon":"/account/logo","data":{"path":format!("/rooms/{}",message.room_id),"badge":badge}}}).to_string();
         tokio::spawn(async move {
-            let _permit = permit;
+            let _queue_permit = queue_permit;
+            let Ok(_worker_permit) = state.push_slots.clone().acquire_owned().await else {
+                return;
+            };
             if let Err(error) = deliver_push(state, subscription, payload).await {
                 eprintln!("Rustfire push delivery error: {error}");
             }
         });
     }
     Ok(())
+}
+fn push_message_body(message: &ChatMessage, direct: bool) -> String {
+    let plain = if message.body.trim().is_empty() {
+        message.attachment.as_ref().map(|file| file.filename.as_str()).unwrap_or("")
+    } else {
+        message.body.as_str()
+    };
+    if direct {
+        plain.to_string()
+    } else {
+        format!("{}: {plain}", message.creator_name)
+    }
 }
 async fn deliver_push(
     s: Arc<AppState>,
@@ -10381,6 +10392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         imported_turbo_stream_signing_key,
         imported_cookie_signing_key,
         push_slots: Arc::new(Semaphore::new(50)),
+        push_queue_slots: Arc::new(Semaphore::new(10_050)),
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
@@ -10747,6 +10759,38 @@ mod tests {
         assert_eq!(super::campfire_webhook_attachment_extension("text/plain"), Some("text"));
         assert_eq!(super::campfire_webhook_attachment_extension("text/html"), Some("html"));
         assert_eq!(super::campfire_webhook_attachment_extension("application/octet-stream"), None);
+    }
+
+    #[test]
+    fn push_body_uses_attachment_filename_and_keeps_full_text() {
+        let mut message = super::ChatMessage {
+            id: 1,
+            room_id: 1,
+            room_kind: Some("Rooms::Open".into()),
+            room_name: "General".into(),
+            mention_ids: Vec::new(),
+            creator_id: 1,
+            creator_name: "Alex".into(),
+            creator_role: 0,
+            creator_updated_at: String::new(),
+            body: String::new(),
+            body_html: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            client_message_id: String::new(),
+            attachment: Some(super::Attachment {
+                id: 1,
+                filename: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                width: None,
+                height: None,
+            }),
+            boosts: Vec::new(),
+        };
+        assert_eq!(super::push_message_body(&message, true), "report.pdf");
+        assert_eq!(super::push_message_body(&message, false), "Alex: report.pdf");
+        message.body = "x".repeat(3000);
+        assert_eq!(super::push_message_body(&message, false).len(), 3006);
     }
 
     #[test]
