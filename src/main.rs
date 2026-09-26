@@ -5186,58 +5186,22 @@ fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), Stat
     if !direct && message.mention_ids.is_empty() {
         return Ok(());
     }
-    let db = pool(s)?;
-    let room_name: Option<String> = db
-        .query_row(
-            "SELECT name FROM rooms WHERE id=?1",
-            [message.room_id],
-            |r| r.get(0),
-        )
-        .map_err(db_err)?;
-    let source_html: Option<String> = db
-        .query_row(
-            "SELECT body_source FROM messages WHERE id=?1",
-            [message.id],
-            |r| r.get(0),
-        )
-        .map_err(db_err)?;
-    let source_html = match source_html {
-        Some(source) => Some(action_text_webhook_html(&source)),
-        None if message.attachment.is_some() && message.body.is_empty() => None,
-        None => Some(message.body.clone()),
-    };
-    let mut q = db.prepare("SELECT u.id,u.name,u.bot_token,w.url FROM memberships m JOIN users u ON u.id=m.user_id JOIN webhooks w ON w.user_id=u.id WHERE m.room_id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL").map_err(db_err)?;
+    let mut db = pool(s)?;
+    let mut q = db.prepare("SELECT u.id FROM memberships m JOIN users u ON u.id=m.user_id JOIN webhooks w ON w.user_id=u.id WHERE m.room_id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL").map_err(db_err)?;
     let bots = q
-        .query_map([message.room_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })
+        .query_map([message.room_id], |r| r.get::<_, i64>(0))
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     drop(q);
-    drop(db);
-    for (id, name, token, url) in bots {
+    let tx = db.transaction().map_err(db_err)?;
+    for id in bots {
         if id == message.creator_id || (!direct && !message.mention_ids.contains(&id)) {
             continue;
         }
-        let key = format!("{id}-{token}");
-        let Ok(permit) = s.webhook_slots.clone().try_acquire_owned() else {
-            break;
-        };
-        let state = s.clone();
-        let post = message.clone();
-        let room_name = room_name.clone();
-        let source_html = source_html.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            deliver_webhook(state, id, name, key, url, room_name, source_html, post).await;
-        });
+        tx.execute("INSERT INTO webhook_jobs(bot_id,message_id,created_at) VALUES(?1,?2,?3)", params![id,message.id,now()]).map_err(db_err)?;
     }
+    tx.commit().map_err(db_err)?;
     Ok(())
 }
 fn action_text_webhook_html(input: &str) -> String {
@@ -8245,6 +8209,89 @@ async fn run_background_jobs(s: Arc<AppState>) {
         tokio::time::sleep(pause).await;
     }
 }
+fn claim_webhook_job(s: &AppState) -> Result<Option<(i64, i64, i64)>, StatusCode> {
+    let mut db = pool(s)?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let job = tx.query_row(
+        "SELECT id,bot_id,message_id FROM webhook_jobs WHERE claimed_at IS NULL OR claimed_at < unixepoch()-30 ORDER BY id LIMIT 1",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+    ).optional().map_err(db_err)?;
+    if let Some((id, _, _)) = job {
+        tx.execute("UPDATE webhook_jobs SET claimed_at=unixepoch() WHERE id=?1", [id]).map_err(db_err)?;
+    }
+    tx.commit().map_err(db_err)?;
+    Ok(job)
+}
+fn webhook_job_payload(s: &AppState, bot_id: i64, message_id: i64) -> Result<Option<(String, String, String, Option<String>, Option<String>, ChatMessage)>, StatusCode> {
+    let db = pool(s)?;
+    let details = db.query_row(
+        "SELECT u.name,u.bot_token,w.url,m.room_id,r.name,m.body_source FROM users u JOIN webhooks w ON w.user_id=u.id JOIN messages m ON m.id=?2 JOIN rooms r ON r.id=m.room_id WHERE u.id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL",
+        params![bot_id,message_id],
+        |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, i64>(3)?,row.get::<_, Option<String>>(4)?,row.get::<_, Option<String>>(5)?)),
+    ).optional().map_err(db_err)?;
+    let Some((name,token,url,room_id,room_name,source)) = details else { return Ok(None); };
+    drop(db);
+    let message = match message_by_id(s, room_id, message_id) {
+        Ok(message) => message,
+        Err(StatusCode::NOT_FOUND) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let source_html = match source {
+        Some(source) => Some(action_text_webhook_html(&source)),
+        None if message.attachment.is_some() && message.body.is_empty() => None,
+        None => Some(message.body.clone()),
+    };
+    Ok(Some((name,format!("{bot_id}-{token}"),url,room_name,source_html,message)))
+}
+async fn run_webhook_jobs(s: Arc<AppState>) {
+    loop {
+        let Ok(permit) = s.webhook_slots.clone().try_acquire_owned() else {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            continue;
+        };
+        let state = s.clone();
+        let claim = tokio::task::spawn_blocking(move || claim_webhook_job(&state)).await;
+        match claim {
+            Ok(Ok(Some((job_id, bot_id, message_id)))) => {
+                let state = s.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let payload_state = state.clone();
+                    let payload = tokio::task::spawn_blocking(move || webhook_job_payload(&payload_state, bot_id, message_id)).await;
+                    match payload {
+                        Ok(Ok(Some((name,key,url,room_name,source_html,message)))) => {
+                            deliver_webhook(state.clone(), bot_id, name, key, url, room_name, source_html, message).await;
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => {
+                            eprintln!("Webhook job payload failed: {error}");
+                            return;
+                        }
+                        Err(error) => {
+                            eprintln!("Webhook job worker failed: {error}");
+                            return;
+                        }
+                    }
+                    if let Ok(db) = pool(&state) {
+                        if let Err(error) = db.execute("DELETE FROM webhook_jobs WHERE id=?1", [job_id]) {
+                            eprintln!("Webhook job completion failed: {error}");
+                        }
+                    }
+                });
+            }
+            Ok(Ok(None)) => {
+                drop(permit);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            error => {
+                eprintln!("Webhook job claim failed: {error:?}");
+                drop(permit);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
 async fn user_unban(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -9985,6 +10032,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(ip_address);
         CREATE TABLE IF NOT EXISTS background_jobs(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_background_jobs_kind ON background_jobs(kind,id);
+        CREATE TABLE IF NOT EXISTS webhook_jobs(id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,created_at TEXT NOT NULL,claimed_at INTEGER);
+        CREATE INDEX IF NOT EXISTS idx_webhook_jobs_claim ON webhook_jobs(claimed_at,id);
         CREATE TABLE IF NOT EXISTS session_transfers(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY,name TEXT,type TEXT NOT NULL,creator_id INTEGER NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT NOT NULL DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
@@ -10400,6 +10449,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         variant_slots: Arc::new(Semaphore::new(4)),
     });
     tokio::spawn(run_background_jobs(state.clone()));
+    if state.webhooks_enabled {
+        tokio::spawn(run_webhook_jobs(state.clone()));
+    }
     let app = Router::new()
         .route("/", get(root))
         .route("/up", get(health))
