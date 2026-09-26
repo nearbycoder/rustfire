@@ -11,18 +11,23 @@ const base = new URL(args.base);
 const cookie = args.cookie;
 const socketCount = Number(args.sockets ?? 1);
 const messageCount = Number(args.messages ?? 1);
+const roomId = Number(args.room ?? 1);
+const clientPrefix = args['client-prefix'] ?? 'mixed';
+const firstId = Number(args['first-id'] ?? 41);
 const timeoutMs = Number(args.timeout ?? 60000);
-if (!cookie || base.protocol !== 'http:' || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1) {
-  throw new Error('Use --base http://host:port --cookie name=value --sockets N --messages N');
+if (!cookie || base.protocol !== 'http:' || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || !Number.isSafeInteger(roomId) || roomId < 1 || !Number.isSafeInteger(firstId) || firstId < 0 || !/^[A-Za-z0-9-]+$/.test(clientPrefix)) {
+  throw new Error('Use --base http://host:port --cookie name=value --sockets N --messages N [--room N --client-prefix PREFIX --first-id N]');
 }
 
-const response = await fetch(new URL('/rooms/1', base), { headers: { Cookie: cookie } });
+const response = await fetch(new URL(`/rooms/${roomId}`, base), { headers: { Cookie: cookie } });
 if (!response.ok) throw new Error(`Room page returned ${response.status}`);
 const page = await response.text();
 const source = page.match(/<turbo-cable-stream-source\b[^>]*>/gi)?.find(tag => /\bchannel=(['"])RoomMessagesChannel\1/i.test(tag));
 const signedName = source?.match(/\bsigned-stream-name=(['"])(.*?)\1/i)?.[2];
 if (!signedName) throw new Error('Signed room stream is missing');
 const identifier = JSON.stringify({ channel: 'RoomMessagesChannel', signed_stream_name: signedName });
+const streamPattern = new RegExp(`<turbo-stream\\b[^>]*\\baction=["']append["'][^>]*\\btarget=["']messages_rooms_open_${roomId}["']`);
+const clientPattern = new RegExp(`\\bid=["']message_${clientPrefix}-(\\d+)["']`);
 const sockets = [];
 const seen = Array.from({ length: socketCount }, () => new Set());
 const events = args['events-file'] ? Array(messageCount).fill(null) : null;
@@ -92,11 +97,11 @@ function connect(index) {
         } else if (event.type === 'reject_subscription' && event.identifier === identifier) fail(new Error(`Socket ${index} rejected`));
         else if (event.identifier === identifier && typeof event.message === 'string') {
           const html = event.message;
-          const stream = /<turbo-stream\b[^>]*\baction=["']append["'][^>]*\btarget=["']messages_rooms_open_1["']/.test(html);
-          const clientId = html.match(/\bid=["']message_mixed-(\d+)["']/)?.[1];
+          const stream = streamPattern.test(html);
+          const clientId = html.match(clientPattern)?.[1];
           const messageId = html.match(/\bdata-message-id=["'](\d+)["']/)?.[1];
           const number = Number(clientId);
-          if (!stream || !clientId || !Number.isSafeInteger(number) || number < 1 || number > messageCount || Number(messageId) !== 40 + number || seen[index].has(number)) {
+          if (!stream || !clientId || !Number.isSafeInteger(number) || number < 1 || number > messageCount || !Number.isSafeInteger(Number(messageId)) || Number(messageId) < 1 || (firstId && Number(messageId) !== firstId + number - 1) || seen[index].has(number)) {
             unexpected++;
           } else {
             seen[index].add(number);
@@ -121,6 +126,7 @@ try {
   const started = Date.now();
   const expected = socketCount * messageCount;
   while (received < expected && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
+  if (received === expected) await new Promise(resolve => setTimeout(resolve, 100));
   if (events) fs.writeFileSync(args['events-file'], JSON.stringify(events));
   console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, unexpected, closed_early: closedEarly, sampled, elapsed_ms: Date.now() - started }));
   if (received !== expected || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;

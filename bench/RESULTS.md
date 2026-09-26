@@ -643,3 +643,27 @@ The mixed probe now captures every append on one subscriber and compares each pa
 This strengthens message-stream content evidence for the tested plain-text workload. It does not establish byte-identical serialization, the behavior of other message types, per-event delivery latency, or sustained capacity.
 
 The same all-event comparison also passed at **1,000 subscribers** in both trial orders. Each app delivered **100,000/100,000** expected events, with no read, write, or socket errors. Rustfire served **3,108 / 3,094 reads/s** at **14.89 / 15.34 ms p95**, versus Campfire's **1,262 / 1,186 reads/s** at **54.36 / 60.12 ms p95**. Rustfire's write p95 was **8.63 / 7.97 ms**, versus Campfire's **144.10 / 115.72 ms**. Campfire emitted CSRF inputs in none of the first run's 100 appends and seven of the reverse run's 100; these were normalized as described above. This remains a short same-host, one-account fixture rather than a sustained or maximum-capacity result.
+
+## Paired multi-room, multi-user reads and writes
+
+`bench/paired_message_multi.py` spreads the full-HTML readers evenly across every room/user pair and schedules one authenticated writer per room. Each room starts with 40 matched messages. The paired probe checks initial parsed message pages, every measured GET's HTTP 200 status, HTML media type and 40 message roots, every POST's Turbo response, the saved room, creator, client ID and body, and each final page's latest 40 IDs. All checks passed with zero measured read errors. Each writer completed inside the ten-second read interval, so the full write set overlapped the measured reads.
+
+| Rooms / users | Read clients | Writes per app | Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| ---: | ---: | ---: | :---: | ---: | ---: | ---: | ---: |
+| 4 / 4 | 32 | 200 | No | 3,228 / 14.31 ms | 24.51 ms | 1,620 / 34.36 ms | 97.59 ms |
+| 4 / 4 | 32 | 200 | Yes | 3,315 / 14.02 ms | 24.39 ms | 1,553 / 38.96 ms | 111.95 ms |
+| 8 / 8 | 64 | 240 | No | 3,010 / 30.13 ms | 67.87 ms | 1,477 / 92.51 ms | 157.38 ms |
+| 8 / 8 | 64 | 240 | Yes | 2,962 / 32.08 ms | 68.17 ms | 1,029 / 157.74 ms | 263.08 ms |
+
+These are serial same-host runs with one release Rustfire process, 22 Campfire Puma workers, isolated Redis, and a local Go load generator. The four-room runs scheduled five writes per second per room; the eight-room runs scheduled three per second per room. They demonstrate better throughput and p95 latency for Rustfire on these sampled multi-user HTTP mixes. They do not include socket fanout, CPU or memory accounting, a separate load-generator host, hours of steady traffic, or complete application parity. Campfire's results varied between trial orders, so a sustained capacity limit is not established.
+
+The same multi-user probe was repeated with **100 signed subscribers per room**, under the corresponding writer's account. Every socket received all of its room's appends exactly once. The captured numeric message IDs matched the saved client IDs and rooms; there were no unexpected events or early closes. The four-room runs each delivered **20,000/20,000** events per app, and the eight-room runs each delivered **24,000/24,000**. Both trial orders passed all HTTP and database checks:
+
+| Rooms / users | Read clients | Sockets | Writes per app | Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| ---: | ---: | ---: | ---: | :---: | ---: | ---: | ---: | ---: |
+| 4 / 4 | 32 | 400 | 200 | No | 3,261 / 14.26 ms | 25.09 ms | 1,379 / 47.59 ms | 129.82 ms |
+| 4 / 4 | 32 | 400 | 200 | Yes | 3,255 / 14.24 ms | 26.25 ms | 1,419 / 52.02 ms | 104.09 ms |
+| 8 / 8 | 64 | 800 | 240 | No | 3,204 / 28.87 ms | 60.91 ms | 1,370 / 112.66 ms | 206.58 ms |
+| 8 / 8 | 64 | 800 | 240 | Yes | 3,186 / 28.96 ms | 68.29 ms | 1,360 / 104.51 ms | 211.62 ms |
+
+Socket subscription and reader warmup were outside the measured read interval. Each room's writer finished within ten seconds. This checks delivery counts and message identity under mixed activity across several rooms and accounts; it does not compare full event bytes, measure delivery latency, or establish a sustained limit. All clients and servers shared one host.

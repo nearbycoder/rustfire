@@ -24,6 +24,11 @@ type workerResult struct {
 	finished  time.Time
 }
 
+type target struct {
+	Path   string `json:"path"`
+	Cookie string `json:"cookie"`
+}
+
 type report struct {
 	Clients   int     `json:"clients"`
 	Seconds   float64 `json:"seconds"`
@@ -39,6 +44,7 @@ func main() {
 	base := flag.String("base", "", "server origin")
 	path := flag.String("path", "", "GET path and query")
 	cookie := flag.String("cookie", "", "session cookie")
+	targetsFile := flag.String("targets-file", "", "JSON array of path and cookie pairs, assigned to clients round-robin")
 	expectedHex := flag.String("expected-sha256", "", "SHA-256 of the expected response body")
 	expectedStatus := flag.Int("expected-status", http.StatusOK, "expected HTTP status")
 	expectedETag := flag.String("expected-etag", "", "expected ETag response header")
@@ -53,9 +59,23 @@ func main() {
 	clients := flag.Int("clients", 32, "number of concurrent keep-alive clients")
 	seconds := flag.Float64("seconds", 15, "measured duration")
 	flag.Parse()
-	if *base == "" || *path == "" || *cookie == "" || *clients < 1 || *seconds <= 0 {
-		fmt.Fprintln(os.Stderr, "base, path, cookie, positive clients and seconds are required")
+	if *base == "" || *clients < 1 || *seconds <= 0 || (*targetsFile == "" && (*path == "" || *cookie == "")) {
+		fmt.Fprintln(os.Stderr, "base, a path/cookie or targets file, positive clients and seconds are required")
 		os.Exit(2)
+	}
+	targets := []target{{Path: *path, Cookie: *cookie}}
+	if *targetsFile != "" {
+		data, err := os.ReadFile(*targetsFile)
+		if err != nil || json.Unmarshal(data, &targets) != nil || len(targets) == 0 {
+			fmt.Fprintln(os.Stderr, "targets-file must contain a nonempty JSON array")
+			os.Exit(2)
+		}
+		for _, item := range targets {
+			if !strings.HasPrefix(item.Path, "/") || item.Cookie == "" {
+				fmt.Fprintln(os.Stderr, "each target needs an absolute path and cookie")
+				os.Exit(2)
+			}
+		}
 	}
 	if *expectedMessages < 0 || *expectedCSRF < 0 || (*expectedHex == "" && *expectedMessages == 0 && *expectedCSRF == 0) {
 		fmt.Fprintln(os.Stderr, "provide a body hash or a positive expected content count")
@@ -79,12 +99,12 @@ func main() {
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	var invalidOnce sync.Once
-	get := func() (bool, error) {
-		request, err := http.NewRequest("GET", *base+*path, nil)
+	get := func(item target) (bool, error) {
+		request, err := http.NewRequest("GET", *base+item.Path, nil)
 		if err != nil {
 			return false, err
 		}
-		request.Header.Set("Cookie", *cookie)
+		request.Header.Set("Cookie", item.Cookie)
 		request.Header.Set("Accept", *accept)
 		if *ifNoneMatch != "" {
 			request.Header.Set("If-None-Match", *ifNoneMatch)
@@ -132,11 +152,12 @@ func main() {
 	results := make(chan workerResult, *clients)
 	var workers sync.WaitGroup
 	for i := 0; i < *clients; i++ {
+		item := targets[i%len(targets)]
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for warmup := 0; warmup < 2; warmup++ {
-				valid, err := get()
+				valid, err := get(item)
 				if err != nil || !valid {
 					results <- workerResult{errors: 1, finished: time.Now()}
 					return
@@ -148,7 +169,7 @@ func main() {
 			result := workerResult{}
 			for time.Now().Before(deadline) {
 				begin := time.Now()
-				valid, err := get()
+				valid, err := get(item)
 				if err != nil || !valid {
 					result.errors++
 				} else {
