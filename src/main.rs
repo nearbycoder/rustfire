@@ -2664,6 +2664,14 @@ async fn reject_banned_ip(
             .get(header::ACCEPT)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/html"));
+    let bot_api_request = {
+        let segments: Vec<_> = request.uri().path().split('/').filter(|part| !part.is_empty()).collect();
+        segments.len() >= 4
+            && segments[0] == "rooms"
+            && segments[1].parse::<i64>().is_ok()
+            && segments[2] != "messages"
+            && segments[3] == "messages"
+    };
     let requested_path = request
         .uri()
         .path_and_query()
@@ -2671,7 +2679,7 @@ async fn reject_banned_ip(
         .unwrap_or_else(|| "/".to_string());
     let sign_in_url = public_url(request.headers(), "/session/new");
     let response = next.run(request).await;
-    if browser_navigation && response.status() == StatusCode::UNAUTHORIZED {
+    if (browser_navigation || bot_api_request) && response.status() == StatusCode::UNAUTHORIZED {
         let encoded = URL_SAFE_NO_PAD.encode(requested_path.as_bytes());
         let mut redirect = found_redirect(&sign_in_url);
         redirect.headers_mut().append(
@@ -9630,9 +9638,8 @@ async fn bot_boost_create(
     let bot = bot_user(&s, &key)?;
     room_for(&s, bot.id, rid)?;
     let content = std::str::from_utf8(&body)
-        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?
-        .trim();
-    if content.is_empty() {
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    if content.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let db = pool(&s)?;
