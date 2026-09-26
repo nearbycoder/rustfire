@@ -2,7 +2,22 @@
 
 ## Paired avatar upload and rendering parity
 
-`python bench/paired_avatar.py` passed against pinned Campfire `91d294f`. The probe uploaded the source's `moon.jpg` and `pixel.bmp` through the profile form, then compared the served avatar type and parsed initials SVG or exact WebP bytes. Campfire and Rustfire both accepted the BMP but rendered initials; after reproducing the source image-processing sharpening convolution, their JPEG WebPs were byte-identical. JPEG and PNG bot avatars uploaded with a misleading `text/plain` multipart type were both detected from file bytes, saved with matching content types, and served as byte-identical WebPs. All sampled avatar reads had weak ETags and matching cache-control values; conditional reads returned 304 with empty bodies, and each new upload invalidated the prior validator. This checks selected formats, upload paths, and cache transitions. It does not establish all MIME-detection behavior, other image formats, raw ETag equality, or avatar throughput.
+`python bench/paired_avatar.py` passed against pinned Campfire `91d294f`. The probe uploaded the source's `moon.jpg` and `pixel.bmp` through the profile form, then compared the served avatar type and parsed initials SVG or exact WebP bytes. Campfire and Rustfire both accepted the BMP but rendered initials; after reproducing the source image-processing sharpening convolution, their JPEG WebPs were byte-identical. JPEG and PNG bot avatars uploaded with a misleading `text/plain` multipart type were both detected from file bytes, saved with matching content types, and served as byte-identical WebPs. All sampled avatar reads had weak ETags and matching cache-control values; conditional reads returned 304 with empty bodies, and each new upload invalidated the prior validator. This checks selected formats, upload paths, and cache transitions. It does not establish all MIME-detection behavior, other image formats, or raw ETag equality.
+
+The same fixture then measured a warm **3,364-byte** JPEG bot avatar using the checked Go keep-alive client. The two apps served identical WebP bytes. A full 200 read was checked against that body hash, content type, and each app's ETag; a conditional read was checked for a 304, empty body, and unchanged ETag. Each client completed two warmups before the five-second interval. The apps ran serially on one 32-logical-CPU host in both server orders, with 22 Campfire Puma workers and isolated Redis versus one Rustfire release process. All measured reads passed with zero errors.
+
+| Clients | Response | Rustfire first | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| ---: | :---: | :---: | ---: | ---: |
+| 32 | 200 | Yes | 25,990 / 2.59 ms | 3,228 / 27.43 ms |
+| 32 | 200 | No | 22,433 / 2.95 ms | 2,874 / 30.65 ms |
+| 32 | 304 | Yes | 54,308 / 1.44 ms | 5,035 / 15.04 ms |
+| 32 | 304 | No | 50,671 / 1.53 ms | 7,783 / 7.67 ms |
+| 128 | 200 | Yes | 42,223 / 6.82 ms | 3,268 / 73.41 ms |
+| 128 | 200 | No | 39,659 / 7.14 ms | 4,398 / 57.90 ms |
+| 128 | 304 | Yes | 77,583 / 4.17 ms | 7,292 / 31.44 ms |
+| 128 | 304 | No | 95,571 / 3.50 ms | 7,162 / 29.93 ms |
+
+Rustfire served **7.81–12.92×** as many full avatar reads per second and **6.51–13.34×** as many conditional reads, with lower p95 in every sampled trial. The [raw report](results/avatar-reads.json) preserves counts and latencies. These are short, single-avatar, same-host, warm-cache measurements; they do not measure variant generation, uploads, CPU or memory use, maximum scale, or a whole-app advantage at full parity.
 
 ## Rotated-key User mention parity
 

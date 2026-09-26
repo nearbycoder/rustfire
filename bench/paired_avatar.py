@@ -1,6 +1,10 @@
-"""Compare avatar uploads, fallback rendering, and cache behavior with Campfire."""
+"""Compare avatar behavior and optionally measure matched cached avatar reads."""
 
+import argparse
+import hashlib
 import http.client
+import json
+import os
 import pathlib
 import re
 import sqlite3
@@ -98,10 +102,80 @@ def spoofed_mime_bot(port, cookie, csrf, database, campfire, name, filename, dat
     path = public_avatar_path(page)
     avatar_status, avatar_headers, avatar_body = request(port, "GET", path, cookie)
     assert avatar_status == 200
-    return stored_type, avatar_headers.get("content-type"), avatar_body
+    return stored_type, avatar_headers.get("content-type"), avatar_body, path, avatar_headers.get("etag")
+
+
+def checked_read(binary, port, cookie, avatar, clients, seconds, conditional):
+    digest = hashlib.sha256(b"" if conditional else avatar[2]).hexdigest()
+    command = [str(binary), "--base", f"http://127.0.0.1:{port}", "--path", avatar[3],
+               "--cookie", cookie, "--expected-sha256", digest, "--expected-etag", avatar[4],
+               "--expected-status", "304" if conditional else "200", "--clients", str(clients),
+               "--seconds", str(seconds), "--accept", "image/webp"]
+    if conditional:
+        command += ["--if-none-match", avatar[4]]
+    else:
+        command += ["--expected-content-type", "image/webp"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError((command, result.stdout[-1000:], result.stderr[-2000:]))
+    report = json.loads(result.stdout)
+    assert report["errors"] == 0 and report["successes"] > 0, report
+    return report
+
+
+def benchmark(temp, rust_db, camp_db, rust_port, camp_port, camp_env, rust_cookie, camp_cookie,
+              rust_avatar, camp_avatar, clients, seconds, workers):
+    binary = temp / "checked_get"
+    subprocess.run(["go", "build", "-o", str(binary), "bench/checked_get.go"], check=True)
+    results = []
+    for rust_first in (True, False):
+        order = ("rustfire", "campfire") if rust_first else ("campfire", "rustfire")
+        for app in order:
+            if app == "rustfire":
+                process = start_server(rust_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(temp / "uploads")})
+                port, cookie, avatar = rust_port, rust_cookie, rust_avatar
+                log = None
+            else:
+                env = dict(camp_env, WEB_CONCURRENCY=str(workers))
+                log = open(temp / f"avatar-bench-{len(results)}.log", "w+")
+                process = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"],
+                                           cwd=REPOSITORY, env=env, stdout=log, stderr=log)
+                try:
+                    wait_for_server(camp_port, process)
+                except Exception:
+                    log.flush()
+                    log.seek(0)
+                    print(log.read()[-3000:])
+                    stop_server(process)
+                    log.close()
+                    raise
+                port, cookie, avatar = camp_port, camp_cookie, camp_avatar
+            try:
+                for count in clients:
+                    for conditional in (False, True):
+                        report = checked_read(binary, port, cookie, avatar, count, seconds, conditional)
+                        result = {"app": app, "rust_first": rust_first, "clients": count,
+                                  "conditional": conditional, **report}
+                        results.append(result)
+                        print(f"{app} rust_first={rust_first} clients={count} status={'304' if conditional else '200'} "
+                              f"rps={report['rps']:.0f} p95_ms={report['p95_ms']:.2f} errors={report['errors']}", flush=True)
+            finally:
+                stop_server(process)
+                if log:
+                    log.close()
+    return results
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--benchmark", action="store_true", help="run serial paired checked-read trials after the parity probe")
+    parser.add_argument("--clients", type=int, nargs="+", default=[32, 128])
+    parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument("--campfire-workers", type=int, default=22)
+    parser.add_argument("--report", type=pathlib.Path)
+    args = parser.parse_args()
+    if any(count < 1 for count in args.clients) or args.seconds <= 0 or args.campfire_workers < 1:
+        parser.error("clients, seconds, and Campfire workers must be positive")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip()
     assert revision == REVISION, revision
     with tempfile.TemporaryDirectory(prefix="paired-avatar-") as scratch:
@@ -158,6 +232,17 @@ def main():
                 assert actual_bot[:2] == expected_bot[:2], (actual_bot[:2], expected_bot[:2])
                 assert actual_bot[2] == expected_bot[2], (len(actual_bot[2]), len(expected_bot[2]))
             print("PASS paired JPEG and BMP avatar uploads, spoofed-mime bot avatars, exact WebP bytes, initials SVG, and conditional cache behavior")
+            if args.benchmark:
+                results = benchmark(temp, rust_db, camp_db, rust_port, camp_port, camp_env,
+                                    "session_token=benchmark-session", camp_cookie,
+                                    actual_bots[0], expected_bots[0], args.clients, args.seconds, args.campfire_workers)
+                report = {"campfire_revision": REVISION, "rustfire_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                          "logical_cpus": os.cpu_count(), "campfire_workers": args.campfire_workers,
+                          "clients": args.clients, "requested_seconds": args.seconds,
+                          "response_bytes": len(actual_bots[0][2]), "results": results}
+                if args.report:
+                    args.report.parent.mkdir(parents=True, exist_ok=True)
+                    args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         finally:
             redis.terminate()
             redis.wait(timeout=10)
