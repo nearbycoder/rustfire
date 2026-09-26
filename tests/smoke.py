@@ -878,7 +878,7 @@ def main():
             code, _, payload = request(member, base, "/rooms/1/messages", {"message[body]": "ban removes this message"}, headers={"Accept": "application/json"})
             assert code == 201
             code, _, page = request(admin, base, "/users/2")
-            assert code == 200 and "Private sign-in link" in page and "ban" in page
+            assert code == 200 and "Share to get them back into their account" in page and "Ban Member Two" in page, (code, page[-3000:])
             with sqlite3.connect(f"{tmp}/test.db") as ban_db:
                 ban_db.execute("UPDATE sessions SET ip_address='8.8.8.8' WHERE user_id=2")
             code, _, _ = request(admin, base, "/users/2/ban", {})

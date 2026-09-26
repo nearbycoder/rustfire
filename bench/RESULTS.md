@@ -776,3 +776,7 @@ The paired mixed harness now supports `--rich-writes`, cycling five formatted bo
 | 1,000 | No | 100,000 | 2,991 / 16.09 ms | 9.39 ms | 1,150 / 59.88 ms | 86.53 ms |
 
 Rustfire had higher checked read throughput and lower read and write p95 in all four trials. Each app completed its 100 writes within the ten-second reader interval. These short runs cover five sampled rich-text bodies in one room, not all ActionText attachments or notification side effects. The reader checks response status, type, and message count during the timed interval; it does not compare every measured page body. This does not establish a maximum subscriber count or a whole-app speed advantage at full parity.
+
+## User profile panels
+
+`python bench/paired_user_profiles.py` passed against pinned Campfire `91d294f`. On matched disposable fixtures, the administrator's own page and active, banned, deactivated, and bot user panels had identical parsed element order, attributes, and visible text after normalizing signed avatar, device-transfer, QR, and CSRF values. The matched panel sizes were 62, 76, 32, 15, 15, and 12 parsed tokens, respectively. Each app also accepted the source's form-based `_method=delete` unban request, redirected to `/users/2`, and saved active status. This checks those panels and one interaction; it does not establish full-page, all-role, or performance parity.

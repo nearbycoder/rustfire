@@ -1824,6 +1824,19 @@ fn render_unauth(title: &str, body: &str) -> Response {
 }
 fn render_unauth_with_nav(title: &str, body: &str, nav: &str) -> Response {
     let token = Uuid::new_v4().to_string();
+    let mut response = render_source_page(title, body, nav, None, &token);
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!(
+            "preauth_csrf={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600{}",
+            secure_cookie_suffix()
+        )
+        .parse()
+        .unwrap(),
+    );
+    response
+}
+fn render_source_page(title: &str, body: &str, nav: &str, current: Option<&User>, token: &str) -> Response {
     const CAMPFIRE_STYLES: &[&str] = &[
         "_reset-9c3efd7b.css", "actiontext-2aab36c6.css", "animation-bcdb4bab.css",
         "autocomplete-cdf3d8bd.css", "avatars-279376ab.css", "base-637a0ec8.css",
@@ -1838,23 +1851,20 @@ fn render_unauth_with_nav(title: &str, body: &str, nav: &str) -> Response {
     let styles = CAMPFIRE_STYLES.iter()
         .map(|file| format!("<link rel=\"stylesheet\" href=\"/assets/{file}\" data-turbo-track=\"reload\">"))
         .collect::<String>();
-    let body_class = if matches!(title, "Set up Rustfire" | "Sign up") { "signup" } else { "" };
+    let body_class = if current.is_some_and(is_admin) {
+        "admin"
+    } else if matches!(title, "Set up Rustfire" | "Sign up") {
+        "signup"
+    } else {
+        ""
+    };
+    let current_user_meta = current.map(|user| format!("<meta name=\"current-user-id\" content=\"{}\"><meta name=\"current-user-name\" content=\"{}\">", user.id, esc(&user.name))).unwrap_or_default();
     let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name='csrf-token' content='{token}'><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="/account/logo" type="image/png"><link rel="apple-touch-icon" href="/account/logo">{styles}{custom_styles}<script defer src="/static/app.js"></script></head>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="/account/logo" type="image/png"><link rel="apple-touch-icon" href="/account/logo">{styles}{custom_styles}<script defer src="/static/app.js"></script></head>
 <body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav><main id="main-content">{body}<footer id="footer"></footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open"></aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
         title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
     );
-    let mut response = Html(csrf_forms(&html, &token)).into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        format!(
-            "preauth_csrf={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600{}",
-            secure_cookie_suffix()
-        )
-        .parse()
-        .unwrap(),
-    );
-    response
+    Html(if current.is_some() { html } else { csrf_forms(&html, token) }).into_response()
 }
 fn user_agent_version(user_agent: &str, marker: &str) -> Option<(u32, u32)> {
     let after = user_agent.split_once(marker)?.1;
@@ -7835,51 +7845,67 @@ async fn user_show(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let db = pool(&s)?;
-    let row = db
+    let (name, bio, email, role, status, updated_at): (String, String, String, i64, i64, String) = db
         .query_row(
-            "SELECT name,COALESCE(bio,''),status FROM users WHERE id=?1 AND status!=1",
+            "SELECT name,COALESCE(bio,''),COALESCE(email_address,''),role,status,updated_at FROM users WHERE id=?1",
             [id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            },
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
         )
         .optional()
         .map_err(db_err)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let controls = if is_admin(&u) && u.id != id {
-        let action = if row.2 == 2 { "unban" } else { "ban" };
-        let action_path = if row.2 == 2 {
-            format!("/users/{id}/ban/delete")
+    let name_html = esc(&name);
+    let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    let avatar = avatar_path(avatar_key, id, &updated_at)?;
+    let back = headers.get(header::REFERER).and_then(|value| value.to_str().ok())
+        .filter(|value| *value != public_url(&headers, &format!("/users/{id}")))
+        .unwrap_or("/");
+    let edit = if u.id == id {
+        "<a href='/users/me/profile' class='btn'><img aria-hidden='true' src='/assets/pencil-cf9d28aa.svg'><span class='for-screen-reader'>Edit my profile</span></a>"
+    } else { "" };
+    let nav = format!("<div class='flex-item-justify-start'><a class='btn' href='{}'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></div><div class='flex align-center gap flex-item-justify-end'>{edit}</div>", esc(back));
+    let ping = if status == 0 {
+        let class = if role == 2 { "btn btn--primary full-width txt--large" } else { "btn btn--reversed full-width txt-large" };
+        let image = if role == 2 { String::new() } else { format!(" aria-hidden='true' aria-label='Ping {name_html}'") };
+        format!("<form class='button_to' method='post' action='/rooms/directs?user_ids%5B%5D={id}'><button class='{class}' type='submit'><img{image} src='/assets/messages-9395d503.svg'></button><input type='hidden' name='authenticity_token' value='{csrf}'></form>")
+    } else { String::new() };
+    let transfer = if role != 2 && status == 0 && is_admin(&u) {
+        let url = public_url(&headers, &transfer_link(&s, id)?);
+        let qr = format!("/qr_code/{}", URL_SAFE.encode(url.as_bytes()));
+        let url = html_escape::encode_double_quoted_attribute(&url);
+        let share_label = if u.id == id {
+            "<label for='session_transfer_url' class='for-screen-reader'>Use this link to login automatically on another device</label>".to_string()
         } else {
-            format!("/users/{id}/ban")
+            "<div class='flex align-center gap justify-center'><img aria-hidden='true' class='flex-item-no-shrink colorize--black' src='/assets/crown-00d190cb.svg' width='16' height='16'><label for='session_transfer_url'>Share to get them back into their account</label></div>".to_string()
         };
-        let transfer = if row.2 == 0 {
-            format!(
-                "<label>Private sign-in link (expires in four hours)<input readonly value='{}'></label>",
-                esc(&transfer_link(&s, id)?)
-            )
+        format!("<hr class='margin-block-start borderless'><fieldset><legend class='gap'><img aria-hidden='true' class='colorize--black' src='/assets/laptop-cf35e6d4.svg' width='36' height='36'><img aria-hidden='true' class='colorize--black' src='/assets/transfer-3ec4f61b.svg' width='36' height='36'><img aria-hidden='true' class='colorize--black' src='/assets/mobile-phone-d0d2301d.svg' width='36' height='36'></legend><div class='flex flex-column gap'>{share_label}<input type='text' class='input' value='{url}' id='session_transfer_url' readonly><div class='flex align-center center gap'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{qr}' href='{qr}'><span class='for-screen-reader'>Show auto-login QR code</span><img aria-hidden='true' class='colorize--black' src='/assets/qr-code-dac3b273.svg' width='20' height='20'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{url}'><span class='for-screen-reader'>Copy auto-login link</span><img aria-hidden='true' class='flex-item-no-shrink colorize--black' src='/assets/copy-paste-4c379063.svg' width='20' height='20'></button><button class='btn' hidden='hidden' data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{url}' data-web-share-text-value='This is your own private sign-in URL, DO NOT SHARE IT. Use it to sign-in on another device or if you get locked out.' data-web-share-title-value='Your sign-in link'><span class='for-screen-reader'>Share auto-login link</span><img aria-hidden='true' class='flex-item-no-shrink colorize--black' src='/assets/share-bf28da4f.svg' width='20' height='20'></button></div></div></fieldset>")
+    } else { String::new() };
+    let ban = if role != 2 && status != 1 && is_admin(&u) && u.id != id {
+        if status == 2 {
+            format!("<div class='margin-block-start'><form class='button_to' method='post' action='/users/{id}/ban'><input type='hidden' name='_method' value='delete'><button class='btn btn--negative full-width' data-turbo-confirm='Are you sure you want to remove the ban on this user?' type='submit'><img aria-hidden='true' aria-label='Remove Ban {name_html}' src='/assets/cancel-c6dfeb78.svg'><span>Remove ban</span></button><input type='hidden' name='authenticity_token' value='{csrf}'></form></div>")
         } else {
-            String::new()
-        };
-        format!(
-            "{transfer}<form method='post' action='{action_path}'><button class='button'>{action}</button></form>"
-        )
+            format!("<div class='margin-block-start'><form class='button_to' method='post' action='/users/{id}/ban'><button class='btn full-width' data-turbo-confirm='Are you sure you want to ban this user? This will log them out, delete their messages, and block their IP addresses.' type='submit'><img aria-hidden='true' aria-label='Ban {name_html}' src='/assets/cancel-c6dfeb78.svg'><span>Ban {name_html}</span></button><input type='hidden' name='authenticity_token' value='{csrf}'></form></div>")
+        }
+    } else { String::new() };
+    let identity = if role == 2 {
+        if status == 0 {
+            format!("<div class='pad-double--inline push--inline push--block-start'>{ping}</div>")
+        } else {
+            format!("<div class='pad-double--inline push--inline push--block-start'><div>{name_html} is no longer on this account</div></div>")
+        }
+    } else if status == 1 {
+        format!("<div><h1 class='txt-x-large margin-none'>{name_html}</h1><div>{name_html} is no longer on this account</div></div>")
     } else {
-        String::new()
+        let email_html = if is_admin(&u) {
+            format!("<div><a href='mailto:{}'>{}</a></div>", esc(&email), esc(&email))
+        } else { String::new() };
+        let ping = if status == 0 { format!("<div class='pad-inline-double margin-inline margin-block-start'>{ping}</div>") } else { String::new() };
+        format!("<div class='flex flex-column gap' style='--row-gap: calc(var(--block-space) / 3)'><h1 class='txt-x-large txt-tight-lines margin-none'>{name_html}</h1>{email_html}<div>{}</div></div>{ping}{transfer}{ban}", esc(&bio))
     };
-    Ok(render(
-        &row.0,
-        &format!(
-            "<section class='form-card'><h1>{}</h1><p>{}</p><form method='post' action='/rooms/directs'><input type='hidden' name='user_ids' value='{id}'><button class='button'>Ping</button></form>{controls}</section>",
-            esc(&row.0),
-            esc(&row.1)
-        ),
-        Some(&u),
-    ))
+    let banned = if status == 2 { "banned" } else { "" };
+    let body = format!("<section class='panel txt-align-center'><div class='flex flex-column gap {banned}'><div class='avatar txt-xx-large center' style='background: white'><img alt='Profile avatar' class='avatar' src='{}'></div>{identity}</div></section>", esc(&avatar));
+    Ok(render_source_page(&name, &body, &nav, Some(&u), u.csrf_token.as_deref().unwrap_or("")))
 }
 async fn user_ban(
     State(s): State<Arc<AppState>>,
@@ -7941,6 +7967,20 @@ async fn user_ban(
     tx.commit().map_err(db_err)?;
     let _ = s.revoked_users.send(id);
     Ok(found_redirect(&format!("/users/{id}")))
+}
+
+async fn user_ban_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Bytes,
+) -> AppResult {
+    let (values, _) = fields(&body);
+    if values.get("_method").map(String::as_str) == Some("delete") {
+        user_unban(State(s), headers, Path(id)).await
+    } else {
+        user_ban(State(s), headers, Path(id)).await
+    }
 }
 
 fn process_banned_content_batch(s: &AppState) -> Result<bool, StatusCode> {
@@ -10306,7 +10346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/users/me/sidebar", get(sidebar_get))
         .route("/users/{id}", get(user_show))
-        .route("/users/{id}/ban", post(user_ban).delete(user_unban))
+        .route("/users/{id}/ban", post(user_ban_post_override).delete(user_unban))
         .route("/users/{id}/ban/delete", post(user_unban))
         .route("/autocompletable/users", get(autocomplete))
         .route("/account/bots", get(bots_get).post(bot_create))
