@@ -953,15 +953,30 @@ document.addEventListener('submit',event=>{
   const confirmation=event.submitter?.getAttribute('data-turbo-confirm');
   if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopImmediatePropagation();}
 },true);
+async function unsubscribeOnLogout(form){
+  if(!('serviceWorker' in navigator))return;
+  const registration=await navigator.serviceWorker.getRegistration(window.location.origin);
+  const subscription=await registration?.pushManager?.getSubscription();
+  if(subscription){
+    let field=form.querySelector('[name="push_subscription_endpoint"]');
+    if(!field){field=document.createElement('input');field.type='hidden';field.name='push_subscription_endpoint';form.append(field)}
+    field.value=subscription.endpoint;
+    await subscription.unsubscribe();
+  }
+}
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-action~="sessions#logout:prevent"]');
+  const form=button?.closest('form[data-controller~="sessions"]');
+  if(!form)return;
+  event.preventDefault();
+  await unsubscribeOnLogout(form);
+  form.requestSubmit();
+});
 document.addEventListener('submit',async event=>{
   const form=event.target;
-  if(!(form instanceof HTMLFormElement)||new URL(form.action).pathname!=='/session/logout'||!('serviceWorker' in navigator))return;
+  if(!(form instanceof HTMLFormElement)||new URL(form.action).pathname!=='/session/logout')return;
   event.preventDefault();
-  try{
-    const registration=await navigator.serviceWorker.getRegistration();
-    const subscription=await registration?.pushManager?.getSubscription();
-    if(subscription){const field=document.createElement('input');field.type='hidden';field.name='push_subscription_endpoint';field.value=subscription.endpoint;form.append(field)}
-  }catch{}
+  try{await unsubscribeOnLogout(form)}catch{}
   HTMLFormElement.prototype.submit.call(form);
 },true);
 document.addEventListener('click',async(event)=>{

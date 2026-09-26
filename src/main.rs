@@ -2797,8 +2797,17 @@ async fn reject_banned_ip(
         let anonymous_direct_upload = path == "/rails/active_storage/direct_uploads"
             && request.method() == Method::POST
             && session_token(&s, request.headers()).is_none();
+        let session_post_preauth = if path == "/session" && request.method() == Method::POST {
+            match user(&s, request.headers()) {
+                Ok(_) => false,
+                Err(StatusCode::UNAUTHORIZED) => true,
+                Err(code) => return code.into_response(),
+            }
+        } else {
+            false
+        };
         let preauth_route = path == "/first_run"
-            || (path == "/session" && request.method() == Method::POST)
+            || session_post_preauth
             || path.starts_with("/join/")
             || path.starts_with("/session/transfers/");
         let csrf = if path.starts_with("/rails/active_storage/disk/") && request.method() == Method::PUT {
