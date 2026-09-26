@@ -370,7 +370,18 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
   let sidebarStreamIdents=[];
-  const markRoom=(rid,unread)=>document.querySelectorAll(`#sidebar a[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread&&rid!==roomId);if(unread&&rid!==roomId&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
+  const sortSidebarList=list=>{
+    const items=[...list.querySelectorAll(':scope > [data-sorted-list-target~="item"]')];
+    items.sort((a,b)=>a.dataset.sortedListNumber?Number(b.dataset.sortedListNumber)-Number(a.dataset.sortedListNumber):a.dataset.sortedListName.toLowerCase().localeCompare(b.dataset.sortedListName.toLowerCase()));
+    items.forEach(item=>list.append(item));
+  };
+  const markRoom=(rid,unread)=>document.querySelectorAll(`#sidebar a[href='/rooms/${rid}']`).forEach(link=>{
+    link.classList.toggle('unread',unread&&rid!==roomId);
+    if(unread&&link.parentElement?.id==='direct_rooms'){
+      link.dataset.sortedListNumber=String(Date.now());
+      sortSidebarList(link.parentElement);
+    }
+  });
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
     if(sidebarRefreshPending){sidebarRefreshAgain=true;return;}
@@ -415,6 +426,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     link.classList.toggle('active',data.room_id===roomId);
     nav.querySelector(`.direct[href='/rooms/${data.room_id}']`)?.remove();
     nav.prepend(link);
+    sortSidebarList(nav);
     if(sidebarRefreshPending)sidebarRefreshAgain=true;
     return true;
   }
@@ -428,11 +440,14 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       const fragment=stream.querySelector('template')?.content.cloneNode(true);
       if(!fragment)continue;
       for(const link of fragment.querySelectorAll('a[id^="list_rooms_"]')){
-        if(link.id)document.getElementById(link.id)?.remove();
+        const existing=link.id&&document.getElementById(link.id);
+        if(existing&&existing!==target)existing.remove();
         link.classList.toggle('active',link.getAttribute('href')===`/rooms/${roomId}`);
       }
+      const list=target.closest('#direct_rooms,#shared_rooms')||target;
       if(action==='prepend')target.prepend(fragment);
       else if(action==='replace')target.replaceWith(fragment);
+      if(list.id==='direct_rooms'||list.id==='shared_rooms')sortSidebarList(list);
     }
   }
   const typingIndicator=document.querySelector('[data-typing-notifications-target="indicator"]');
