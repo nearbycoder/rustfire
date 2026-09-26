@@ -119,7 +119,7 @@ def seed_campfire(repository, ruby, bundle_path, source_database, database, sets
     return env
 
 
-def login_campfire(port):
+def login_campfire(port, email="benchmark@example.invalid", password="benchmark-password"):
     cookies = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
     base = f"http://127.0.0.1:{port}"
@@ -128,8 +128,8 @@ def login_campfire(port):
     csrf = re.search(r'<meta name="csrf-token" content="([^"]+)', page)
     assert csrf, "Campfire sign-in CSRF token missing"
     body = urllib.parse.urlencode({
-        "email_address": "benchmark@example.invalid",
-        "password": "benchmark-password",
+        "email_address": email,
+        "password": password,
         "authenticity_token": csrf.group(1),
     }).encode()
     with opener.open(base + "/session", data=body) as response:

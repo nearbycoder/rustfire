@@ -228,8 +228,8 @@ def main():
             assert code == 200 and 'style="view-transition-name: edit-room-1"' in page
             code, _, page = request(admin, base, "/account")
             assert code == 200, (code, page[:500])
-            assert "/static/account.css" in page and "/account/custom_styles.css" not in page
-            assert "<a href='/rooms/1' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg'" in page
+            assert "/assets/layout-ff6ddfc6.css" in page and "/account/custom_styles.css" not in page
+            assert "<a class='btn' href='/rooms/1'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg'" in page
             join_match = re.search(r"/join/([\w-]+)", page)
             assert join_match, page[:1200]
             join = join_match.group(1)
@@ -505,7 +505,7 @@ def main():
             assert 'name="authenticity_token"' in users_stream
             assert 'name="account[name]"' in page and page.count('name="account[logo]"') == 2
             assert 'name="account[settings][restrict_room_creation_to_administrators]"' in page, page[page.index('Must be admin')-400:page.index('Must be admin')+800]
-            assert "class='panel account-settings txt-align-center flex flex-column gap'" in page
+            assert "class='panel txt-align-center flex flex-column gap'" in page
             assert 'action="/account.1"' in page and 'id="invite_url"' in page
             assert 'data-action="copy-to-clipboard#copy"' in page and 'data-action="lightbox#open"' in page
             assert request(admin, base, "/account.1", {"_method": "patch", "account[name]": "Team Fire"}, method="POST")[0] == 200

@@ -55,6 +55,12 @@ class ProfilePanel(HTMLParser):
                     value = "<csrf>"
                 elif key in {"value", "data-copy-to-clipboard-content-value", "data-web-share-url-value"} and value and "/session/transfers/" in value:
                     value = "<transfer-url>"
+                elif key in {"value", "data-copy-to-clipboard-content-value", "data-web-share-url-value"} and value and "/join/" in value:
+                    value = "<join-url>"
+                elif key == "src" and value and value.startswith("/account/logo?"):
+                    value = "<logo-url>"
+                elif key == "action" and value and value.startswith("/account/logo?v="):
+                    value = "<versioned-logo-action>"
                 elif key in {"href", "data-lightbox-url-value"} and value and value.startswith("/qr_code/"):
                     value = "<qr-url>"
                 normalized.append((key, value))

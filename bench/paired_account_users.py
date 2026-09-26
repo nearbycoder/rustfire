@@ -23,6 +23,7 @@ import urllib.parse
 from direct_lookup import free_port, p95, start_server, stop_server
 from paired_bot_admin import request
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_profile import ProfilePanel
 
 
 def role_and_status(database):
@@ -36,15 +37,15 @@ def membership_state(database):
 
 
 def seed_large_fixture(database, users):
-    if users <= 51:
-        return
     stamp = "2026-01-01T00:00:00Z"
     with sqlite3.connect(database) as db:
+        db.execute("UPDATE accounts SET name='Benchmark',join_code='benchmark',updated_at=?1 WHERE id=1", [stamp])
         db.execute("UPDATE users SET name=printf('User %04d',id),updated_at=?1 WHERE id<=51", [stamp])
-        db.executemany(
-            "INSERT INTO users(id,name,role,status,created_at,updated_at) VALUES(?1,?2,0,0,?3,?3)",
-            ((uid, f"User {uid:04d}", stamp) for uid in range(52, users + 1)),
-        )
+        if users > 51:
+            db.executemany(
+                "INSERT INTO users(id,name,role,status,created_at,updated_at) VALUES(?1,?2,0,0,?3,?3)",
+                ((uid, f"User {uid:04d}", stamp) for uid in range(52, users + 1)),
+            )
 
 
 def page_summary(body):
@@ -80,6 +81,32 @@ def markup_events(body):
     parser = Markup()
     parser.feed(body.decode())
     return parser.events
+
+
+def source_page_fragment(body, fragment):
+    parser = ProfilePanel(fragment)
+    parser.feed(body.decode())
+    assert parser.tokens, f"Missing account {fragment}"
+    return parser.tokens
+
+
+def member_account_view(port, cookie, csrf):
+    status, _, body = request(port, "GET", "/account/edit", cookie, csrf)
+    assert status == 200, status
+    return source_page_fragment(body, "nav"), source_page_fragment(body, "panel")
+
+
+def upload_account_logo(port, cookie, csrf):
+    boundary = "rustfire-paired-account-logo"
+    image = pathlib.Path("static/icons/app-icon-192.png").read_bytes()
+    payload = b"".join((
+        f'--{boundary}\r\nContent-Disposition: form-data; name="_method"\r\n\r\npatch\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="authenticity_token"\r\n\r\n{csrf}\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="account[logo]"; filename="logo.png"\r\nContent-Type: image/png\r\n\r\n'.encode(),
+        image, b"\r\n", f"--{boundary}--\r\n".encode(),
+    ))
+    status, location, response = request(port, "POST", "/account.1", cookie, csrf, payload, f"multipart/form-data; boundary={boundary}")
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, location, response[:200])
 
 
 def settings_summary(page):
@@ -227,6 +254,8 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     assert status == 200
     page = body.decode()
     result['settings_controls'] = settings_summary(page)
+    result['settings_nav_markup'] = source_page_fragment(body, 'nav')
+    result['settings_panel_markup'] = source_page_fragment(body, 'panel')
     frame = re.search(r"<turbo-frame\b[^>]*\bid=['\"]account_users['\"][^>]*>(.*?)</turbo-frame>", page, re.S)
     assert frame, "Account user frame is absent"
     frame = frame.group(1)
@@ -236,6 +265,27 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     divider = re.search(r"<hr\s+class=['\"]separator full-width['\"]", frame)
     assert divider and frame.index(f"<strong>{admin}</strong>") < divider.start() < frame.index(f"<strong>{member}</strong>")
     result["roster_grouping"] = True
+    restriction_body = urllib.parse.urlencode({
+        "_method": "put",
+        "account[settings][restrict_room_creation_to_administrators]": "true",
+    }).encode()
+    status, location, payload = request(port, "POST", "/account.1", cookie, csrf, restriction_body, "application/x-www-form-urlencoded")
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, location, payload[:200])
+    status, _, restricted_page = request(port, "GET", "/account/edit", cookie, csrf)
+    assert status == 200, status
+    result["settings_panel_restricted_markup"] = source_page_fragment(restricted_page, "panel")
+    upload_account_logo(port, cookie, csrf)
+    status, _, logo_page = request(port, "GET", "/account/edit", cookie, csrf)
+    assert status == 200, status
+    result["settings_panel_logo_markup"] = source_page_fragment(logo_page, "panel")
+    logo_action = re.search(rb'<form class=["\']button_to["\'] method=["\']post["\'] action=["\'](/account/logo\?v=[^"\']+)', logo_page)
+    assert logo_action, "Source-style logo deletion form is missing"
+    deletion_body = urllib.parse.urlencode({"_method": "delete", "authenticity_token": csrf}).encode()
+    status, location, payload = request(port, "POST", logo_action.group(1).decode(), cookie, csrf, deletion_body, "application/x-www-form-urlencoded")
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, location, payload[:200])
+    status, _, deleted_logo_page = request(port, "GET", "/account/edit", cookie, csrf)
+    assert status == 200, status
+    result["settings_panel_after_logo_delete_markup"] = source_page_fragment(deleted_logo_page, "panel")
     if users > 500:
         result["initial_roster"] = page_summary(body)
         initial_frame = re.search(r"<turbo-frame\s+id=['\"]account_users['\"]>(.*?)</turbo-frame>", page, re.S)
@@ -292,8 +342,13 @@ def main():
         env = seed_campfire(repository, ruby, bundle_path, repository / "storage/db/production.sqlite3", camp_db, direct_rooms, camp_port, temp)
         seed_large_fixture(rust_db, args.users)
         seed_large_fixture(camp_db, args.users)
+        with sqlite3.connect(rust_db) as db:
+            db.execute("INSERT INTO sessions(user_id,token,csrf_token,created_at,last_active_at) VALUES(2,'benchmark-member-session','benchmark-member-csrf','2026-01-01','2026-01-01')")
+        with sqlite3.connect(camp_db) as db:
+            db.execute("UPDATE users SET email_address='member@example.invalid',password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
         rust_process = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"]})
         try:
+            rust_member = member_account_view(rust_port, "session_token=benchmark-member-session", "benchmark-member-csrf")
             rust, rust_performance = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, args.users, args.clients, args.seconds)
         finally:
             stop_server(rust_process)
@@ -303,6 +358,8 @@ def main():
         try:
             wait_for_server(camp_port, camp_process)
             cookie, csrf = login_campfire(camp_port)
+            member_cookie, member_csrf = login_campfire(camp_port, "member@example.invalid")
+            camp_member = member_account_view(camp_port, member_cookie, member_csrf)
             camp, camp_performance = workflow(camp_port, cookie, csrf, camp_db, args.users, args.clients, args.seconds)
         except Exception:
             log.flush()
@@ -312,6 +369,11 @@ def main():
         finally:
             stop_server(camp_process)
             log.close()
+        for label, expected, actual in (("member nav", camp_member[0], rust_member[0]), ("member panel", camp_member[1], rust_member[1])):
+            if expected != actual:
+                mismatch = next((index for index, pair in enumerate(zip(expected, actual)) if pair[0] != pair[1]), min(len(expected), len(actual)))
+                raise AssertionError((label, mismatch, actual[mismatch:mismatch + 3], expected[mismatch:mismatch + 3]))
+            print(f"{label}: {len(expected)} matching parsed tokens")
         for key in rust:
             if rust[key] != camp[key]:
                 if key.endswith("_markup"):

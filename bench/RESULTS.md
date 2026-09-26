@@ -388,6 +388,18 @@ All rows had zero HTTP errors. At a 100 ms p95 threshold for this full-page HTML
 
 At a 1280 px wide dark-mode browser viewport, the pinned Campfire panel measured x=417.53 px, y=50 px, width=444.92 px. The adjusted Rustfire panel measured x=417.5 px, y=50 px, width=445 px. The invite text field started at x=500.47 px, y=435.88 px in Campfire and x=500.5 px, y=435.38 px in Rustfire. This is a geometry check of the visible top of the page; font, icon treatment, roster presentation, other themes and viewport sizes, and the outer document still need visual parity work. The account stylesheet loads before user custom CSS.
 
+The account settings route was then moved to the source-style document shell. On a matched **1,100-user** fixture, `bench/paired_account_users.py` found identical parsed administrator navigation (24 tokens) and settings panel (40,862 tokens) after normalizing session CSRF values, signed avatars, logo versions, and invite URLs. The member navigation (10 tokens) and panel (16,557 tokens) also matched. The administrator panel stayed matched after a browser-style room-creation restriction update, after uploading a PNG logo (40,872 tokens), and after submitting the versioned logo-delete form. The same probe still passed account-user paging, role changes, and deactivation.
+
+With 22 Campfire Puma workers, one release Rustfire process, two warmup requests per connection, and separate two-second local trials, the updated `/account/edit` read measured:
+
+| Clients | Rustfire requests/s / p95 | Campfire requests/s / p95 |
+| ---: | ---: | ---: |
+| 1 | 172.7 / 7.76 ms | 4.3 / 305.94 ms |
+| 8 | 814.9 / 12.28 ms | 23.9 / 639.49 ms |
+| 32 | 1,079.2 / 42.13 ms | 39.8 / 1,293.28 ms |
+
+All measured responses passed the harness's status and page-control checks with zero HTTP errors. Rustfire sent 1,935,926 bytes per response and Campfire 2,236,856 bytes; the parsed panel matches under the stated normalizations, but the surrounding document and raw byte counts differ. The page-2 Turbo Stream at 32 clients measured 1,405.7 versus 103.6 requests/s and 28.08 versus 543.02 ms p95. These are short reads on the server host, not a sustained capacity limit or a whole-app speed claim.
+
 ## Profile forms and device transfer
 
 Rustfire's profile now displays the source's nested name, email, password, bio, and avatar forms; per-room notification buttons; PWA install notice; and QR, copy, and share controls for a four-hour device sign-in link. The transfer page submits automatically, as it does in Campfire. Profile GETs now generate a Rails-format signed link without adding a database row. With the source secret configured, a Campfire link signed in the disposable source fixture authenticated on Rustfire, and a Rustfire link authenticated on Campfire. Both apps returned HTTP 302 to the root and the receiving browser could then open room 1. A browser followed Rustfire's link through the automatic POST to the room without a page error. The paired probe also compared profile name, email, bio, and involvement writes and their database values. Its manifest check matched the source's key set, icon sizes and purposes, shortcut destinations and asset paths, and screenshot dimensions and asset paths after normalizing the apps' listen origins and app names. Rustfire serves the same screenshot image files; its branded descriptions differ.
