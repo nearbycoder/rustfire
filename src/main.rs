@@ -3834,7 +3834,7 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
         client_message_id: r.get(6)?,
         attachment: r.get::<_, Option<i64>>(7)?.map(|id| Attachment {
             id,
-            filename: r.get(8).unwrap_or_default(),
+            filename: rails_sanitized_filename(&r.get::<_, String>(8).unwrap_or_default()),
             content_type: r.get(9).unwrap_or_default(),
             width: r.get(15).unwrap_or_default(),
             height: r.get(16).unwrap_or_default(),
@@ -5424,7 +5424,7 @@ fn insert_message(
         db.execute("INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,file.filename,file.content_type,stored,t,width,height]).map_err(db_err)?;
         Some(Attachment {
             id: db.last_insert_rowid(),
-            filename: file.filename,
+            filename: rails_sanitized_filename(&file.filename),
             content_type: file.content_type,
             width,
             height,
@@ -9641,10 +9641,11 @@ fn attachment_record_unchecked(
 ) -> Result<(i64, String, String, String), StatusCode> {
     let db = pool(&s)?;
     let row:Option<(i64,String,String,String)>=db.query_row("SELECT m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?;
-    if let Some(row) = row {
-        return Ok(row);
+    if let Some((room_id, filename, content_type, stored)) = row {
+        return Ok((room_id, rails_sanitized_filename(&filename), content_type, stored));
     }
-    db.query_row("SELECT m.room_id,b.filename,b.content_type,b.stored_name FROM inline_blobs b JOIN inline_embeds e ON e.blob_id=b.id JOIN messages m ON m.id=e.message_id WHERE b.id=?1 ORDER BY m.id LIMIT 1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)
+    let (room_id, filename, content_type, stored): (i64, String, String, String) = db.query_row("SELECT m.room_id,b.filename,b.content_type,b.stored_name FROM inline_blobs b JOIN inline_embeds e ON e.blob_id=b.id JOIN messages m ON m.id=e.message_id WHERE b.id=?1 ORDER BY m.id LIMIT 1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
+    Ok((room_id, rails_sanitized_filename(&filename), content_type, stored))
 }
 fn byte_range(input: &str, size: u64) -> Result<(u64, u64), StatusCode> {
     let value = input

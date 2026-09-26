@@ -519,6 +519,19 @@ def main():
                         for name, port, cookie in applications:
                             report = measure_room_page(binary, port, cookie, clients, args.seconds, messages=6)
                             print(f"{name} mixed-media room {clients} clients: {report['rps']:.1f} rps, p95 {report['p95_ms']:.2f} ms, {report['errors']} errors")
+                for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    post_file_message(port, cookie, csrf, "report:Q?.txt", "text/plain", b"filename check", "room-page-unsafe-filename")
+                with sqlite3.connect(camp_db) as source_db, sqlite3.connect(rust_db) as target_db:
+                    source_filename = source_db.execute("SELECT b.filename FROM active_storage_blobs b JOIN active_storage_attachments a ON a.blob_id=b.id WHERE a.record_type='Message' AND a.record_id=7 AND a.name='attachment'").fetchone()[0]
+                    target_filename = target_db.execute("SELECT filename FROM attachments WHERE message_id=7").fetchone()[0]
+                    assert (source_filename, target_filename) == ("report:Q?.txt", "report:Q?.txt"), (source_filename, target_filename)
+                unsafe_source, unsafe_target = compare_message_page(7, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                compare_message_page(7, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
+                compare_room("original with unsafe filename", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                expected_name = "report-Q-.txt"
+                source_unsafe_route = original_blob_routes(unsafe_source, camp_port, camp_cookie, expected_name, b"filename check")
+                target_unsafe_route = original_blob_routes(unsafe_target, rust_port, "session_token=benchmark-session", expected_name, b"filename check")
+                assert source_unsafe_route == target_unsafe_route, ("unsafe filename blob routes", source_unsafe_route, target_unsafe_route)
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)
