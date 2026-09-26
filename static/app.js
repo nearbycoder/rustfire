@@ -27,6 +27,21 @@ const decodeAutocompleteName=value=>{const textarea=document.createElement('text
 const formatReplyLinks=root=>root.querySelectorAll('[data-reply-target="body"] a').forEach(link=>{link.target=link.href.startsWith(location.origin)?'_top':'_blank';});
 const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
 formatLocalTimes();
+const badgeSidebar=document.querySelector('#sidebar');
+if(badgeSidebar&&'setAppBadge' in navigator){
+  let lastUnreadCount;
+  const updateAppBadge=()=>{
+    const badgeRoot=badgeSidebar.querySelector('[data-controller~="badge-dot"]');
+    if(!badgeRoot)return;
+    const unreadClass=badgeRoot.dataset.badgeDotUnreadClass||'unread';
+    const count=[...badgeRoot.querySelectorAll('[data-badge-dot-target~="unread"]')].filter(room=>room.classList.contains(unreadClass)).length;
+    if(count===lastUnreadCount)return;
+    lastUnreadCount=count;
+    try{Promise.resolve(count?navigator.setAppBadge(count):navigator.clearAppBadge()).catch(()=>{});}catch{}
+  };
+  new MutationObserver(updateAppBadge).observe(badgeSidebar,{subtree:true,childList:true,attributes:true,attributeFilter:['class']});
+  setTimeout(updateAppBadge,0);
+}
 const searchResults=document.querySelector('#search-results');
 if(searchResults){
   const results=searchResults;
