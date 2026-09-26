@@ -1,4 +1,5 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
+document.addEventListener('trix-before-initialize',()=>{Trix.config.blockAttributes.cite={tagName:'cite',inheritable:false};});
 document.addEventListener('toggle',event=>{
   const popup=event.target.closest?.('details[data-controller~="popup"]');
   if(!popup?.open)return;
@@ -187,6 +188,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       else{content?.removeAttribute('tabindex');content?.removeAttribute('aria-describedby');}
     });
     messages.querySelectorAll('[data-controller~="web-share"]').forEach(node=>{node.hidden=typeof navigator.canShare!=='function';});
+    messages.querySelectorAll('[data-reply-target="body"] a').forEach(link=>{link.target=link.href.startsWith(location.origin)?'_top':'_blank';});
   };
   const formatMessageGroups=()=>{
     let previous=null,previousDay=null;
@@ -612,15 +614,25 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }
     const reply=e.target.closest('[data-action~="reply#reply"]');
     if(reply){
-      const article=reply.closest('.message');const body=article.querySelector('[id^="presentation_message_"]').cloneNode(true);
+      const article=reply.closest('.message');
+      const body=article?.querySelector('[data-reply-target="body"] .trix-content')?.cloneNode(true);
+      const author=article?.querySelector('[data-reply-target="author"]');
+      const original=article?.querySelector('[data-reply-target="link"]');
+      if(!body||!author||!original||!typingInput.editor)return;
       const preview=body.querySelector('.og-embed a')?.href;
       body.querySelectorAll('.og-embed').forEach(node=>node.remove());
       body.querySelectorAll('.mention').forEach(node=>node.replaceWith(document.createTextNode(node.textContent.trim())));
-      const quoted=body.querySelector('.trix-content')?.innerHTML||body.innerHTML||preview||'';
-      const block=document.createElement('blockquote');block.innerHTML=quoted;
-      const cite=document.createElement('cite');cite.textContent=article.querySelector('.message__meta strong')?.textContent+' ';
-      const link=document.createElement('a');link.href=article.querySelector('.message__meta a')?.href||'#';link.textContent='#';cite.append(link);
-      typingInput.editor.loadHTML(block.outerHTML+cite.outerHTML+'<br>');typingInput.focus();reply.closest('details').open=false;return;
+      if(preview&&!body.textContent.trim())body.textContent=preview;
+      const block=document.createElement('blockquote');block.innerHTML=body.innerHTML;
+      const cite=document.createElement('cite');cite.innerHTML=author.innerHTML+' ';
+      const link=document.createElement('a');link.href=original.href;link.textContent='#';cite.append(link);
+      const editor=typingInput.editor;
+      editor.recordUndoEntry('Format reply');
+      editor.setSelectedRange([0,editor.getDocument().toString().length]);
+      editor.deleteInDirection('forward');
+      editor.insertHTML(block.outerHTML+cite.outerHTML+'<br>');
+      editor.setSelectedRange([editor.getDocument().toString().length-1]);
+      typingInput.focus();reply.closest('details')?.removeAttribute('open');return;
     }
   });
   messages.addEventListener('submit', async e => {
