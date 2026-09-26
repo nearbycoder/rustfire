@@ -100,7 +100,21 @@ def campfire_login(port, uid):
     return cookie, token.group(1)
 
 
-def writer(port, rid, uid, cookie, csrf, count, seconds, result):
+def message_body(rid, index, rich_writes):
+    text = f"room {rid} live message {index}"
+    if not rich_writes:
+        return text
+    variants = [
+        f"<div><strong>{text}</strong> <a class='sample-link' href='https://example.com/{rid}/{index}'>link</a></div>",
+        f"<div>{text} <span class='sample'>safe</span> <a href='javascript:alert(1)'>unsafe</a></div>",
+        f"<div>{text}<ul><li>one</li><li><code>two</code></li></ul></div>",
+        f"<div>{text} <time datetime='2024-01-01'>date</time></div>",
+        f"<div>{text} <img src='https://example.com/untrusted.svg'>after image</div>",
+    ]
+    return variants[(index - 1) % len(variants)]
+
+
+def writer(port, rid, uid, cookie, csrf, count, seconds, result, rich_writes):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     samples = []
     started = time.monotonic()
@@ -112,7 +126,7 @@ def writer(port, rid, uid, cookie, csrf, count, seconds, result):
                 time.sleep(delay)
             client_id = f"multi-{rid}-{index}"
             fields = urllib.parse.urlencode({
-                "message[body]": f"room {rid} live message {index}",
+                "message[body]": message_body(rid, index, rich_writes),
                 "message[client_message_id]": client_id,
                 "authenticity_token": csrf,
             })
@@ -149,7 +163,7 @@ def socket_groups(rooms, users, sockets_per_room, socket_users_per_room):
     ]
 
 
-def measure(binary, port, identities, rooms, users, clients, seconds, count, directory, event_dir, label, sockets_per_room, socket_users_per_room=1, browser_channels=False, resource_pids=()):
+def measure(binary, port, identities, rooms, users, clients, seconds, count, directory, event_dir, label, sockets_per_room, socket_users_per_room=1, browser_channels=False, resource_pids=(), rich_writes=False):
     targets = [{"path": f"/rooms/{rid}/messages", "cookie": identities[uid][0]} for rid in range(1, rooms + 1) for uid in range(1, users + 1)]
     targets_file = directory / f"{label}-targets.json"
     targets_file.write_text(json.dumps(targets))
@@ -170,10 +184,10 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
         if sockets_per_room:
             for rid, uid, group_size in socket_groups(rooms, users, sockets_per_room, socket_users_per_room):
                 events_file = event_file(event_dir, label, rid, uid)
-                capture_command = ["node", "bench/capture_message_appends.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", identities[uid][0], "--room", str(rid), "--client-prefix", f"multi-{rid}", "--first-id", "0", "--sockets", str(group_size), "--messages", str(count), "--timeout", str(round((seconds + 60) * 1000)), "--events-file", str(events_file)]
+                capture_command = ["node", "bench/capture_message_appends.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", identities[uid][0], "--room", str(rid), "--client-prefix", f"multi-{rid}", "--first-id", "0", "--sockets", str(group_size), "--messages", str(count), "--timeout", str(round((seconds + 60) * 1000)), "--await-start", "1", "--events-file", str(events_file)]
                 if browser_channels:
                     capture_command.extend(("--browser-channels", "1"))
-                capture = subprocess.Popen(capture_command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                capture = subprocess.Popen(capture_command, cwd=ROOT, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 captures.append((rid, uid, capture))
                 ready, _, _ = select.select([capture.stdout], [], [], 60)
                 marker = capture.stdout.readline().strip() if ready else ""
@@ -185,6 +199,11 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
         ready, _, _ = select.select([reader.stderr], [], [], max(90, seconds + 60))
         marker = reader.stderr.readline().strip() if ready else ""
         assert marker == "MEASURE_START", f"Reader did not start: {marker}"
+        for _, _, capture in captures:
+            capture.stdin.write("START\n")
+            capture.stdin.flush()
+            capture.stdin.close()
+            capture.stdin = None
         if resource_pids:
             resource_samples.append(resource_snapshot(resource_pids))
             sampler = threading.Thread(target=sample_resources, daemon=True)
@@ -193,7 +212,7 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
             uid = (rid - 1) % users + 1
             cookie, csrf = identities[uid]
             result = {}
-            thread = threading.Thread(target=writer, args=(port, rid, uid, cookie, csrf, count, seconds, result))
+            thread = threading.Thread(target=writer, args=(port, rid, uid, cookie, csrf, count, seconds, result, rich_writes))
             writes.append(result)
             threads.append(thread)
             thread.start()
@@ -216,9 +235,9 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
             for rid, uid, capture in captures:
                 stdout, stderr = capture.communicate(timeout=max(90, seconds + 75))
                 delivery = json.loads(stdout.strip().splitlines()[-1])
-                assert capture.returncode == 0 and delivery["missed"] == delivery["unexpected"] == delivery["closed_early"] == 0, (rid, uid, delivery, stderr)
-                deliveries.append({"room": rid, "user": uid, **delivery})
-            output["sockets"] = {"per_room": deliveries, "expected": sum(item["expected"] for item in deliveries), "received": sum(item["received"] for item in deliveries)}
+                deliveries.append({"room": rid, "user": uid, "capture_exit_code": capture.returncode, **delivery})
+            complete = all(item["capture_exit_code"] == 0 and item["missed"] == item["unexpected"] == item["closed_early"] == 0 for item in deliveries)
+            output["sockets"] = {"per_room": deliveries, "expected": sum(item["expected"] for item in deliveries), "received": sum(item["received"] for item in deliveries), "complete": complete}
         if resource_samples:
             output["resources"] = {
                 "server_cpu_seconds": round(resource_samples[-1][1] - resource_samples[0][1], 3),
@@ -333,6 +352,7 @@ def main():
     parser.add_argument("--sockets-per-room", type=int, default=0, help="signed message-stream subscribers per room")
     parser.add_argument("--socket-users-per-room", type=int, default=1, help="distinct authenticated socket users per room; must divide sockets per room")
     parser.add_argument("--browser-channels", action="store_true", help="also subscribe each socket to the page's presence, read, unread, typing, heartbeat, and signed sidebar channels")
+    parser.add_argument("--rich-writes", action="store_true", help="cycle formatted, linked, listed, and filtered message bodies in each room")
     parser.add_argument("--resources", action="store_true", help="sample server CPU time and peak PSS during measured reads and writes (requires psutil)")
     parser.add_argument("--rustfire-first", action="store_true")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="retain captured room append events from both apps")
@@ -375,9 +395,9 @@ def main():
                 try:
                     identities = {uid: ("session_token=benchmark-session", "benchmark-csrf") if uid == 1 else (f"session_token=multi-session-{uid}", f"multi-csrf-{uid}") for uid in range(1, args.users + 1)}
                     pages = [fetch(rust_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
-                    result = measure(binary, rust_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "rustfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid,) if args.resources else ())
+                    result = measure(binary, rust_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "rustfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid,) if args.resources else (), args.rich_writes)
                     check_final_pages(rust_port, identities[1][0], rust_db, args.rooms, False)
-                    if args.sockets_per_room:
+                    if args.sockets_per_room and result["sockets"]["complete"]:
                         check_socket_events(rust_db, event_dir, "rustfire", groups, count)
                     return pages, result
                 finally:
@@ -390,9 +410,9 @@ def main():
                         wait_for_server(camp_port, process)
                         identities = {uid: campfire_login(camp_port, uid) for uid in range(1, args.users + 1)}
                         pages = [fetch(camp_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
-                        result = measure(binary, camp_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "campfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid, redis.pid) if args.resources else ())
+                        result = measure(binary, camp_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "campfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid, redis.pid) if args.resources else (), args.rich_writes)
                         check_final_pages(camp_port, identities[1][0], camp_db, args.rooms, True)
-                        if args.sockets_per_room:
+                        if args.sockets_per_room and result["sockets"]["complete"]:
                             check_socket_events(camp_db, event_dir, "campfire", groups, count)
                         return pages, result
                     except Exception:
@@ -415,11 +435,12 @@ def main():
             check_message_markup(camp_page, rust_page, 40)
         check_saved(rust_db, args.rooms, args.users, count, False)
         check_saved(camp_db, args.rooms, args.users, count, True)
-        checked_events = check_paired_socket_markup(camp_db, rust_db, event_dir, groups, count) if args.sockets_per_room else 0
+        deliveries_complete = not args.sockets_per_room or rust_result["sockets"]["complete"] and camp_result["sockets"]["complete"]
+        checked_events = check_paired_socket_markup(camp_db, rust_db, event_dir, groups, count) if args.sockets_per_room and deliveries_complete else 0
         deadlines_met = rust_result["writes"]["deadline_met"] and camp_result["writes"]["deadline_met"]
-        print("PASS paired multi-room, multi-user mixed message workload" if deadlines_met else "FAIL one or more writers ran past the measured read interval")
-        print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "stream_markup_checked_events": checked_events, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
-        if not deadlines_met:
+        print("PASS paired multi-room, multi-user mixed message workload" if deadlines_met and deliveries_complete else "FAIL paired workload missed a writer deadline or socket delivery")
+        print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "stream_markup_checked_events": checked_events, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
+        if not deadlines_met or not deliveries_complete:
             raise SystemExit(1)
 
 

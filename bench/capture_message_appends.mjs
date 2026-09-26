@@ -2,6 +2,7 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { createInterface } from 'node:readline';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => {
   if (index % 2 === 0) pairs.push([value.slice(2), all[index + 1]]);
@@ -161,6 +162,13 @@ try {
     await Promise.all(Array.from({ length: Math.min(browserChannels ? 1 : 50, socketCount - start) }, (_, index) => connect(start + index)));
   }
   console.log('READY');
+  if (args['await-start'] === '1') {
+    const input = createInterface({ input: process.stdin });
+    await new Promise((resolve, reject) => input.once('line', line => {
+      input.close();
+      line === 'START' ? resolve() : reject(new Error(`Expected START signal, got ${line}`));
+    }));
+  }
   const started = Date.now();
   const expected = socketCount * messageCount;
   const expectedRead = browserChannels ? socketCount * (socketCount + 1) / 2 : 0;

@@ -1001,3 +1001,25 @@ Rustfire served **2.10–2.15×** as many checked reads per second at the same s
 | Yes | 3,128 / 28.98 ms | 249.75 ms | 1,567 / 85.03 ms | 325.00 ms |
 
 Rustfire served **1.96–2.00×** as many checked reads per second and had lower upload p95 in these two socket trials. The same 30-second upload/read workload without sockets also passed in both orders, at 3,103 / 1,585 and 3,007 / 1,551 Rustfire / Campfire reads per second; upload p95 was 250 / 214 and 264 / 270 ms, so the no-socket runs do not show a consistent upload latency advantage. Both servers ran serially on one host; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Socket setup was outside the timed interval. These runs use one account and room, do not measure connection setup, CPU or peak memory, and do not establish maximum sustained capacity, upload performance for other media, or full application parity.
+
+## Four-room rich-text mix with browser-channel sockets
+
+`python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 3 --sockets-per-room 100 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources` passed in both server orders. The four authenticated writers each posted 90 messages, cycling bold links, safe classes and rejected URLs, lists, time tags, and rejected images. Each app saved all 360 posts, delivered all **36,000/36,000** expected message appends and unread events, and delivered all **5,200/5,200** presence read events during socket setup. The probe compared 1,440 paired captured append structures and their text, initial parsed message pages, saved authors and bodies, final latest-40 IDs, and every timed page read's status, content type, and message count. There were no checked read errors, missing or unexpected events, or early socket closes; every writer met the 30-second deadline.
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Rustfire peak PSS MiB | Campfire reads/s / read p95 | Campfire write p95 | Campfire peak PSS MiB |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 3,211 / 28.58 ms | 33.01 ms | 103.34 | 1,344 / 110.75 ms | 149.17 ms | 3,844.16 |
+| Yes | 2,760 / 32.86 ms | 35.62 ms | 106.19 | 1,473 / 86.06 ms | 140.50 ms | 3,994.12 |
+
+Rustfire served **1.87–2.39×** as many checked reads per second and had lower read and write p95 in both orders. Both apps ran serially on one 32-logical-CPU host with disposable SQLite databases; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Peak PSS includes those server processes but excludes the local load clients. Rustfire spent 709–777 aggregate server CPU seconds versus Campfire's 610–656 while completing more reads; these totals are not a per-request efficiency comparison. Socket setup preceded the timed interval. This sampled workload still does not measure connection rate, raw response-byte equality, actual browser rendering, ActionText attachments, upload work, push delivery, hours-long stability, or maximum supported scale.
+
+### Two thousand browser-channel sockets
+
+The same four-room rich-text command passed in both orders with `--sockets-per-room 500`: 2,000 signed-in sockets, distributed across four accounts per room, each subscribed to all eight browser channels. Both apps saved all 360 scheduled posts within the 30-second reader interval, delivered **180,000/180,000** message appends and **180,000/180,000** unread events, and emitted **126,000/126,000** expected presence read events during socket setup. The probe compared 1,440 captured append structures across the paired apps and separately checked initial/final pages and saved message rows. Neither order had checked read errors, missing or unexpected events, or early socket closes.
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Rustfire peak PSS MiB | Campfire reads/s / read p95 | Campfire write p95 | Campfire peak PSS MiB |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 2,607 / 37.02 ms | 38.37 ms | 348.29 | 1,098 / 152.76 ms | 291.67 ms | 4,356.52 |
+| Yes | 2,779 / 34.47 ms | 42.11 ms | 353.29 | 1,093 / 145.46 ms | 260.32 ms | 4,619.81 |
+
+Rustfire served **2.37–2.54×** as many checked reads per second and had lower read and write p95 in both orders at this sampled socket count. The capture timer starts after all subscriptions are ready and the HTTP reader begins; earlier apparent misses at this count were caused by a harness timer that began during sequential socket setup, not by a demonstrated Campfire delivery failure. The apps and load clients shared the host, and each app ran serially with the worker and Redis settings above. These 30-second results do not measure connection establishment rate, sustained or maximum capacity, untested features, or a whole-app advantage at full parity.
