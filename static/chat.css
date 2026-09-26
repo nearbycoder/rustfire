@@ -90,23 +90,24 @@ body:has(.app-shell)>header { display: none; }
 .chat-head .room-header-actions { display: flex; gap: 4.45px; align-items: center; }
 .icon-btn, .search-round { flex: none; display: grid; place-items: center; width: 42.4px; height: 42.4px; background: var(--chat-bg); color: var(--chat-text); border: 1px solid var(--chat-border); border-radius: 50%; text-decoration: none; }
 .icon-btn img, .search-round img { width: 22px; height: 22px; filter: invert(0); }
-.room-notification-button { box-shadow: 0 0 0 2px #e78825; }
-.room-notification-button img { width: 20px; height: 20px; }
-.room-notification-button.notification-enabled { box-shadow: none; }
-.room-notifications-dialog { position: fixed; width: 444px; max-width: calc(100vw - 24px); padding: 16px; border: 1px solid var(--chat-border); border-radius: 16px; background: var(--chat-bg); color: var(--chat-text); box-shadow: 0 12px 30px #0008; text-align: center; }
-.room-notifications-dialog::backdrop { background: linear-gradient(100deg, #ffb900d9, #dd002bd9); }
-.room-notifications-close { position: absolute; top: 24px; right: 16px; display: grid; place-items: center; width: 42px; height: 42px; padding: 0; border: 1px solid var(--chat-border); border-radius: 50%; background: var(--chat-bg); }
-.room-notifications-close img { width: 20px; height: 20px; }
-.room-notifications-emblem { display: grid; place-items: center; width: 74px; height: 74px; margin: 0 auto 10px; border: 1px solid var(--chat-border); border-radius: 50%; }
-.room-notifications-emblem img { width: 48px; height: 48px; }
-.room-notifications-dialog h2 { margin: 0 0 18px; font-size: 20px; line-height: 28px; }
-.room-notifications-dialog details { margin-top: 8px; border-radius: 9px; background: var(--chat-bubble); text-align: left; }
-.room-notifications-dialog summary { display: flex; align-items: center; height: 58px; gap: 10px; padding: 0 18px; list-style: none; cursor: pointer; }
-.room-notifications-dialog summary::-webkit-details-marker { display: none; }
-.room-notifications-dialog summary strong { flex: 1; font-size: 16px; }
-.room-notifications-dialog summary img { width: 20px; height: 20px; }
-.room-notifications-dialog summary img:last-child { width: 10px; height: 10px; }
-.room-notifications-dialog details p { margin: 0; padding: 0 18px 16px; font-size: 14px; }
+.button_to_change_notifying turbo-frame { display: block; }
+.button_to_change_notifying turbo-frame form { margin: 0; }
+.button_to_change_notifying turbo-frame .btn { display: grid; place-items: center; width: 42.4px; height: 42.4px; padding: 0; border: 1px solid var(--chat-border); border-radius: 50%; background: var(--chat-bg); color: var(--chat-text); }
+.button_to_change_notifying turbo-frame .btn img { width: 20px; height: 20px; }
+.button_to_change_notifying .btn--pulsing { box-shadow: 0 0 0 2px #e78825; }
+.button_to_change_notifying .dialog { position: fixed; width: 444px; max-width: calc(100vw - 24px); padding: 16px; border: 1px solid var(--chat-border); border-radius: 16px; background: var(--chat-bg); color: var(--chat-text); box-shadow: 0 12px 30px #0008; text-align: center; }
+.button_to_change_notifying .dialog::backdrop { background: linear-gradient(100deg, #ffb900d9, #dd002bd9); }
+.button_to_change_notifying .dialog .btn--faux { display: grid; place-items: center; width: 74px; height: 74px; margin: 0 auto 10px; border: 1px solid var(--chat-border); border-radius: 50%; }
+.button_to_change_notifying .dialog h1 { margin: 0 0 18px; font-size: 20px; line-height: 28px; }
+.button_to_change_notifying .notifications-help { margin-top: 8px; border-radius: 9px; background: var(--chat-bubble); text-align: left; }
+.button_to_change_notifying .notifications-help summary { display: flex; align-items: center; height: 58px; gap: 10px; padding: 0 18px; list-style: none; cursor: pointer; }
+.button_to_change_notifying .notifications-help summary::-webkit-details-marker { display: none; }
+.button_to_change_notifying .notifications-help summary strong { flex: 1; font-size: 16px; }
+.button_to_change_notifying .notifications-help summary img { width: 20px; height: 20px; }
+.button_to_change_notifying .notifications-help summary img:last-child { width: 10px; height: 10px; }
+.button_to_change_notifying .notifications-help p { margin: 0; padding: 0 18px 16px; font-size: 14px; }
+.button_to_change_notifying .dialog__close { display: grid; place-items: center; width: 42px; height: 42px; margin: 18px auto 0; padding: 0; border: 1px solid var(--chat-border); border-radius: 50%; background: var(--chat-bg); }
+.button_to_change_notifying .dialog__close img { width: 20px; height: 20px; }
 .menu-toggle { display: none; }
 .messages { min-height: 0; padding: 82px 46px 24px; background: var(--chat-bg); }
 #system_welcome { display: block; position: relative; width: 417px; max-width: 100%; margin: 7px auto 0; text-align: center; font-family: -apple-system, BlinkMacSystemFont, Aptos, Roboto, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; }
@@ -248,7 +249,7 @@ body:has(.app-shell)>header { display: none; }
   .composer .rich-toggle img { filter: invert(1); }
   .composer-chat-icon { filter: invert(1); }
   .sidebar-close img { filter: invert(1); }
-  .room-notifications-dialog img { filter: invert(1); }
+  .button_to_change_notifying img { filter: invert(1); }
 }
 @media (max-width: 760px) {
   .app-shell { display: block; padding-left: 0; }

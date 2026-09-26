@@ -675,21 +675,44 @@ if(accountUsers){
   }
   observeNext();
 }
-const roomBell=document.querySelector('[data-room-notification]');
-if(roomBell){
-  const icon=roomBell.querySelector('img');
-  const dialog=roomBell.nextElementSibling;
+const notificationsControl=document.querySelector('.button_to_change_notifying[data-controller="notifications"]');
+if(notificationsControl){
+  let frame=notificationsControl.querySelector('turbo-frame[id^="involvement_rooms_"]');
+  const roomBell=frame?.querySelector('[data-notifications-target="bell"]');
+  const dialog=notificationsControl.querySelector('[data-notifications-target="notAllowedNotice"]');
   const browserName=/Edg\//.test(navigator.userAgent)?'Edge':/Firefox\//.test(navigator.userAgent)?'Firefox':/Chrome\//.test(navigator.userAgent)?'Chrome':'Safari';
   const browserLabel=dialog?.querySelector('[data-browser-settings-label]');
   if(browserLabel)browserLabel.textContent=`Check your ${browserName} settings`;
-  const showHelp=()=>{if(dialog instanceof HTMLDialogElement&&!dialog.open)dialog.showModal()};
-  const setEnabled=()=>{roomBell.classList.add('notification-enabled');icon.src=`/static/icons/notification-bell-${roomBell.dataset.involvement}.svg`};
+  const showHelp=()=>{
+    if(dialog instanceof HTMLDialogElement&&!dialog.open){
+      dialog.showModal();
+      const visible=[...dialog.querySelectorAll('[data-notifications-target="details"]')].filter(item=>item.getClientRects().length);
+      if(visible.length===1)visible[0].open=true;
+    }
+  };
+  const showAlert=()=>{
+    roomBell?.querySelectorAll('img').forEach(image=>image.hidden=!image.hidden);
+    if(!document.cookie.includes('notifications-first-run-seen='))roomBell?.classList.add('btn--pulsing');
+  };
+  const markSeen=()=>{
+    roomBell?.classList.remove('btn--pulsing');
+    document.cookie='notifications-first-run-seen=true; SameSite=Lax; Path=/; Max-Age=31536000';
+  };
+  const loadFrame=async()=>{
+    const response=await fetch(frame.dataset.turboFrameUrlParam,{headers:{'Turbo-Frame':frame.id,'Accept':'text/html'}});
+    if(!response.ok)throw Error(`Could not load notifications (${response.status})`);
+    const page=new DOMParser().parseFromString(await response.text(),'text/html');
+    const replacement=page.querySelector(`turbo-frame#${frame.id}`);
+    if(!replacement)throw Error('Notification frame missing');
+    frame.replaceWith(replacement);
+    frame=replacement;
+  };
   const hasSubscription=async()=>{
     if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)||Notification.permission!=='granted')return false;
-    const registration=await navigator.serviceWorker.getRegistration();
+    const registration=await navigator.serviceWorker.getRegistration(window.location.origin);
     return !!(await registration?.pushManager?.getSubscription());
   };
-  hasSubscription().then(enabled=>{if(enabled)setEnabled()}).catch(()=>{});
+  hasSubscription().then(enabled=>enabled?loadFrame():showAlert()).catch(showAlert);
   const subscribe=async()=>{
     if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))return false;
     const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
@@ -706,23 +729,27 @@ if(roomBell){
     if(!response.ok)throw Error(`Subscription failed (${response.status})`);
     return true;
   };
-  roomBell.addEventListener('click',async()=>{
+  roomBell?.addEventListener('click',async()=>{
     roomBell.disabled=true;
+    markSeen();
     try{
-      if(!(await hasSubscription())){
-        if(await subscribe())setEnabled();else showHelp();
-        return;
-      }
-      const choices=roomBell.dataset.roomKind==='direct'?['everything','nothing']:['mentions','everything','nothing','invisible'];
-      const next=choices[(choices.indexOf(roomBell.dataset.involvement)+1)%choices.length];
-      const response=await fetch(`/rooms/${roomBell.dataset.roomId}/involvement?involvement=${next}`,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrfToken},body:new URLSearchParams({involvement:next})});
-      if(!response.ok)throw Error(`Could not update notifications (${response.status})`);
-      roomBell.dataset.involvement=next;
-      setEnabled();
+      if((await hasSubscription())||await subscribe())await loadFrame();
+      else showHelp();
     }catch(error){showHelp()}
     finally{roomBell.disabled=false}
   });
-  dialog?.querySelector('[data-close-notifications]')?.addEventListener('click',()=>dialog.close());
+  notificationsControl.addEventListener('submit',async event=>{
+    const form=event.target;
+    if(!(form instanceof HTMLFormElement)||form.closest('turbo-frame')!==frame)return;
+    event.preventDefault();
+    const button=form.querySelector('button[type="submit"]');
+    if(button)button.disabled=true;
+    try{
+      const response=await fetch(form.action,{method:'POST',headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(form))});
+      if(!response.ok)throw Error(`Could not update notifications (${response.status})`);
+      await loadFrame();
+    }catch(error){showHelp();if(button)button.disabled=false}
+  });
   dialog?.addEventListener('click',event=>{if(event.target===dialog)dialog.close()});
 }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker').catch(() => {});

@@ -58,8 +58,9 @@ def request(port, method, path, cookie, csrf, frame=None, body=b""):
         connection.close()
 
 
-def frame_events(page):
-    match = re.search(r"<turbo-frame\b.*?</turbo-frame>", page, re.S)
+def frame_events(page, frame_id=None):
+    start = rf'<turbo-frame\b[^>]*\bid=["\']{re.escape(frame_id)}["\'][^>]*>' if frame_id else r"<turbo-frame\b[^>]*>"
+    match = re.search(start + r".*?</turbo-frame>", page, re.S)
     assert match, page[:300]
     parser = FrameParser()
     parser.feed(match.group())
@@ -82,6 +83,9 @@ def workflow(port, cookie, csrf, database):
     ):
         frame_id = f"involvement_rooms_{kind}_{room_id}"
         path = f"/rooms/{room_id}/involvement"
+        status, _, room_page = request(port, "GET", f"/rooms/{room_id}", cookie, csrf)
+        assert status == 200, (room_id, status, room_page[:300])
+        observations.append(("bell", room_id, frame_events(room_page, frame_id)))
         for current, following in zip(levels, levels[1:]):
             assert room_state(database, room_id) == current
             status, _, page = request(port, "GET", path, cookie, csrf, frame_id)
