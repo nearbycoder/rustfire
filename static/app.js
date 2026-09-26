@@ -637,8 +637,15 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   };
   fileInput.addEventListener('change',()=>{addFiles(fileInput.files);fileInput.value=''});
   composer.addEventListener('paste',event=>{if(event.clipboardData?.files?.length){event.preventDefault();addFiles(event.clipboardData.files)}});
-  composer.addEventListener('dragover',event=>{if(Array.from(event.dataTransfer?.types||[]).includes('Files'))event.preventDefault()});
-  composer.addEventListener('drop',event=>{if(event.dataTransfer?.files?.length){event.preventDefault();addFiles(event.dataTransfer.files)}});
+  for(const target of [chat,composer]){
+    target.addEventListener('dragenter',event=>event.preventDefault());
+    target.addEventListener('dragover',event=>{event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect='copy'});
+    target.addEventListener('drop',event=>{
+      event.preventDefault();
+      target.dispatchEvent(new CustomEvent('drop-target:drop',{bubbles:true,cancelable:true,detail:{files:event.dataTransfer?.files}}));
+    });
+  }
+  window.addEventListener('drop-target:drop',event=>{if(event.detail.files?.length)addFiles(event.detail.files)});
   const pendingTemplate=chat.querySelector('script[data-messages-target="template"]')?.innerHTML;
   const escapeHtml=value=>{const span=document.createElement('span');span.textContent=value;return span.innerHTML};
   const pendingUpload=(filename,percent=0)=>`<div class="message__pending-upload flex align-center gap" style="--percentage: ${percent}%"><div class="composer__file-thumbnail composer__file-thumbnail--common colorize--black borderless flex-item-no-shrink"></div><div>${escapeHtml(filename)} - <span>${percent}%</span></div></div>`;

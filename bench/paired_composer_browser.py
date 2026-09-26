@@ -1,4 +1,4 @@
-"""Compare queued files and a text-plus-two-file composer send in Chromium."""
+"""Compare file picking, dropping, queueing, and sending in Chromium."""
 
 import json
 import pathlib
@@ -15,6 +15,19 @@ from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redi
 from paired_bot_admin import cleanup_campfire_uploads
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 from paired_reply_browser import browser
+
+
+DROP_CONTENT = b"Dropped through the room message area\n"
+
+
+def dispatch_drop(session, selector, name):
+    return json.loads(browser(session, "eval", f"""(() => {{
+      const transfer=new DataTransfer();
+      transfer.items.add(new File([new Uint8Array({list(DROP_CONTENT)})], {json.dumps(name)}, {{type:'text/plain'}}));
+      const event=new DragEvent('drop',{{bubbles:true,cancelable:true,dataTransfer:transfer}});
+      document.querySelector({json.dumps(selector)}).dispatchEvent(event);
+      return event.defaultPrevented;
+    }})()"""))
 
 
 def preview(session):
@@ -52,10 +65,11 @@ def verify_uploads(database, upload_directory, rails):
                 WHERE a.record_type='Message' AND a.name='attachment'""").fetchall()
         else:
             files = db.execute("SELECT filename,stored_name FROM attachments").fetchall()
-    assert sorted(name for name, _ in files) == ["earth.png", "moon.jpg"], files
+    assert sorted(name for name, _ in files) == ["dropped.txt", "earth.png", "moon.jpg"], files
     for name, key in files:
         path = upload_directory / key[:2] / key[2:4] / key if rails else upload_directory / key
-        assert path.read_bytes() == (REPOSITORY / "test/fixtures/files" / name).read_bytes(), name
+        expected = DROP_CONTENT if name == "dropped.txt" else (REPOSITORY / "test/fixtures/files" / name).read_bytes()
+        assert path.read_bytes() == expected, name
 
 
 def check_app(session, port, database, rails):
@@ -101,8 +115,29 @@ def check_app(session, port, database, rails):
     for _, client_id, _, _ in rows:
         browser(session, "wait", f'#message_{client_id}[data-message-id]')
     assert preview(session) == [], preview(session)
+    form_drop_prevented = dispatch_drop(session, "#composer", "form-dropped.txt")
+    assert form_drop_prevented, "composer drop was not accepted"
+    form_drop = preview(session)
+    assert [item["name"] for item in form_drop] == ["form-dropped.txt"], form_drop
+    browser(session, "click", '#composer [data-composer-target="fileList"] > button')
+    assert preview(session) == [], preview(session)
+    drop_prevented = dispatch_drop(session, "#message-area .messages", "dropped.txt")
+    assert drop_prevented, "room-area drop was not accepted"
+    dropped = preview(session)
+    assert [item["name"] for item in dropped] == ["dropped.txt"], dropped
+    browser(session, "click", '#composer button[type="submit"]')
+    for _ in range(150):
+        all_rows = saved(database, rails)
+        if len(all_rows) == 4 and sum(bool(row[3]) for row in all_rows) == 3:
+            break
+        time.sleep(0.1)
+    assert len(all_rows) == 4 and sum(bool(row[3]) for row in all_rows) == 3, all_rows
+    assert preview(session) == [], preview(session)
     result = {"both": both, "one": one, "pending": pending,
-              "saved": sorted((re.sub(r"<[^>]+>", "", body), filename or "") for _, _, body, filename in rows)}
+              "saved": sorted((re.sub(r"<[^>]+>", "", body), filename or "") for _, _, body, filename in rows),
+              "form_drop_prevented": form_drop_prevented, "form_drop": form_drop,
+              "drop_prevented": drop_prevented, "dropped": dropped,
+              "dropped_saved": (re.sub(r"<[^>]+>", "", all_rows[-1][2]), all_rows[-1][3])}
     return result
 
 
@@ -152,7 +187,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS queued file previews, removal, and text-plus-two-file browser send match Campfire")
+    print("PASS picked and dropped file previews, removal, and browser sends match Campfire")
 
 
 if __name__ == "__main__":
