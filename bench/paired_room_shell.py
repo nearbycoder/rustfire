@@ -7,9 +7,12 @@ Run after ``cargo build --release``.
 """
 
 import argparse
+import base64
+import hashlib
 import html
 import http.client
 from html.parser import HTMLParser
+import hmac
 import json
 import pathlib
 import re
@@ -17,6 +20,7 @@ import sqlite3
 import subprocess
 import tempfile
 import urllib.parse
+import urllib.request
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_account_logo import multipart
@@ -29,10 +33,12 @@ AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) 
 
 
 class Section(HTMLParser):
-    def __init__(self, target, normalize_times=False):
+    def __init__(self, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False):
         super().__init__(convert_charrefs=True)
         self.target = target
         self.normalize_times = normalize_times
+        self.ignore_csrf_inputs = ignore_csrf_inputs
+        self.normalize_blob_paths = normalize_blob_paths
         self.depth = 0
         self.tokens = []
 
@@ -43,6 +49,8 @@ class Section(HTMLParser):
         elif self.depth and tag not in VOID:
             self.depth += 1
         if self.depth:
+            if self.ignore_csrf_inputs and tag == "input" and values.get("name") == "authenticity_token":
+                return
             normalized = []
             for key, value in attrs:
                 if key == "value" and values.get("name") == "authenticity_token":
@@ -52,6 +60,8 @@ class Section(HTMLParser):
                     value = "<generated-time>"
                 elif value:
                     value = re.sub(r"http://127\.0\.0\.1(?::\d+)?", "<origin>", value)
+                    if self.normalize_blob_paths:
+                        value = re.sub(r"(/rails/active_storage/(?:blobs|representations)/redirect/)[A-Za-z0-9_-]+=*--[a-f0-9]{40}(?=/)", r"\1<signed-blob>", value)
                     if key in {"href", "data-lightbox-url-value"} and value.startswith("/qr_code/"):
                         value = "<origin-specific-qr>"
                     if key == "src" and value.startswith("/account/logo?v="):
@@ -74,8 +84,8 @@ class Section(HTMLParser):
             self.tokens.append(("text", text))
 
 
-def section(page, target, normalize_times=False):
-    parser = Section(target, normalize_times)
+def section(page, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False):
+    parser = Section(target, normalize_times, ignore_csrf_inputs, normalize_blob_paths)
     parser.feed(page.decode())
     assert parser.tokens, f"Missing {target}"
     return parser.tokens
@@ -139,6 +149,28 @@ def post_message(port, cookie, csrf, body="Room page message check", client_id="
         connection.close()
 
 
+def post_file_message(port, cookie, csrf, filename, content_type, contents, client_id):
+    boundary = "rustfire-room-page-file"
+    payload = (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"authenticity_token\"\r\n\r\n{csrf}\r\n"
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"message[client_message_id]\"\r\n\r\n{client_id}\r\n"
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+    ).encode() + contents + f"\r\n--{boundary}--\r\n".encode()
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.request("POST", "/rooms/1/messages", payload, {
+            "Cookie": cookie,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "text/vnd.turbo-stream.html, text/html",
+            "User-Agent": AGENT,
+        })
+        response = connection.getresponse()
+        body = response.read()
+        assert response.status == 200 and response.getheader("Content-Type", "").startswith("text/vnd.turbo-stream.html"), (response.status, body[:200])
+    finally:
+        connection.close()
+
+
 def post_account_logo(port, cookie, csrf, jpeg):
     payload, content_type = multipart(jpeg)
     status, location, body = request(port, "PATCH", "/account", cookie, csrf, payload, content_type)
@@ -179,7 +211,7 @@ def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sa
     return source, target
 
 
-def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, rust_cookie, sample_dir):
+def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, rust_cookie, sample_dir, ignore_csrf_inputs=False, normalize_blob_paths=False):
     path = f"/rooms/1/messages/{message_id}{action}"
     label = "edit" if action else "detail"
     source = get_room(camp_port, camp_cookie, path)
@@ -188,8 +220,29 @@ def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, 
         (sample_dir / f"campfire-message-{label}-{message_id}.html").write_bytes(source)
         (sample_dir / f"rustfire-message-{label}-{message_id}.html").write_bytes(target)
     for part in ("nav", "footer", "sidebar", "main-content"):
-        assert_equal(f"message {message_id} {label} {part}", section(source, part, normalize_times=True), section(target, part, normalize_times=True))
+        assert_equal(f"message {message_id} {label} {part}", section(source, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths), section(target, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths))
     assert 'class="admin"' in target.decode()
+    return source, target
+
+
+def jpeg_representation(page, port, cookie, legacy_secret=None):
+    match = re.search(rb"/rails/active_storage/representations/redirect/[^'\" ]+/moon\.jpg", page)
+    assert match, "Missing signed JPEG representation"
+    path = match.group().decode()
+    if legacy_secret:
+        key = hashlib.pbkdf2_hmac("sha256", legacy_secret.encode(), b"ActiveStorage", 1000, 64)
+        payload = {"_rails": {"data": {"format": "jpeg", "resize_to_limit": [1200, 800]}, "pur": "variation"}}
+        encoded = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        token = f"{encoded}--{hmac.new(key, encoded.encode(), hashlib.sha1).hexdigest()}"
+        parts = path.split("/")
+        parts[-2] = token
+        path = "/".join(parts)
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read()
+        assert response.status == 200 and response.headers.get_content_type() == "image/jpeg", (response.status, response.headers)
+        assert body.startswith(b"\xff\xd8\xff") and body.endswith(b"\xff\xd9"), body[:10]
+        return body
 
 
 def main():
@@ -265,6 +318,19 @@ def main():
                 post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rich_body, "room-page-rich")
                 compare_message_page(2, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
                 compare_message_page(2, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
+                for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    post_file_message(port, cookie, csrf, "note.txt", "text/plain", b"file contents", "room-page-file")
+                compare_message_page(3, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                compare_message_page(3, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
+                for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    post_file_message(port, cookie, csrf, "moon.jpg", "image/jpeg", jpeg, "room-page-image")
+                source_image_page, target_image_page = compare_message_page(4, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                source_jpeg = jpeg_representation(source_image_page, camp_port, camp_cookie)
+                target_jpeg = jpeg_representation(target_image_page, rust_port, "session_token=benchmark-session")
+                assert source_jpeg == target_jpeg, (len(source_jpeg), len(target_jpeg))
+                assert jpeg_representation(target_image_page, rust_port, "session_token=benchmark-session", env["SECRET_KEY_BASE"]) == target_jpeg
+                print(f"JPEG representations: {len(source_jpeg)} byte-identical bytes")
+                compare_message_page(4, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)

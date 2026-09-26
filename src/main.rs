@@ -1049,7 +1049,7 @@ fn blob_path(key: &[u8], id: i64, filename: &str) -> Result<String, StatusCode> 
 fn image_format(content_type: &str) -> Option<&'static str> {
     match content_type {
         "image/png" => Some("png"),
-        "image/jpeg" => Some("jpeg"),
+        "image/jpeg" => Some("jpg"),
         "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
         "image/avif" => Some("avif"),
@@ -9386,7 +9386,18 @@ async fn signed_representation_get(
     let id = blob_id_from_token(key, &token).ok_or(StatusCode::NOT_FOUND)?;
     let (_, filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
     let matches = |candidate: &str| variation.len() == candidate.len() && memcmp::eq(variation.as_bytes(), candidate.as_bytes());
-    let (format, kind) = if let Some(format) = image_format(&content_type) {
+    let (format, kind) = if let Some(mut format) = image_format(&content_type) {
+        if content_type == "image/jpeg"
+            && [
+                image_variation_token_sized(key, "jpeg", 1024, 768)?,
+                image_variation_token_sized(key, "jpeg", 800, 600)?,
+                image_variation_token(key, "jpeg")?,
+            ]
+            .iter()
+            .any(|candidate| matches(candidate))
+        {
+            format = "jpeg";
+        }
         let inline = image_variation_token_sized(key, format, 1024, 768)?;
         let gallery = image_variation_token_sized(key, format, 800, 600)?;
         if matches(&inline) {
