@@ -190,11 +190,11 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
             resource_samples.append(resource_snapshot(resource_pids))
         assert all(not thread.is_alive() for thread in threads), "Writer did not finish"
         assert all("error" not in item and item.get("writes") == count for item in writes), writes
-        assert all(item["elapsed_s"] <= seconds for item in writes), ("Writes ran past the measured read interval", writes)
+        deadline_met = all(item["elapsed_s"] <= seconds for item in writes)
         report = json.loads(stdout.strip().splitlines()[-1])
         assert reader.returncode == 0 and report["errors"] == 0, (report, stderr)
         latencies = sorted(sample for item in writes for sample in item["latencies"])
-        output = {"reads": report, "writes": {"count": len(latencies), "p95_ms": latencies[int(.95 * (len(latencies) - 1))], "max_elapsed_s": max(item["elapsed_s"] for item in writes), "per_room": [{"room": item["room"], "user": item["user"], "count": item["writes"]} for item in writes]}}
+        output = {"reads": report, "writes": {"count": len(latencies), "p95_ms": latencies[int(.95 * (len(latencies) - 1))], "max_elapsed_s": max(item["elapsed_s"] for item in writes), "deadline_met": deadline_met, "per_room": [{"room": item["room"], "user": item["user"], "count": item["writes"], "elapsed_s": round(item["elapsed_s"], 3)} for item in writes]}}
         if captures:
             deliveries = []
             for rid, capture in captures:
@@ -391,8 +391,11 @@ def main():
         check_saved(rust_db, args.rooms, args.users, count, False)
         check_saved(camp_db, args.rooms, args.users, count, True)
         checked_events = check_paired_socket_markup(camp_db, rust_db, event_dir, args.rooms, count) if args.sockets_per_room else 0
-        print("PASS paired multi-room, multi-user mixed message workload")
+        deadlines_met = rust_result["writes"]["deadline_met"] and camp_result["writes"]["deadline_met"]
+        print("PASS paired multi-room, multi-user mixed message workload" if deadlines_met else "FAIL one or more writers ran past the measured read interval")
         print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "stream_markup_checked_events": checked_events, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
+        if not deadlines_met:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
