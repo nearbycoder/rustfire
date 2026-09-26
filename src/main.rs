@@ -6291,19 +6291,21 @@ async fn search_get(
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
-    let recent = recent
+    let recent_links = recent
         .iter()
         .map(|item| {
             let encoded = form_urlencoded::Serializer::new(String::new())
                 .append_pair("q", item)
                 .finish();
-            format!("<a class='search-recent' href='/searches?{encoded}'>“{}”</a>", esc(item))
+            format!("<a class=\"align-center gap room btn txt-nowrap\" href=\"/searches?{encoded}\"><span class=\"overflow-ellipsis\">“{}”</span></a>", esc(item))
         })
         .collect::<String>();
+    let token = u.csrf_token.as_deref().unwrap_or("");
+    let results = csrf_forms(&results, token);
     let clear_button = if recent.is_empty() {
         String::new()
     } else {
-        "<form method='post' action='/searches/clear'><button class='search-clear' type='submit' aria-label='Clear recent searches' title='Clear recent searches'><img src='/static/icons/broom.svg' alt=''></button></form>".to_string()
+        format!("<form class=\"button_to\" method=\"post\" action=\"/searches/clear\"><input type=\"hidden\" name=\"_method\" value=\"delete\"><button class=\"btn searches__btn\" data-turbo-confirm=\"Are you sure you want to clear your recent searches?\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/broom-13d30a95.svg\"><span class=\"for-screen-reader\">Clear recent searches</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"></form>", esc(token))
     };
     let back_room = cookie(&headers, "last_room")
         .and_then(|value| value.parse::<i64>().ok())
@@ -6311,18 +6313,16 @@ async fn search_get(
         .or_else(|| rooms_for(&s, u.id).ok()?.first().map(|room| room.id));
     let back_href = back_room.map_or("/".to_string(), |id| format!("/rooms/{id}"));
     let query_heading = if query.trim().is_empty() {
-        "Search".to_string()
+        String::new()
     } else {
-        format!("“{}” <small>{}</small>", esc(&query), messages.len())
+        format!("<div class=\"searches__query flex align-center gap pad-block-start-half\"><div class=\"btn btn--reversed btn--faux align-center gap txt-nowrap\"><span class=\"overflow-ellipsis\">“{}”</span><span class=\"flex-item-no-shrink\">{}</span></div></div>", esc(&query), messages.len())
     };
-    Ok(render(
-        "Search",
-        &format!(
-            "<div class='app-shell search-shell'><aside class='sidebar search-sidebar'><button class='sidebar-close' data-toggle-sidebar aria-label='Close menu'><img src='/static/icons/menu.svg' alt=''></button><div class='search-sidebar-head'><strong>Recent searches</strong>{clear_button}</div><nav>{recent}</nav><div class='search-sidebar-footer'><a href='{back_href}'>Back to room</a></div></aside><section class='search-main'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{query_heading}</h1><button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div><div id='message-area' class='message-area'><div id='search-results' class='messages searches__results' data-controller='search-results' data-search-results-target='messages'>{results}</div></div><footer class='search-footer'><a href='{back_href}' class='search-exit' aria-label='Exit search'><img src='/static/icons/arrow-left.svg' alt=''></a><form method='post' action='/searches'><input name='q' value='{}' role='searchbox' aria-label='Search messages' placeholder='Search messages' autofocus required><a href='/searches' class='search-reset' aria-label='Clear search field'><img src='/static/icons/remove.svg' alt=''></a><button class='search-submit' type='submit' aria-label='Search'><img src='/static/icons/arrow-up.svg' alt=''></button></form></footer></section></div>",
-            esc(&raw_query)
-        ),
-        Some(&u),
-    ))
+    let nav = format!("{query_heading}<div class=\"searches__recents align-center gap pad-block-half overflow-y overflow-hide-scrollbar\">{recent_links}{clear_button}</div>");
+    let sidebar = format!("<div class=\"rooms position-relative flex flex-column gap overflow-y overflow-hide-scrollbar\">{recent_links}{clear_button}</div>");
+    let body = format!("<div id=\"message-area\" class=\"message-area\"><div class=\"message-area--empty min-width center\"><figure class=\"center pad\"><img aria-hidden=\"true\" class=\"colorize--black translucent\" src=\"/assets/search-5f29565f.svg\"></figure></div><div id=\"search-results\" class=\"messages searches__results\" data-controller=\"search-results\" data-search-results-target=\"messages\" data-search-results-me-class=\"message--me\" data-search-results-threaded-class=\"message--threaded\" data-search-results-mentioned-class=\"message--mentioned\" data-search-results-formatted-class=\"message--formatted\">{results}</div></div>");
+    let input_value = if raw_query.is_empty() { String::new() } else { format!(" value=\"{}\"", esc(&raw_query)) };
+    let footer = format!("<div class=\"composer flex align-end gap\"><a class=\"btn flex-item-no-shrink margin-block-end\" style=\"view-transition-name: input-switcher; --btn-border-radius: 0.5em\" href=\"{back_href}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\"><span class=\"for-screen-reader\">Exit search </span></a><form class=\"margin-block flex-item-grow contain flex align-center gap\" data-controller=\"form\" data-action=\"keydown.esc-&gt;form#cancel\" action=\"/searches\" accept-charset=\"UTF-8\" method=\"post\"><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"><div class=\"composer__input flex align-center flex-item-grow gap full-width input input--actor min-width\"><img aria-hidden=\"true\" class=\"composer__input-hint colorize--black\" style=\"view-transition-name: input-btn;\" src=\"/assets/search-5f29565f.svg\" width=\"20\" height=\"20\"><input{input_value} class=\"searches__input input flex-item-grow\" role=\"searchbox\" aria-label=\"search\" autofocus=\"autofocus\" required=\"required\" type=\"text\" name=\"q\" id=\"q\"><a data-form-target=\"cancel\" role=\"button\" class=\"searches__reset\" href=\"/searches\"><img aria-hidden=\"true\" class=\"colorize--black\" src=\"/assets/remove-0e7a045d.svg\" width=\"14\" height=\"14\"><span class=\"for-screen-reader\">Clear search field</span></a><button name=\"button\" type=\"submit\" class=\"btn btn--reversed flex-item-no-shrink txt-small\" style=\"--btn-border-radius: 0.5em\"><img aria-hidden=\"true\" src=\"/assets/arrow-up-f96b3895.svg\"><span class=\"for-screen-reader\">Search</span></button></div></form></div>", esc(token));
+    Ok(render_source_page_sections("Search", &body, &nav, &footer, &sidebar, "sidebar searches", "", "", Some(&u), token))
 }
 fn search_query(raw: &str) -> String {
     static NON_WORD: OnceLock<Regex> = OnceLock::new();

@@ -198,21 +198,22 @@ def main():
             assert code == 200 and len(json.loads(payload)) == 2
             code, _, page = request(admin, base, "/searches?q=hello")
             assert code == 200 and "hello from smoke" in page
-            assert "id='search-results' class='messages searches__results'" in page
+            assert 'id="search-results" class="messages searches__results"' in page
             assert "id='message_test-1'" in page and f"href='/rooms/1/@{message['id']}'" in page
-            assert "class='search-main'" in page and "class='search-footer'" in page
+            assert 'class="sidebar searches admin"' in page and 'class="composer flex align-end gap"' in page
+            assert 'data-search-results-formatted-class="message--formatted"' in page
             code, _, page = request(admin, base, "/searches?q=smoking")
             assert code == 200 and "hello from smoke" in page
             code, _, page = request(admin, base, "/searches?q=attached")
-            assert code == 200 and "Share note.txt" in page and "id='search-results'" in page
+            assert code == 200 and "Share note.txt" in page and 'id="search-results"' in page
             code, _, page = request(admin, base, "/searches", {"q": "hello"})
-            assert code == 200 and "Recent searches" in page
+            assert code == 200 and "Clear recent searches" in page
             for index in range(11):
                 assert request(admin, base, "/searches", {"q": f"history-{index}"})[0] == 200
             with sqlite3.connect(f"{tmp}/test.db") as search_db:
                 assert search_db.execute("SELECT count(*) FROM searches WHERE user_id=1").fetchone() == (10,)
             code, _, page = request(admin, base, "/searches/clear", {})
-            assert code == 200 and "href='/searches?q=hello'" not in page
+            assert code == 200 and 'href="/searches?q=hello"' not in page
             assert request(admin, base, "/unfurl_link", {"url": "http://127.0.0.1/private"})[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url": "http://127.0.0.1/private"}).encode(), headers={"Content-Type": "application/json"})[0] == 204
             assert request(admin, base, "/unfurl_link", {"url": ""})[0] == 400
