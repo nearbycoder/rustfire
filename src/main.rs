@@ -2242,7 +2242,7 @@ async fn qr_code_show(Path(id): Path<String>) -> AppResult {
     Ok((
         [
             (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "no-store"),
+            (header::CACHE_CONTROL, "public, max-age=31556952"),
         ],
         svg,
     )

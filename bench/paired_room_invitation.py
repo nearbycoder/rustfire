@@ -38,6 +38,16 @@ def invitation_contract(page, port, brand):
     qr = re.search(r'/qr_code/([A-Za-z0-9_=-]+)', page)
     assert qr, "Original room has no QR link"
     assert base64.urlsafe_b64decode(qr.group(1) + "===").decode() == url
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("GET", qr.group(0))
+        response = connection.getresponse()
+        image = response.read()
+        cache = response.getheader("Cache-Control", "")
+        assert response.status == 200 and response.getheader("Content-Type", "").startswith("image/svg+xml")
+        assert b"<svg" in image and "public" in cache and "max-age=31556952" in cache, (response.status, cache)
+    finally:
+        connection.close()
     assert "Copy join link" in page and "Share join link" in page
     copy = re.search(r'data-copy-to-clipboard-content-value=["\']([^"\']+)', page)
     assert copy and html.unescape(copy.group(1)) == url
