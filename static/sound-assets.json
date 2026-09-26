@@ -1,0 +1,215 @@
+{
+  "56k": {
+    "audio": "56k-67359aa6.mp3",
+    "height": 33,
+    "image": "sounds/56k-1567db5b.webp",
+    "width": 79
+  },
+  "ballmer": {
+    "audio": "ballmer-055893e5.mp3"
+  },
+  "bell": {
+    "audio": "bell-4dd04376.mp3"
+  },
+  "bezos": {
+    "audio": "bezos-ed56ef09.mp3"
+  },
+  "bueller": {
+    "audio": "bueller-edbffb89.mp3"
+  },
+  "butts": {
+    "audio": "butts-6774d8a3.mp3"
+  },
+  "clowntown": {
+    "audio": "clowntown-880ab480.mp3",
+    "height": 150,
+    "image": "sounds/clowntown-1670db9e.webp",
+    "width": 210
+  },
+  "cottoneyejoe": {
+    "audio": "cottoneyejoe-39c980e8.mp3"
+  },
+  "crickets": {
+    "audio": "crickets-b50f1da0.mp3"
+  },
+  "curb": {
+    "audio": "curb-f9327cfc.mp3",
+    "height": 101,
+    "image": "sounds/curb-b74cab9f.webp",
+    "width": 150
+  },
+  "dadgummit": {
+    "audio": "dadgummit-6c84151f.mp3"
+  },
+  "dangerzone": {
+    "audio": "dangerzone-7382b27e.mp3",
+    "height": 32,
+    "image": "sounds/dangerzone-0e0f0d09.webp",
+    "width": 157
+  },
+  "danielsan": {
+    "audio": "danielsan-0815085a.mp3"
+  },
+  "deeper": {
+    "audio": "deeper-c9fe70a0.mp3",
+    "height": 80,
+    "image": "sounds/top-cc086a68.webp",
+    "width": 188
+  },
+  "donotwant": {
+    "audio": "donotwant-fa71a459.mp3",
+    "height": 150,
+    "image": "sounds/donotwant-d29fb6fb.webp",
+    "width": 150
+  },
+  "drama": {
+    "audio": "drama-92fb52d2.mp3",
+    "height": 16,
+    "image": "sounds/drama-b398c916.webp",
+    "width": 300
+  },
+  "flawless": {
+    "audio": "flawless-678d1f3c.mp3"
+  },
+  "glados": {
+    "audio": "glados-f033ed9e.mp3"
+  },
+  "gogogo": {
+    "audio": "gogogo-f091ebbc.mp3"
+  },
+  "greatjob": {
+    "audio": "greatjob-7d6aada2.mp3",
+    "height": 16,
+    "image": "sounds/greatjob-99af483c.webp",
+    "width": 79
+  },
+  "greyjoy": {
+    "audio": "greyjoy-dcb0e786.mp3"
+  },
+  "guarantee": {
+    "audio": "guarantee-8e639fbb.mp3"
+  },
+  "heygirl": {
+    "audio": "heygirl-b9a85600.mp3"
+  },
+  "honk": {
+    "audio": "honk-9c336a89.mp3"
+  },
+  "horn": {
+    "audio": "horn-efb0f714.mp3"
+  },
+  "horror": {
+    "audio": "horror-5181b7e4.mp3"
+  },
+  "inconceivable": {
+    "audio": "inconceivable-c8811768.mp3"
+  },
+  "letitgo": {
+    "audio": "letitgo-bc89591d.mp3"
+  },
+  "live": {
+    "audio": "live-550f1f88.mp3"
+  },
+  "loggins": {
+    "audio": "loggins-63aac7af.mp3",
+    "height": 151,
+    "image": "sounds/loggins-a40a75e6.webp",
+    "width": 200
+  },
+  "makeitso": {
+    "audio": "makeitso-f6e530b1.mp3"
+  },
+  "noooo": {
+    "audio": "noooo-c68a85f4.mp3"
+  },
+  "nyan": {
+    "audio": "nyan-1fe5c553.mp3",
+    "height": 15,
+    "image": "sounds/nyan-8cc577e4.webp",
+    "width": 36
+  },
+  "ohmy": {
+    "audio": "ohmy-189dd829.mp3"
+  },
+  "ohyeah": {
+    "audio": "ohyeah-48506f41.mp3"
+  },
+  "pushit": {
+    "audio": "pushit-f43f90a7.mp3",
+    "height": 15,
+    "image": "sounds/pushit-05915cda.webp",
+    "width": 104
+  },
+  "rimshot": {
+    "audio": "rimshot-66c3332b.mp3"
+  },
+  "rollout": {
+    "audio": "rollout-3a826ae4.mp3"
+  },
+  "rumble": {
+    "audio": "rumble-7b5d6e4f.mp3",
+    "height": 150,
+    "image": "sounds/rumble-c4fc52a9.webp",
+    "width": 220
+  },
+  "sax": {
+    "audio": "sax-9e7841a8.mp3"
+  },
+  "secret": {
+    "audio": "secret-9f61e3b5.mp3"
+  },
+  "sexyback": {
+    "audio": "sexyback-ec0cf66f.mp3"
+  },
+  "story": {
+    "audio": "story-0665aaac.mp3"
+  },
+  "tada": {
+    "audio": "tada-6500487f.mp3"
+  },
+  "tmyk": {
+    "audio": "tmyk-035cbb8b.mp3"
+  },
+  "totes": {
+    "audio": "totes-665011c8.mp3"
+  },
+  "trololo": {
+    "audio": "trololo-d7f880d7.mp3"
+  },
+  "trombone": {
+    "audio": "trombone-3cbeabc3.mp3"
+  },
+  "unix": {
+    "audio": "unix-bb19b65d.mp3"
+  },
+  "vuvuzela": {
+    "audio": "vuvuzela-d177cb0f.mp3"
+  },
+  "what": {
+    "audio": "what-880c5f29.mp3",
+    "height": 131,
+    "image": "sounds/what-02690db4.webp",
+    "width": 100
+  },
+  "whoomp": {
+    "audio": "whoomp-f21c3c43.mp3"
+  },
+  "wups": {
+    "audio": "wups-fbad935c.mp3"
+  },
+  "yay": {
+    "audio": "yay-1fae7a37.mp3",
+    "height": 50,
+    "image": "sounds/yay-914d17c4.webp",
+    "width": 103
+  },
+  "yeah": {
+    "audio": "yeah-71e3371e.mp3",
+    "height": 15,
+    "image": "sounds/yeah-886795b2.webp",
+    "width": 104
+  },
+  "yodel": {
+    "audio": "yodel-b14597bb.mp3"
+  }
+}

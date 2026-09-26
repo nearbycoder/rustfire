@@ -508,7 +508,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
           if(!catchingUp)for(const node of addedMessages)cursor=Math.max(cursor,Number(node.dataset.messageId));
           if(scrollToLatest)messages.scrollTop=messages.scrollHeight;
           updateReturnButton();
-          for(const node of addedMessages){const sound=node.querySelector('[data-sound]');if(sound)new Audio(sound.dataset.sound).play().catch(()=>{});}
+          if(!catchingUp)for(const node of addedMessages){const sound=node.querySelector('.sound[data-sound-url-value]');if(sound)new Audio(sound.dataset.soundUrlValue).play().catch(()=>{});}
         }else decorateOwn();
       }else if(action==='replace'&&target!==messages){
         if(target.closest('.composer--edit'))continue;
@@ -759,7 +759,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       frame.querySelector('[name="boost[content]"]')?.focus();
       return;
     }
-    const sound=e.target.closest('[data-sound]'); if(sound) { new Audio(sound.dataset.sound).play().catch(()=>{}); return; }
+    const sound=e.target.closest('[data-action~="sound#play"]')?.closest('.sound[data-sound-url-value]'); if(sound) { new Audio(sound.dataset.soundUrlValue).play().catch(()=>{}); return; }
     const reply=e.target.closest('[data-action~="reply#reply"]');
     if(reply){
       const article=reply.closest('.message');

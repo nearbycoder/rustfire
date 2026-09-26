@@ -4141,21 +4141,21 @@ fn all_emoji(content: &str) -> bool {
         })
         .is_match(content)
 }
+#[derive(Deserialize)]
+struct SoundAsset {
+    audio: String,
+    image: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
 fn sound_presentation(body: &str) -> Option<String> {
     let name = body.strip_prefix("/play ")?;
     if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric()) {
         return None;
     }
-    const SOUNDS: &str = "56k bell bezos bueller butts clowntown cottoneyejoe crickets curb dadgummit dangerzone danielsan deeper ballmer donotwant drama flawless glados gogogo greatjob greyjoy guarantee heygirl honk horn horror inconceivable letitgo live loggins makeitso noooo nyan ohmy ohyeah pushit rimshot rollout rumble sax secret sexyback story tada tmyk totes trololo trombone unix vuvuzela what whoomp wups yay yeah yodel";
-    if !SOUNDS.split_whitespace().any(|sound| sound == name) {
-        return None;
-    }
-    if !std::path::Path::new("static/sounds")
-        .join(format!("{name}.mp3"))
-        .is_file()
-    {
-        return None;
-    }
+    static ASSETS: OnceLock<HashMap<String, SoundAsset>> = OnceLock::new();
+    let assets = ASSETS.get_or_init(|| serde_json::from_str(include_str!("../static/sound-assets.json")).expect("valid sound asset manifest"));
+    let asset = assets.get(name)?;
     let label = match name {
         "bell" => "🔔",
         "bezos" => "😆💭",
@@ -4198,20 +4198,17 @@ fn sound_presentation(body: &str) -> Option<String> {
         "yodel" => "📣🗻🙉",
         _ => name,
     };
-    let image = if name == "deeper" { "top" } else { name };
-    let visual = if std::path::Path::new("static/sound-images")
-        .join(format!("{image}.webp"))
-        .is_file()
-    {
+    let visual = if let Some(image) = &asset.image {
         format!(
-            "<img src='/static/sound-images/{image}.webp' alt='{}' loading='lazy'>",
-            esc(label)
+            "<img src='/assets/{image}' width='{}' height='{}' class='align--middle'>",
+            asset.width.unwrap(), asset.height.unwrap()
         )
     } else {
         esc(label)
     };
     Some(format!(
-        "<span class='sound'><button type='button' class='sound-play' data-sound='/static/sounds/{name}.mp3' aria-label='Play {name}'>🔊</button> {visual}</span>"
+        "<div class='sound' data-controller='sound' data-action='messages:play->sound#play' data-sound-url-value='/assets/{}'><button class='btn btn--plain' data-action='sound#play'>🔊</button>{visual}</div>",
+        asset.audio
     ))
 }
 fn safe_inline_image(content_type: &str) -> bool {
