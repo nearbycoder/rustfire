@@ -1,7 +1,7 @@
 """Compare profile behavior and read throughput with pinned ONCE Campfire.
 
 Run after ``cargo build --release`` with the pinned Ruby bundle and Redis available.
-The two disposable databases each contain the same user and open-room membership.
+The disposable databases contain matched users and shared/direct memberships.
 """
 
 import argparse
@@ -9,6 +9,7 @@ import concurrent.futures
 import html
 import http.client
 import http.cookiejar
+from html.parser import HTMLParser
 import json
 import math
 import pathlib
@@ -30,6 +31,56 @@ from paired_bot_admin import request
 
 TRANSFER = re.compile(r"/session/transfers/[A-Za-z0-9_-]+--[0-9a-f]{64}")
 PROFILE_FIELDS = ("user[avatar]", "user[name]", "user[email_address]", "user[password]", "user[bio]")
+VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+
+class ProfilePanel(HTMLParser):
+    def __init__(self, target="panel"):
+        super().__init__(convert_charrefs=True)
+        self.target = target
+        self.depth = 0
+        self.tokens = []
+
+    def handle_starttag(self, tag, attrs):
+        if self.depth == 0 and ((self.target == "panel" and tag == "section" and "panel" in dict(attrs).get("class", "").split()) or (self.target == "nav" and tag == "nav" and ("id", "nav") in attrs)):
+            self.depth = 1
+        elif self.depth and tag not in VOID_TAGS:
+            self.depth += 1
+        if self.depth:
+            normalized = []
+            for key, value in attrs:
+                if key == "src" and value and "/avatar" in value:
+                    value = "<signed-avatar>"
+                elif key == "value" and ("name", "authenticity_token") in attrs:
+                    value = "<csrf>"
+                elif key in {"value", "data-copy-to-clipboard-content-value", "data-web-share-url-value"} and value and "/session/transfers/" in value:
+                    value = "<transfer-url>"
+                elif key in {"href", "data-lightbox-url-value"} and value and value.startswith("/qr_code/"):
+                    value = "<qr-url>"
+                normalized.append((key, value))
+            self.tokens.append(("start", tag, tuple(sorted(normalized))))
+
+    def handle_endtag(self, tag):
+        if self.depth and tag not in VOID_TAGS:
+            self.tokens.append(("end", tag))
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if self.depth and data.strip():
+            self.tokens.append(("text", " ".join(data.split()).replace("Campfire", "Rustfire")))
+
+
+def compare_profile_panel(source, target, fragment="panel"):
+    panels = []
+    for page in (source, target):
+        parser = ProfilePanel(fragment)
+        parser.feed(page.decode())
+        assert parser.tokens, f"Missing profile {fragment}"
+        panels.append(parser.tokens)
+    for index, (expected, actual) in enumerate(zip(*panels)):
+        assert expected == actual, (index, expected, actual)
+    assert len(panels[0]) == len(panels[1]), (len(panels[0]), len(panels[1]))
+    return len(panels[0])
 
 
 def read_manifest(port):
@@ -68,6 +119,37 @@ def transfer_path(page):
     match = TRANSFER.search(html.unescape(page.decode()))
     assert match, "Profile has no signed device-transfer link"
     return match.group()
+
+
+def upload_avatar(port, cookie, csrf, database, campfire):
+    boundary = "rustfire-paired-profile-avatar"
+    image = pathlib.Path("static/icons/app-icon-192.png").read_bytes()
+    payload = b"".join((
+        f'--{boundary}\r\nContent-Disposition: form-data; name="_method"\r\n\r\npatch\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="authenticity_token"\r\n\r\n{csrf}\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="user[avatar]"; filename="avatar.png"\r\nContent-Type: image/png\r\n\r\n'.encode(),
+        image, b"\r\n", f"--{boundary}--\r\n".encode(),
+    ))
+    status, location, response = request(port, "POST", "/users/me/profile", cookie, csrf, payload, f"multipart/form-data; boundary={boundary}")
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/users/me/profile", (status, location, response[:200])
+    with sqlite3.connect(database) as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM active_storage_attachments WHERE record_type='User' AND name='avatar' AND record_id=1" if campfire
+            else "SELECT COUNT(*) FROM avatars WHERE user_id=1"
+        ).fetchone()[0]
+    assert count == 1, count
+
+
+def delete_avatar(port, cookie, csrf, database, campfire):
+    payload = urllib.parse.urlencode({"_method": "delete", "authenticity_token": csrf}).encode()
+    status, location, response = request(port, "POST", "/users/1/avatar", cookie, csrf, payload, "application/x-www-form-urlencoded")
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/users/me/profile", (status, location, response[:200])
+    with sqlite3.connect(database) as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM active_storage_attachments WHERE record_type='User' AND name='avatar' AND record_id=1" if campfire
+            else "SELECT COUNT(*) FROM avatars WHERE user_id=1"
+        ).fetchone()[0]
+    assert count == 0, count
 
 
 def use_transfer(port, path):
@@ -177,13 +259,16 @@ def main():
         temp = pathlib.Path(directory)
         rust_db, camp_db = temp / "rustfire.sqlite3", temp / "campfire.sqlite3"
         rust_port, camp_port = free_port(), free_port()
-        seed_rustfire(rust_db, rust_port, [])
-        env = seed_campfire(repository, ruby, bundle_path, repository / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
+        seed_rustfire(rust_db, rust_port, [[2]])
+        env = seed_campfire(repository, ruby, bundle_path, repository / "storage/db/production.sqlite3", camp_db, [[2]], camp_port, temp)
         env["WEB_CONCURRENCY"] = "4"
         with sqlite3.connect(rust_db) as db:
             db.execute("UPDATE users SET name='Test Admin',email_address='benchmark@example.invalid' WHERE id=1")
+            db.execute("UPDATE rooms SET name='All Talk' WHERE id=1")
         with sqlite3.connect(camp_db) as db:
             db.execute("UPDATE accounts SET name='Benchmark' WHERE id=1")
+            db.execute("UPDATE users SET name='Test Admin' WHERE id=1")
+            db.execute("UPDATE users SET name='User 2' WHERE id=2")
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"]})
         log = open(temp / "puma.log", "w+")
         camp = subprocess.Popen([str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=repository, env=env, stdout=log, stderr=log)
@@ -197,6 +282,15 @@ def main():
             assert (camp_status, rust_status) == (200, 200)
             for field in PROFILE_FIELDS:
                 assert field.encode() in camp_page and field.encode() in rust_page, field
+            print(f"parsed profile nav: {compare_profile_panel(camp_page, rust_page, 'nav')} matching tokens")
+            matched_profile_tokens = compare_profile_panel(camp_page, rust_page)
+            print(f"parsed profile panel: {matched_profile_tokens} matching tokens")
+            upload_avatar(camp_port, camp_cookie, camp_csrf, camp_db, True)
+            upload_avatar(rust_port, rust_cookie, rust_csrf, rust_db, False)
+            camp_status, _, camp_page = request(camp_port, "GET", "/users/me/profile", camp_cookie, camp_csrf)
+            rust_status, _, rust_page = request(rust_port, "GET", "/users/me/profile", rust_cookie, rust_csrf)
+            assert (camp_status, rust_status) == (200, 200)
+            print(f"profile with avatar: {compare_profile_panel(camp_page, rust_page)} matching tokens")
             with sqlite3.connect(rust_db) as db:
                 transfers_before = db.execute("SELECT COUNT(*) FROM session_transfers").fetchone()[0]
             for _ in range(3):
@@ -215,6 +309,12 @@ def main():
             target_mutations = verify_mutations(rust_port, rust_cookie, rust_csrf, rust_db)
             assert source_mutations == target_mutations
             print("profile fields and involvement mutation: passed", source_mutations)
+            delete_avatar(camp_port, camp_cookie, camp_csrf, camp_db, True)
+            delete_avatar(rust_port, rust_cookie, rust_csrf, rust_db, False)
+            camp_status, _, camp_page = request(camp_port, "GET", "/users/me/profile", camp_cookie, camp_csrf)
+            rust_status, _, rust_page = request(rust_port, "GET", "/users/me/profile", rust_cookie, rust_csrf)
+            assert (camp_status, rust_status) == (200, 200)
+            print(f"profile after avatar deletion: {compare_profile_panel(camp_page, rust_page)} matching tokens")
         except Exception:
             log.flush()
             log.seek(0)

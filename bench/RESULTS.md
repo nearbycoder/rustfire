@@ -404,6 +404,16 @@ For the same two-membership fixture at a 1280 px dark-mode viewport, Campfire's 
 
 The screen's forms and sampled mutations match, but its full response bytes differ substantially, including source JavaScript imports and document markup. These numbers show a large speed margin for this narrower read workload under the tested conditions; they do not establish a whole-app advantage or a maximum sustainable client count.
 
+The profile page was then moved to Rustfire's source-style document shell. On a matched fixture with one shared and one direct room, `bench/paired_profile.py --requests 320` compared the parsed navigation and complete profile panel: **23 nav tokens and 380 panel tokens matched** after normalizing signed avatar, transfer, QR, and CSRF values and the product name. Posting the same PNG avatar to both apps produced the source-style delete control and **390 matching panel tokens**. Both source-shaped avatar-delete forms removed the saved file and returned a panel with **381 matching tokens** after the profile fields changed. The probe also passed two-way device transfer, profile writes, and notification changes. A new warm read run with the avatar attached measured:
+
+| Clients | Rustfire requests/s / p95 | Campfire requests/s / p95 |
+| ---: | ---: | ---: |
+| 1 | 9,099 / 0.17 ms | 174 / 11.92 ms |
+| 8 | 13,365 / 1.27 ms | 373 / 38.05 ms |
+| 32 | 14,749 / 4.40 ms | 616 / 129.67 ms |
+
+The source sent 37,211 bytes per page and Rustfire 19,725 bytes. The nav and panel matched under the stated normalization, while the surrounding document, JavaScript imports, and response size still differed. Both servers and the client ran on one host; four Puma workers served Campfire and one release process served Rustfire. These short serial trials do not establish sustained capacity or whole-app superiority.
+
 ## Original room invitation and mobile composer
 
 Rustfire now renders the source's welcome invitation in the original room while it has at most 40 messages. The card contains the account logo, translated welcome text, current join URL, QR link, copy value, share control, and administrator regenerate form. `bench/paired_room_invitation.py` verified both apps displayed the card with 0, 1, and 40 messages, removed it at 41, and omitted it from a second room. It decoded each QR path to its displayed join URL, matched the copy value, and checked that the SVG response has Campfire's one-year public cache header. A browser opened Rustfire's QR dialog and posted a message through the mobile composer; the welcome card remained visible after that post.

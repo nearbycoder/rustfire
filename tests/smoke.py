@@ -267,12 +267,12 @@ def main():
             assert code == 200 and "Nested profile" in page
             assert page.count("name='user[avatar]'") == 2 and "name='user[name]'" in page
             assert "name='user[email_address]'" in page and "name='user[password]'" in page and "name='user[bio]'" in page
-            assert "class='profile-transfer'" in page and "involvement_rooms_open_1" in page
+            assert "id='session_transfer_url'" in page and "involvement_rooms_open_1" in page
             assert request(member, base, "/rooms/1/involvement?involvement=everything", {"_method":"put"}, method="POST")[0] == 200
             with sqlite3.connect(f"{tmp}/test.db") as profile_db:
                 assert profile_db.execute("SELECT involvement FROM memberships WHERE room_id=1 AND user_id=2").fetchone() == ("everything",)
             assert request(member, base, "/rooms/1/involvement?involvement=mentions", {"_method":"put"}, method="POST")[0] == 200
-            assert re.search(r"meta name='vapid-public-key' content='[A-Za-z0-9_-]+'", page)
+            assert re.search(r'''meta name=["']vapid-public-key["'] content=["'][A-Za-z0-9_-]+["']''', page)
             assert request(member, base, "/users/me/push_subscriptions")[0] == 200
             assert request(admin, base, "/users/me/push_subscriptions")[0] == 200
             push_keys={"endpoint":"https://fcm.googleapis.com/fcm/send/test", "p256dh_key":base64.urlsafe_b64encode(b"\x04"+b"\x01"*64).rstrip(b"=").decode(), "auth_key":base64.urlsafe_b64encode(b"\x02"*16).rstrip(b"=").decode()}
