@@ -89,14 +89,26 @@ def main():
             code, _, worker = request(client(), base, "/service-worker", headers={"Accept": "*/*"})
             assert code == 200 and "notificationclick" in worker
             admin = client()
-            assert request(admin, base, "/")[1].endswith("/first_run")
+            code, setup_url, setup_page = request(admin, base, "/")
+            assert code == 200 and setup_url.endswith("/first_run")
+            assert 'enctype="multipart/form-data"' in setup_page and 'name="user[avatar]"' in setup_page
+            assert all(f'name="user[{field}]"' in setup_page for field in ('name', 'email_address', 'password'))
+            assert "name='authenticity_token'" in setup_page
             with client().open(base + "/account/logo") as logo:
                 assert logo.status == 200 and logo.read(8) == b"\x89PNG\r\n\x1a\n"
             assert request(admin, base, "/first_run", {"name": "Forged", "email_address": "forged@example.com", "password": "password123"}, headers={"X-CSRF-Token": "wrong"})[0] == 403
-            code, url, _ = request(admin, base, "/first_run", {"name": "Admin", "email_address": "admin@example.com", "password": "password123"})
+            setup_boundary = "rustfire-initial-setup"
+            setup_parts = []
+            for field, value in (("authenticity_token", CSRF[admin]), ("user[name]", "Admin"), ("user[email_address]", "admin@example.com"), ("user[password]", "password123")):
+                setup_parts.append(f'--{setup_boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'.encode())
+            setup_parts.append(f'--{setup_boundary}--\r\n'.encode())
+            code, url, _ = request(admin, base, "/first_run", b''.join(setup_parts), headers={"Content-Type": f"multipart/form-data; boundary={setup_boundary}", "X-CSRF-Token": ""})
             assert code == 200 and "/rooms/1" in url, (code, url)
+            with sqlite3.connect(f"{tmp}/test.db") as check_db:
+                assert check_db.execute("SELECT name FROM accounts WHERE id=1").fetchone() == ("Campfire",)
+                assert check_db.execute("SELECT name FROM rooms WHERE id=1").fetchone() == ("All Talk",)
             code, _, page = request(admin, base, "/rooms/1")
-            assert code == 200 and "Campfire" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
+            assert code == 200 and "All Talk" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
             assert "href='/webmanifest.json'" in page
             assert "id='system_welcome'" in page and "Welcome to Rustfire" in page and "id='invite_url'" in page
             assert 'data-controller="notifications"' in page and 'data-turbo-frame-url-param="/rooms/1/involvement"' in page
@@ -122,7 +134,7 @@ def main():
             assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", message["created_at"])
             code, _, page = request(admin, base, f"/rooms/1/@{message['id']}")
             assert code == 200 and "hello from smoke" in page and "data-at-message='1'" in page and "id='composer'" in page, code
-            assert f"<span class='message__room'><a href='/rooms/1/@{message['id']}' target='_top' data-reply-target='link'>Campfire</a></span>" in page
+            assert f"<span class='message__room'><a href='/rooms/1/@{message['id']}' target='_top' data-reply-target='link'>All Talk</a></span>" in page
             assert f"data-copy-to-clipboard-content-value='{base}/rooms/1/@{message['id']}'" in page
             assert "custom-boost-form" not in page
             code, _, boost_frame = request(admin, base, f"/messages/{message['id']}/boosts/new", headers={"Turbo-Frame": "new_boost_message_test-1"})

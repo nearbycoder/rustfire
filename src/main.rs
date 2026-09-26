@@ -1698,7 +1698,7 @@ fn csrf_forms(html: &str, token: &str) -> String {
         let tag = &rest[..=end];
         out.push_str(tag);
         rest = &rest[end + 1..];
-        if tag.contains("method='post'") {
+        if tag.contains("method='post'") || tag.contains("method=\"post\"") {
             if rest.starts_with("<input type='hidden' name='_method'") {
                 if let Some(method_end) = tag_end(rest) {
                     out.push_str(&rest[..=method_end]);
@@ -2632,18 +2632,18 @@ async fn transfer_update(
 fn first_run_needed(state: &AppState) -> Result<bool, StatusCode> {
     let db = pool(state)?;
     let n: i64 = db
-        .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM accounts", [], |r| r.get(0))
         .map_err(db_err)?;
     Ok(n == 0)
 }
 
 async fn root(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     if first_run_needed(&s)? {
-        return Ok(Redirect::to("/first_run").into_response());
+        return Ok(found_redirect("/session/new"));
     }
     let u = match user(&s, &headers) {
         Ok(u) => u,
-        Err(_) => return Ok(Redirect::to("/session/new").into_response()),
+        Err(_) => return Ok(found_redirect("/session/new")),
     };
     let db = pool(&s)?;
     let last_visited = cookie(&headers, "last_room").and_then(|id| id.parse::<i64>().ok());
@@ -2670,7 +2670,7 @@ async fn root(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
         .map_err(db_err)?
     };
     Ok(match rid {
-        Some(id) => Redirect::to(&format!("/rooms/{id}")).into_response(),
+        Some(id) => found_redirect(&format!("/rooms/{id}")),
         None => render(
             "Welcome",
             "<div class='empty'><h1>Welcome to Rustfire</h1><p>Start a room or ping someone to begin.</p><a class='button' href='/rooms/opens/new'>Create a room</a></div>",
@@ -2688,66 +2688,157 @@ async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         )
         .optional()
         .map_err(db_err)?;
-    Ok(Redirect::to(
+    Ok(found_redirect(
         &rid.map(|id| format!("/rooms/{id}"))
             .unwrap_or_else(|| "/".to_string()),
-    )
-    .into_response())
+    ))
+}
+struct SignupSubmission {
+    name: String,
+    email: String,
+    password: String,
+    avatar: Option<(Vec<u8>, String)>,
+}
+async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request) -> Result<SignupSubmission, StatusCode> {
+    let mut avatar = None;
+    let values = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .starts_with("multipart/form-data")
+    {
+        let mut multipart = Multipart::from_request(req, s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut values = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
+            let name = field.name().unwrap_or("").to_string();
+            if matches!(name.as_str(), "user[avatar]" | "avatar") {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                if !bytes.is_empty() {
+                    if !safe_inline_image(&content_type) || bytes.len() > 5 * 1024 * 1024 {
+                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                    }
+                    avatar = Some((bytes.to_vec(), content_type));
+                }
+            } else if matches!(
+                name.as_str(),
+                "name" | "user[name]" | "email_address" | "user[email_address]" | "password" | "user[password]"
+            ) {
+                values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
+            }
+        }
+        values
+    } else {
+        let RawForm(raw) = RawForm::from_request(req, s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        fields(&raw).0
+    };
+    let name = form_value(&values, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_string();
+    let email = form_value(&values, "email_address", "user[email_address]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_lowercase();
+    let password = form_value(&values, "password", "user[password]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.to_string();
+    if name.is_empty() || password.is_empty() || !email.contains('@') {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    Ok(SignupSubmission { name, email, password, avatar })
 }
 async fn first_run_get(State(s): State<Arc<AppState>>) -> AppResult {
     if !first_run_needed(&s)? {
-        return Ok(Redirect::to("/").into_response());
+        return Ok(found_redirect("/"));
     }
+    let name_translation = profile_translation_button("Enter your name", [
+        "Introduce tu nombre", "Entrez votre nom", "अपना नाम दर्ज करें",
+        "Geben Sie Ihren Namen ein", "Insira seu nome", "お名前を入力してください",
+    ]);
+    let email_translation = profile_translation_button("Enter your email address", [
+        "Introduce tu correo electrónico", "Entrez votre adresse courriel",
+        "अपना ईमेल पता दर्ज करें", "Geben Sie Ihre E-Mail-Adresse ein",
+        "Insira seu endereço de email", "メールアドレスを入力してください",
+    ]);
+    let password_translation = profile_translation_button("Enter your password", [
+        "Introduce tu contraseña", "Saisissez votre mot de passe",
+        "अपना पासवर्ड दर्ज करें", "Geben Sie Ihr Passwort ein",
+        "Insira sua senha", "パスワードを入力してください",
+    ]);
+    let body = format!(r#"<form class="center max-width" enctype="multipart/form-data" action="/first_run" accept-charset="UTF-8" method="post">
+<section class="nametag u-relative"><div class="flex justify-center align-center pad-block"><img class="nametag__lanyard" aria-hidden="true" src="/assets/lanyard-945079e9.svg"></div>
+<div class="nametag__inner flex flex-column gap"><fieldset class="flex flex-column center-block"><legend class="txt-large txt-align-center"><strong>Set up Rustfire</strong></legend>
+<label class="align-center center avatar__form gap" data-controller="upload-preview"><div class="btn input--file"><img aria-hidden="true" src="/assets/camera-927323b8.svg"><input class="input" accept="image/*" data-upload-preview-target="input" data-action="upload-preview#previewImage" type="file" name="user[avatar]" id="user_avatar"><span class="for-screen-reader">Add your avatar</span></div><div class="btn avatar input--file txt-xx-large"><img aria-hidden="true" data-upload-preview-target="image" alt="Add your avatar" src="/assets/default-avatar-1ee67b00.svg"><span class="for-screen-reader">Avatar</span></div></label></fieldset>
+<div class="flex align-center gap">{name_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="name" placeholder="Name" autofocus="autofocus" required="required" data-1p-ignore="true" type="text" name="user[name]" id="user_name"><img aria-hidden="true" class="colorize--black" src="/assets/person-da193438.svg" width="24" height="24"></label></div>
+<div class="flex align-center gap">{email_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="username" placeholder="Email address" required="required" type="email" name="user[email_address]" id="user_email_address"><img aria-hidden="true" class="colorize--black" src="/assets/email-6c595bc5.svg" width="24" height="24"></label></div>
+<div class="flex align-center gap">{password_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="new-password" placeholder="Password" required="required" maxlength="72" size="72" type="password" name="user[password]" id="user_password"><img aria-hidden="true" class="colorize--black" src="/assets/password-0896da4e.svg" width="24" height="24"></label></div>
+<button name="button" type="submit" class="btn btn--reversed center txt-large"><img aria-hidden="true" src="/assets/arrow-right-8f3eb40d.svg"><span class="for-screen-reader">Save</span></button></div></section></form>"#);
     Ok(render_unauth(
         "Set up Rustfire",
-        &format!(
-            "<section class='auth-card'><img class='hero-icon' src='/account/logo' alt=''><h1>Set up Rustfire</h1><form method='post' action='/first_run'>{}{}{}<button class='button'>Create account</button></form></section>",
-            form_field("Your name", "name", "text"),
-            form_field("Email address", "email_address", "email"),
-            form_field("Password", "password", "password")
-        ),
+        &body,
     ))
-}
-#[derive(Deserialize)]
-struct Signup {
-    name: String,
-    email_address: String,
-    password: String,
 }
 async fn first_run_post(
     State(s): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Form(f): Form<Signup>,
+    req: Request,
 ) -> AppResult {
     if !first_run_needed(&s)? {
-        return Err(StatusCode::CONFLICT);
+        return Ok(found_redirect("/"));
     }
-    if f.name.trim().is_empty() || f.password.len() < 8 || !f.email_address.contains('@') {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let pw = hash(&f.password, DEFAULT_COST).map_err(db_err)?;
-    let mut db = pool(&s)?;
-    let tx = db.transaction().map_err(db_err)?;
-    let existing: i64 = tx
-        .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
+    let SignupSubmission { name, email, password, avatar } = signup_submission(&s, &headers, req).await?;
+    let pw = hash(&password, DEFAULT_COST).map_err(db_err)?;
+    let staged_avatar = if let Some((bytes, content_type)) = avatar {
+        let dir = std::path::PathBuf::from(
+            env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
+        )
+        .join("avatars");
+        std::fs::create_dir_all(&dir).map_err(db_err)?;
+        let stored = Uuid::new_v4().to_string();
+        let path = dir.join(&stored);
+        std::fs::write(&path, bytes).map_err(db_err)?;
+        Some((path, stored, content_type))
+    } else {
+        None
+    };
+    let created = (|| -> Result<Option<i64>, StatusCode> {
+        let mut db = pool(&s)?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+        let existing: i64 = tx
+            .query_row("SELECT count(*) FROM accounts", [], |r| r.get(0))
+            .map_err(db_err)?;
+        if existing > 0 {
+            return Ok(None);
+        }
+        let t = now();
+        tx.execute(
+            "INSERT INTO accounts(id,name,join_code,created_at,updated_at) VALUES(1,'Campfire',?1,?2,?2)",
+            params![Uuid::new_v4().to_string(), t],
+        )
         .map_err(db_err)?;
-    if existing > 0 {
-        return Err(StatusCode::CONFLICT);
+        tx.execute("INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,1,0,?4,?4)",params![name,email,pw,t]).map_err(db_err)?;
+        let uid = tx.last_insert_rowid();
+        tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES('All Talk','Rooms::Open',?1,?2,?2)",params![uid,t]).map_err(db_err)?;
+        let rid = tx.last_insert_rowid();
+        tx.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(?1,?2,'mentions',?3)",params![rid,uid,t]).map_err(db_err)?;
+        if let Some((_, stored, content_type)) = &staged_avatar {
+            tx.execute("INSERT INTO avatars(user_id,stored_name,content_type) VALUES(?1,?2,?3)",params![uid,stored,content_type]).map_err(db_err)?;
+            tx.execute("UPDATE users SET updated_at=?1 WHERE id=?2",params![now(),uid]).map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(Some(uid))
+    })();
+    if !matches!(created, Ok(Some(_))) {
+        if let Some((path, _, _)) = &staged_avatar {
+            let _ = std::fs::remove_file(path);
+        }
     }
-    let t = now();
-    tx.execute(
-        "INSERT INTO accounts(id,name,join_code,created_at,updated_at) VALUES(1,'Rustfire',?1,?2,?2)",
-        params![Uuid::new_v4().to_string(), t],
-    )
-    .map_err(|_|StatusCode::CONFLICT)?;
-    tx.execute("INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,1,0,?4,?4)",params![f.name.trim(),f.email_address.trim().to_lowercase(),pw,t]).map_err(db_err)?;
-    let uid = tx.last_insert_rowid();
-    tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES('Campfire','Rooms::Open',?1,?2,?2)",params![uid,t]).map_err(db_err)?;
-    let rid = tx.last_insert_rowid();
-    tx.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(?1,?2,'mentions',?3)",params![rid,uid,t]).map_err(db_err)?;
-    tx.commit().map_err(db_err)?;
-    drop(db);
+    let Some(uid) = created? else { return Ok(found_redirect("/")) };
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
 async fn login_get(
@@ -2755,7 +2846,7 @@ async fn login_get(
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     if first_run_needed(&s)? {
-        return Ok(Redirect::to("/first_run").into_response());
+        return Ok(found_redirect("/first_run"));
     }
     Ok(render_unauth(
         "Sign in",
@@ -6962,56 +7053,7 @@ async fn join_post(
         return Err(StatusCode::NOT_FOUND);
     }
     drop(db);
-    let mut avatar = None;
-    let values = if headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .starts_with("multipart/form-data")
-    {
-        let mut multipart = Multipart::from_request(req, &s)
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        let mut values = HashMap::new();
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?
-        {
-            let name = field.name().unwrap_or("").to_string();
-            if matches!(name.as_str(), "user[avatar]" | "avatar") {
-                let content_type = field
-                    .content_type()
-                    .unwrap_or("application/octet-stream")
-                    .to_string();
-                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-                if !bytes.is_empty() {
-                    if !safe_inline_image(&content_type) || bytes.len() > 5 * 1024 * 1024 {
-                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-                    }
-                    avatar = Some((bytes.to_vec(), content_type));
-                }
-            } else if matches!(
-                name.as_str(),
-                "name" | "user[name]" | "email_address" | "user[email_address]" | "password" | "user[password]"
-            ) {
-                values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
-            }
-        }
-        values
-    } else {
-        let RawForm(raw) = RawForm::from_request(req, &s)
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        fields(&raw).0
-    };
-    let name = form_value(&values, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let email = form_value(&values, "email_address", "user[email_address]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let password = form_value(&values, "password", "user[password]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if name.trim().is_empty() || password.is_empty() || !email.contains('@') {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let email = email.trim().to_lowercase();
+    let SignupSubmission { name, email, password, avatar } = signup_submission(&s, &headers, req).await?;
     let mut db = pool(&s)?;
     let existing: bool = db
         .query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [&email], |row| row.get(0))
@@ -7023,7 +7065,7 @@ async fn join_post(
         return Ok(found_redirect(&format!("/session/new?{encoded}")));
     }
     let t = now();
-    let pw = hash(password, DEFAULT_COST).map_err(db_err)?;
+    let pw = hash(&password, DEFAULT_COST).map_err(db_err)?;
     let tx = db.transaction().map_err(db_err)?;
     if let Err(error) = tx.execute(
         "INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,0,0,?4,?4)",
@@ -7065,7 +7107,7 @@ fn profile_translation_button(english: &str, translations: [&str; 6]) -> String 
         ));
     }
     format!(
-        "<details class='position-relative' data-controller='popup'><summary class='btn' tabindex='-1'><img aria-hidden='true' src='/assets/globe-8c54d23b.svg' width='20' height='20'><span class='for-screen-reader'>Translate</span></summary><div class='language-list-menu shadow'><dl class='language-list'>{entries}</dl></div></details>"
+        "<details class='position-relative' data-controller='popup' data-action='keydown.esc->popup#close toggle->popup#toggle click@document->popup#closeOnClickOutside' data-popup-orientation-top-class='popup-orientation-top'><summary class='btn' tabindex='-1'><img aria-hidden='true' class='color-icon' src='/assets/globe-8c54d23b.svg' width='20' height='20'><span class='for-screen-reader'>Translate</span></summary><div class='language-list-menu shadow' data-popup-target='menu'><dl class='language-list'>{entries}</dl></div></details>"
     )
 }
 fn profile_membership_item(id: i64, name: &str, kind: &str, involvement: &str) -> String {
@@ -10152,6 +10194,13 @@ mod tests {
         let output = super::csrf_forms(input, "test-token");
         assert!(output.contains("name='_method' value='patch'><input type='hidden' name='authenticity_token' value='test-token'>"));
         assert_eq!(output.matches("name='authenticity_token'").count(), 1);
+    }
+
+    #[test]
+    fn csrf_forms_adds_token_to_browser_signup_form() {
+        let input = "<form class=\"center\" enctype=\"multipart/form-data\" action=\"/first_run\" method=\"post\"><input name=\"user[name]\"></form>";
+        let output = super::csrf_forms(input, "signup-token");
+        assert!(output.contains("method=\"post\"><input type='hidden' name='authenticity_token' value='signup-token'>"));
     }
 
     #[test]

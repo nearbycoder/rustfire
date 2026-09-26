@@ -1,4 +1,19 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
+document.addEventListener('toggle',event=>{
+  const popup=event.target.closest?.('details[data-controller~="popup"]');
+  if(!popup?.open)return;
+  const menu=popup.querySelector('[data-popup-target="menu"]');
+  if(!menu)return;
+  const bounds=menu.getBoundingClientRect();
+  popup.classList.toggle(popup.dataset.popupOrientationTopClass||'popup-orientation-top',window.innerHeight-bounds.bottom<90);
+  menu.style.setProperty('--max-width',`${window.innerWidth-bounds.left}px`);
+},true);
+document.addEventListener('click',event=>{
+  for(const popup of document.querySelectorAll('details[data-controller~="popup"][open]'))if(!popup.contains(event.target))popup.open=false;
+});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape')for(const popup of document.querySelectorAll('details[data-controller~="popup"][open]'))popup.open=false;
+});
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
 document.addEventListener('keydown',event=>{

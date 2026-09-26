@@ -63,6 +63,7 @@ def check(port, database, signed_cookie):
     for field in ("user[name]", "user[email_address]", "user[password]", "user[avatar]"):
         assert f'name="{field}"' in page, field
     assert 'enctype="multipart/form-data"' in page
+    assert re.search(r'name=[\'\"]authenticity_token[\'\"] value=[\'\"][^\'\"]+', page)
     assert "Benchmark" in page and "Sign up" in page
     assert fetch(opener, port, "/join/wrong")[0] == 404
     assert fetch(browser(), port, "/join/benchmark", cookie=signed_cookie)[0:2] == (302, "/")
