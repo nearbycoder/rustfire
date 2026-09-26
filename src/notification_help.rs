@@ -31,7 +31,7 @@ fn platform(agent: &str) -> Platform<'_> {
     } else if agent.contains("Safari/") {
         "Safari"
     } else {
-        "browser"
+        "Mozilla"
     };
     let system = if android {
         "Android"

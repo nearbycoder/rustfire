@@ -15,6 +15,7 @@ document.addEventListener('keydown',event=>{
   if(event.key==='Escape')for(const popup of document.querySelectorAll('details[data-controller~="popup"][open]'))popup.open=false;
 });
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
+const currentUserId=document.querySelector('meta[name="current-user-id"]')?.content||document.body.dataset.userId||'';
 document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
 document.addEventListener('keydown',event=>{
   if(event.key!=='Enter'||(!event.ctrlKey&&!event.metaKey)||event.shiftKey||event.altKey)return;
@@ -31,7 +32,7 @@ if(searchShell){
   for(const message of results.querySelectorAll('.message')){
     const timestamp=Number(message.dataset.messageTimestamp);
     const previousTime=previous?Number(previous.dataset.messageTimestamp):NaN;
-    message.classList.toggle('own',message.dataset.userId===document.body.dataset.userId);
+    message.classList.toggle('own',message.dataset.userId===currentUserId);
     message.classList.toggle('threaded',!!previous&&message.dataset.userId===previous.dataset.userId&&Number.isFinite(timestamp)&&Number.isFinite(previousTime)&&Math.abs(timestamp-previousTime)<=300000);
     const day=Number.isFinite(timestamp)?new Date(timestamp).toDateString():null;
     message.classList.toggle('message--first-of-day',day!==previousDay);
@@ -163,7 +164,7 @@ if(newRoomPanel){
     location.href=event.currentTarget.href;
   });
 }
-const chat = document.querySelector('.chat');
+const chat = document.querySelector('#message-area');
 if(!chat){
   document.addEventListener('click',event=>{
     if(event.target.closest('#direct_rooms_control [data-form-target="cancel"]')){
@@ -173,13 +174,19 @@ if(!chat){
   });
 }
 if (chat) {
-  const roomId = Number(chat.dataset.roomId);
+  const roomId = Number(document.querySelector('meta[name="current-room-id"]')?.content);
   const messages = chat.querySelector('.messages');
   const messageById=id=>messages.querySelector(`.message[data-message-id="${Number(id)}"]`);
   const decorateOwn=()=>{
-    messages.querySelectorAll('.message').forEach(node=>node.classList.toggle('own',node.dataset.userId===document.body.dataset.userId));
+    messages.querySelectorAll('.message').forEach(node=>{
+      const mine=node.dataset.userId===currentUserId;
+      node.classList.toggle('own',mine);
+      node.classList.toggle('message--me',mine);
+      node.classList.add('message--formatted');
+      node.classList.toggle('message--mentioned',!!node.querySelector(`.mention img[src^="/users/${currentUserId}/avatar"]`));
+    });
     messages.querySelectorAll('.boost-item').forEach(node=>{
-      const mine=node.dataset.boostDeleteBoosterIdValue===document.body.dataset.userId;
+      const mine=node.dataset.boostDeleteBoosterIdValue===currentUserId;
       node.classList.toggle('mine',mine);
       const content=node.querySelector('[data-boost-delete-target="content"]');
       if(mine){content?.setAttribute('tabindex','0');content?.setAttribute('aria-describedby','delete_boost_accessible_label');}
@@ -192,7 +199,9 @@ if (chat) {
     for(const message of messages.querySelectorAll('.message')){
       const time=Number(message.dataset.messageTimestamp);
       const priorTime=previous?Number(previous.dataset.messageTimestamp):NaN;
-      message.classList.toggle('threaded',!!previous&&message.dataset.userId===previous.dataset.userId&&Number.isFinite(time)&&Number.isFinite(priorTime)&&Math.abs(time-priorTime)<=300000);
+      const threaded=!!previous&&message.dataset.userId===previous.dataset.userId&&Number.isFinite(time)&&Number.isFinite(priorTime)&&Math.abs(time-priorTime)<=300000;
+      message.classList.toggle('threaded',threaded);
+      message.classList.toggle('message--threaded',threaded);
       if(Number.isFinite(time)){
         const date=new Date(time);
         const day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
@@ -204,13 +213,11 @@ if (chat) {
   };
   decorateOwn();
   formatMessageGroups();
-  let historyMode=chat.dataset.historyMode==='true';
-  const atMessage=chat.dataset.atMessage;
+  const atMessage=location.pathname.match(/\/@(\d+)$/)?.[1]||'';
+  let historyMode=!!atMessage;
   if(atMessage)messageById(atMessage)?.scrollIntoView({block:'center'});
   else messages.scrollTop=messages.scrollHeight;
-  const returnButton=document.createElement('button');
-  returnButton.type='button';returnButton.className='return-to-latest';returnButton.textContent='↓ Latest messages';returnButton.hidden=true;
-  chat.append(returnButton);
+  const returnButton=chat.querySelector('.message-area__return-to-latest');
   const nearBottom=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<150;
   const updateReturnButton=()=>{returnButton.hidden=!historyMode&&nearBottom()};
   returnButton.addEventListener('click',()=>{if(historyMode)location.href=`/rooms/${roomId}`;else{messages.scrollTop=messages.scrollHeight;returnButton.hidden=true}});
@@ -235,7 +242,7 @@ if (chat) {
     finally{historyLoading=false}
   }
   let cursor = Number(Array.from(messages.querySelectorAll('.message[data-message-id]')).at(-1)?.dataset.messageId)||0;
-  let lastRefreshAt=Number(chat.dataset.refreshSince)||0;
+  let lastRefreshAt=Number(messages.dataset.refreshRoomLoadedAtValue)||0;
   let newerLoading=false;
   async function loadNewer(){
     if(newerLoading||!historyMode)return;
@@ -292,8 +299,8 @@ if (chat) {
   const unreadIdent=JSON.stringify({channel:'UnreadRoomsChannel'});
   const readIdent=JSON.stringify({channel:'ReadRoomsChannel'});
   const roomListIdent=JSON.stringify({channel:'RoomListChannel'});
-  const sidebarStreamIdents=[...document.querySelectorAll('.sidebar turbo-cable-stream-source[channel="Turbo::StreamsChannel"]')].map(source=>JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:source.getAttribute('signed-stream-name')}));
-  const markRoom=(rid,unread)=>document.querySelectorAll(`.sidebar a[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
+  let sidebarStreamIdents=[];
+  const markRoom=(rid,unread)=>document.querySelectorAll(`#sidebar a[href='/rooms/${rid}']`).forEach(link=>{link.classList.toggle('unread',unread);if(unread&&link.parentElement?.id==='direct_rooms')link.parentElement.prepend(link)});
   let sidebarRefreshPending=false,sidebarRefreshAgain=false;
   async function refreshSidebar(){
     if(sidebarRefreshPending){sidebarRefreshAgain=true;return;}
@@ -302,17 +309,19 @@ if (chat) {
       const response=await fetch(`/users/me/sidebar?active=${roomId}`);
       if(!response.ok)return;
       const html=await response.text();
-      const replacement=new DOMParser().parseFromString(html,'text/html').querySelector('.sidebar');
-      const current=document.querySelector('.sidebar');
+      const replacement=new DOMParser().parseFromString(html,'text/html').querySelector('#user_sidebar');
+      const current=document.querySelector('#sidebar #user_sidebar');
       if(!replacement||!current)return;
-      replacement.classList.toggle('open',current.classList.contains('open'));
       current.replaceWith(replacement);
+      const freshIdents=[...replacement.querySelectorAll('turbo-cable-stream-source[channel="Turbo::StreamsChannel"]')].map(source=>JSON.stringify({channel:'Turbo::StreamsChannel',signed_stream_name:source.getAttribute('signed-stream-name')}));
+      if(socket?.readyState===WebSocket.OPEN)for(const identifier of freshIdents)if(!sidebarStreamIdents.includes(identifier))socket.send(JSON.stringify({command:'subscribe',identifier}));
+      sidebarStreamIdents=freshIdents;
       if(response.headers.get('x-rustfire-active-room-accessible')==='0')location.href='/';
     }catch(error){console.error('Could not refresh room list',error)}
     finally{sidebarRefreshPending=false;if(sidebarRefreshAgain){sidebarRefreshAgain=false;refreshSidebar()}}
   }
   document.addEventListener('click',async event=>{
-    const newPing=event.target.closest('.sidebar .direct__new');
+    const newPing=event.target.closest('#sidebar .direct__new');
     if(newPing){
       event.preventDefault();
       try{
@@ -320,12 +329,12 @@ if (chat) {
         if(!response.ok)throw Error(`Ping form returned ${response.status}`);
         const frame=new DOMParser().parseFromString(await response.text(),'text/html').querySelector('#direct_rooms_control');
         if(!frame)throw Error('Ping form frame missing');
-        document.querySelector('.sidebar #direct_rooms_control')?.replaceWith(frame);
+        document.querySelector('#sidebar #direct_rooms_control')?.replaceWith(frame);
         initPingForm();
       }catch(error){console.error('Could not open ping form',error);location.href=newPing.href}
       return;
     }
-    const cancelPing=event.target.closest('.sidebar #direct_rooms_control [data-form-target="cancel"]');
+    const cancelPing=event.target.closest('#sidebar #direct_rooms_control [data-form-target="cancel"]');
     if(cancelPing){event.preventDefault();await refreshSidebar();}
   });
   function updateDirectRoom(data){
@@ -343,7 +352,7 @@ if (chat) {
     const parsed=new DOMParser().parseFromString(html,'text/html');
     for(const stream of parsed.querySelectorAll('turbo-stream')){
       const target=document.getElementById(stream.getAttribute('target'));
-      if(!target||!target.closest('.sidebar'))continue;
+      if(!target||!target.closest('#sidebar'))continue;
       const action=stream.getAttribute('action');
       if(action==='remove'){target.remove();continue;}
       const fragment=stream.querySelector('template')?.content.cloneNode(true);
@@ -356,11 +365,11 @@ if (chat) {
       else if(action==='replace')target.replaceWith(fragment);
     }
   }
-  const typingIndicator=document.getElementById('typing-indicator');
+  const typingIndicator=document.querySelector('[data-typing-notifications-target="indicator"]');
   const typingPeople=new Map();
-  const renderTyping=()=>{const names=[...typingPeople.values()].map(person=>person.name);typingIndicator.hidden=!names.length;typingIndicator.textContent=names.length===1?`${names[0]} is typing…`:names.length?`${names.join(', ')} are typing…`:'';};
+  const renderTyping=()=>{const names=[...typingPeople.values()].map(person=>person.name);typingIndicator.classList.toggle('typing-indicator--active',!!names.length);typingIndicator.querySelector('[data-typing-notifications-target="author"]').textContent=names.length===1?`${names[0]} is typing…`:names.length?`${names.join(', ')} are typing…`:'';};
   function typingFrame(data) {
-    if(!data?.user || data.user.id===Number(document.body.dataset.userId))return;
+    if(!data?.user || data.user.id===Number(currentUserId))return;
     const prior=typingPeople.get(data.user.id);
     if(prior)clearTimeout(prior.timer);
     if(data.action==='start')typingPeople.set(data.user.id,{name:data.user.name,timer:setTimeout(()=>{typingPeople.delete(data.user.id);renderTyping();},6000)});
@@ -389,7 +398,7 @@ if (chat) {
         if(target===messages&&historyMode){updateReturnButton();continue;}
         for(const node of [...fragment.children])if(node.id&&document.getElementById(node.id))node.remove();
         if(!fragment.childNodes.length)continue;
-        const scrollToLatest=target===messages&&(nearBottom()||[...fragment.querySelectorAll('.message')].some(node=>node.dataset.userId===document.body.dataset.userId));
+        const scrollToLatest=target===messages&&(nearBottom()||[...fragment.querySelectorAll('.message')].some(node=>node.dataset.userId===currentUserId));
         const addedMessages=[...fragment.querySelectorAll('.message[data-message-id]')];
         target.append(fragment);
         if(target===messages){
@@ -415,9 +424,11 @@ if (chat) {
     });
     socket.addEventListener('close', () => {for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();setTimeout(connect, 1500);});
   }
+  refreshSidebar();
   connect();
-  document.addEventListener('click',event=>{if(event.target.closest('[data-toggle-sidebar], .sidebar__toggle'))document.querySelector('.sidebar')?.classList.toggle('open')});
+  document.addEventListener('click',event=>{if(event.target.closest('[data-toggle-sidebar], .sidebar__toggle'))document.querySelector('#sidebar')?.classList.toggle('open')});
   const composer=document.getElementById('composer');
+  composer.querySelector('[name="message[client_message_id]"]').value=crypto.randomUUID();
   async function restoreMessage(article){
     const response=await fetch(`/rooms/${roomId}/messages/${article.dataset.messageId}`,{headers:{'X-Rustfire-Fragment':'1'}});
     if(!response.ok)throw Error('Could not load message');
@@ -426,12 +437,14 @@ if (chat) {
   }
   const typingInput=composer.querySelector('trix-editor');
   const bodyInput=composer.querySelector('[name="message[body]"]');
-  const mentionBox=document.getElementById('mention-suggestions');
+  const mentionBox=document.createElement('div');
+  mentionBox.className='mention-suggestions';mentionBox.id='mention-suggestions';mentionBox.setAttribute('role','listbox');mentionBox.setAttribute('aria-label','Mention a person');mentionBox.hidden=true;
+  typingInput.parentElement.append(mentionBox);typingInput.setAttribute('aria-controls',mentionBox.id);
   let mentionOptions=[],mentionRange=null,mentionSelected=0,mentionGeneration=0,mentionTimer,ignoreNextMentionChange=false;
   const hideMentions=()=>{mentionGeneration++;clearTimeout(mentionTimer);mentionOptions=[];mentionRange=null;mentionBox.hidden=true;mentionBox.replaceChildren();typingInput.removeAttribute('aria-activedescendant');};
   const markMention=()=>{[...mentionBox.children].forEach((button,index)=>{button.classList.toggle('selected',index===mentionSelected);button.setAttribute('aria-selected',String(index===mentionSelected));});typingInput.setAttribute('aria-activedescendant',`mention-option-${mentionSelected}`);};
   const chooseMention=(person)=>{if(!mentionRange||!typingInput.editor||typeof person.sgid!=='string')return;const span=document.createElement('span');span.className='mention';span.setAttribute('sgid',person.sgid);const avatar=document.createElement('img');avatar.src=person.avatar_url;avatar.className='avatar';avatar.alt=person.name;span.append(avatar,document.createTextNode(person.name));typingInput.editor.setSelectedRange(mentionRange);typingInput.editor.insertAttachment(new Trix.Attachment({content:span.outerHTML,contentType:'application/vnd.campfire.mention',sgid:person.sgid}));typingInput.editor.insertString(' ');ignoreNextMentionChange=true;hideMentions();typingInput.focus();};
-  const refreshMentions=()=>{if(ignoreNextMentionChange){ignoreNextMentionChange=false;return;}const editor=typingInput.editor;if(!editor)return;const position=editor.getPosition();const before=editor.getDocument().toString().slice(0,position);const match=before.match(/(?:^|\s)@([^@\n]{0,32})$/);if(!match){hideMentions();return;}const query=match[1].trim();mentionRange=[position-match[1].length-1,position];const generation=++mentionGeneration;clearTimeout(mentionTimer);mentionTimer=setTimeout(async()=>{try{const response=await fetch(`/autocompletable/users?room_id=${roomId}&query=${encodeURIComponent(query)}`);if(!response.ok||generation!==mentionGeneration)return;const people=(await response.json()).map(person=>({...person,name:decodeAutocompleteName(person.name)}));if(generation!==mentionGeneration)return;mentionOptions=people.filter(person=>person.value!==Number(document.body.dataset.userId));mentionSelected=0;mentionBox.replaceChildren();for(const [index,person] of mentionOptions.entries()){const button=document.createElement('button');button.type='button';button.id=`mention-option-${index}`;button.setAttribute('role','option');button.textContent=person.name;button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>chooseMention(person));mentionBox.append(button);}mentionBox.hidden=!mentionOptions.length;if(mentionOptions.length)markMention();}catch{hideMentions();}},120);};
+  const refreshMentions=()=>{if(ignoreNextMentionChange){ignoreNextMentionChange=false;return;}const editor=typingInput.editor;if(!editor)return;const position=editor.getPosition();const before=editor.getDocument().toString().slice(0,position);const match=before.match(/(?:^|\s)@([^@\n]{0,32})$/);if(!match){hideMentions();return;}const query=match[1].trim();mentionRange=[position-match[1].length-1,position];const generation=++mentionGeneration;clearTimeout(mentionTimer);mentionTimer=setTimeout(async()=>{try{const response=await fetch(`/autocompletable/users?room_id=${roomId}&query=${encodeURIComponent(query)}`);if(!response.ok||generation!==mentionGeneration)return;const people=(await response.json()).map(person=>({...person,name:decodeAutocompleteName(person.name)}));if(generation!==mentionGeneration)return;mentionOptions=people.filter(person=>person.value!==Number(currentUserId));mentionSelected=0;mentionBox.replaceChildren();for(const [index,person] of mentionOptions.entries()){const button=document.createElement('button');button.type='button';button.id=`mention-option-${index}`;button.setAttribute('role','option');button.textContent=person.name;button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>chooseMention(person));mentionBox.append(button);}mentionBox.hidden=!mentionOptions.length;if(mentionOptions.length)markMention();}catch{hideMentions();}},120);};
   typingInput.addEventListener('trix-change',refreshMentions);
   typingInput.addEventListener('trix-paste',async(event)=>{
     const range=event.paste?.range;
@@ -462,14 +475,15 @@ if (chat) {
   });
   typingInput.addEventListener('keydown',event=>{if(mentionBox.hidden)return;if(event.key==='Escape'){event.preventDefault();hideMentions();return;}if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();mentionSelected=(mentionSelected+(event.key==='ArrowDown'?1:-1)+mentionOptions.length)%mentionOptions.length;markMention();return;}if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();chooseMention(mentionOptions[mentionSelected]);}},true);
   typingInput.addEventListener('blur',()=>setTimeout(()=>{if(!mentionBox.contains(document.activeElement))hideMentions();},150));
-  const richToggle=document.getElementById('rich-toggle');
-  richToggle.addEventListener('click',()=>{const opened=composer.classList.toggle('rich-open');richToggle.setAttribute('aria-expanded',String(opened));typingInput.focus();});
+  const richToggle=composer.querySelector('.composer__rich-text-btn');
+  richToggle.setAttribute('aria-expanded','false');
+  richToggle.addEventListener('click',()=>{const opened=composer.classList.toggle('composer--rich-text');richToggle.setAttribute('aria-expanded',String(opened));typingInput.focus();});
   let typingTimer;
   let lastTypingSent=0;
   typingInput.addEventListener('trix-change',()=>{clearTimeout(typingTimer);if(typingInput.editor?.getDocument().toString().trim()){if(Date.now()-lastTypingSent>750){sendTyping('start');lastTypingSent=Date.now();}typingTimer=setTimeout(()=>sendTyping('stop'),2500);}else sendTyping('stop');});
   typingInput.addEventListener('blur',()=>{clearTimeout(typingTimer);sendTyping('stop');});
   const fileInput=composer.querySelector('input[type=file]');
-  const fileList=document.getElementById('composer-filelist');
+  const fileList=composer.querySelector('[data-composer-target="fileList"]');
   const queuedFiles=[];
   const renderQueuedFiles=()=>{
     fileList.replaceChildren();

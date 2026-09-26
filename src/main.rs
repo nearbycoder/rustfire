@@ -1840,6 +1840,9 @@ fn render_source_page(title: &str, body: &str, nav: &str, current: Option<&User>
     render_source_page_with_footer(title, body, nav, "", current, token)
 }
 fn render_source_page_with_footer(title: &str, body: &str, nav: &str, footer: &str, current: Option<&User>, token: &str) -> Response {
+    render_source_page_sections(title, body, nav, footer, "", "", "", "", current, token)
+}
+fn render_source_page_sections(title: &str, body: &str, nav: &str, footer: &str, sidebar: &str, body_class_extra: &str, body_class_suffix: &str, head_extra: &str, current: Option<&User>, token: &str) -> Response {
     const CAMPFIRE_STYLES: &[&str] = &[
         "_reset-9c3efd7b.css", "actiontext-2aab36c6.css", "animation-bcdb4bab.css",
         "autocomplete-cdf3d8bd.css", "avatars-279376ab.css", "base-637a0ec8.css",
@@ -1855,16 +1858,16 @@ fn render_source_page_with_footer(title: &str, body: &str, nav: &str, footer: &s
         .map(|file| format!("<link rel=\"stylesheet\" href=\"/assets/{file}\" data-turbo-track=\"reload\">"))
         .collect::<String>();
     let body_class = if current.is_some_and(is_admin) {
-        "admin"
+        format!("{body_class_extra} admin {body_class_suffix}").trim().to_string()
     } else if matches!(title, "Set up Rustfire" | "Sign up") {
-        "signup"
+        "signup".to_string()
     } else {
-        ""
+        format!("{body_class_extra} {body_class_suffix}").trim().to_string()
     };
     let current_user_meta = current.map(|user| format!("<meta name=\"current-user-id\" content=\"{}\"><meta name=\"current-user-name\" content=\"{}\">", user.id, esc(&user.name))).unwrap_or_default();
     let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="/account/logo" type="image/png"><link rel="apple-touch-icon" href="/account/logo">{styles}{custom_styles}<script defer src="/static/app.js"></script></head>
-<body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav><main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open"></aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="/account/logo" type="image/png"><link rel="apple-touch-icon" href="/account/logo">{styles}{custom_styles}<script defer src="/static/app.js"></script>{head_extra}</head>
+<body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav><main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
         title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
     );
     Html(if current.is_some() { html } else { csrf_forms(&html, token) }).into_response()
@@ -3983,6 +3986,7 @@ fn room_invitation(
     join_code: &str,
     logo_version: &str,
     admin: bool,
+    csrf_token: &str,
 ) -> String {
     let invite_url = public_url(headers, &format!("/join/{join_code}"));
     let invite = html_escape::encode_double_quoted_attribute(&invite_url);
@@ -3999,12 +4003,12 @@ fn room_invitation(
         ],
     );
     let regenerate = if admin {
-        "<form class='button_to' method='post' action='/account/join_code'><button class='btn btn--regenerate' type='submit'><img aria-hidden='true' src='/assets/refresh-249f0509.svg' width='20' height='20'><span class='for-screen-reader'>Regenerate join link</span></button></form>"
+        format!("<form class='button_to' method='post' action='/account/join_code'><button class='btn btn--regenerate' type='submit'><img aria-hidden='true' class='colorize--black' src='/assets/refresh-249f0509.svg' width='20' height='20'><span class='for-screen-reader'>Regenerate join link</span></button><input type='hidden' name='authenticity_token' value='{}'></form>", esc(csrf_token))
     } else {
-        ""
+        String::new()
     };
     format!(
-        "<div id='system_welcome' class='message message--formatted txt-align-center center'><div class='message__body center'><div class='message__body-content position-relative'><figure class='account-logo avatar center margin-block-end txt-large'><img alt='Account logo' src='/account/logo?v={logo_version}' width='300' height='300'></figure><div class='flex align-center gap welcome-intro'><div class='system-welcome--translation'>{translate}</div><p><strong>Welcome to Rustfire</strong><br>To invite people to chat, share the join link below.</p></div><div class='flex flex-column align-center gap welcome-invite'><label class='flex flex-column gap full-width' style='--row-gap: 0.5em'><strong id='invite_label' class='invite-label'>Share to invite more people</strong><span class='flex align-center gap input input--actor fill-white'><img aria-hidden='true' class='colorize--black' src='/assets/person-add-1432b76b.svg' width='20' height='20'><input type='text' class='input' id='invite_url' value='{invite}' aria-labelledby='invite_label' readonly></span></label><div class='flex align-center gap welcome-actions'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{qr}' href='{qr}'><span class='for-screen-reader'>Show join link QR code</span><img aria-hidden='true' class='colorize--black' src='/assets/qr-code-dac3b273.svg' width='20' height='20'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{invite}'><span class='for-screen-reader'>Copy join link</span><img aria-hidden='true' class='colorize--black' src='/assets/copy-paste-4c379063.svg' width='20' height='20'></button><button class='btn' hidden data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{invite}' data-web-share-text-value='Hit this link to join me in Rustfire and start chatting.' data-web-share-title-value='Link to join Rustfire'><span class='for-screen-reader'>Share join link</span><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'></button>{regenerate}</div></div></div></div></div>"
+        "<div id='system_welcome' class='message message--formatted txt-align-center center'><div class='message__body center'><div class='message__body-content position-relative'><figure class='account-logo avatar center margin-block-end txt-large'><img alt='Account logo' src='/account/logo?v={logo_version}' width='300' height='300'></figure><div class='flex align-center gap'><div class='system-welcome--translation'>{translate}</div><p><strong>Welcome to Rustfire</strong><br>To invite people to chat, share the join link below.</p></div><div class='flex flex-column align-center gap'><label class='flex flex-column gap full-width' style='--row-gap: 0.5em'><strong id='invite_label' class='invite-label'>Share to invite more people</strong><span class='flex align-center gap input input--actor fill-white'><img aria-hidden='true' class='colorize--black' src='/assets/person-add-1432b76b.svg' width='20' height='20'><input type='text' class='input' id='invite_url' value='{invite}' aria-labelledby='invite_label' readonly></span></label><div class='flex align-center gap'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{qr}' href='{qr}'><span class='for-screen-reader'>Show join link QR code</span><img aria-hidden='true' class='colorize--black' src='/assets/qr-code-dac3b273.svg' width='20' height='20'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{invite}'><span class='for-screen-reader'>Copy join link</span><img aria-hidden='true' class='colorize--black' src='/assets/copy-paste-4c379063.svg' width='20' height='20'></button><button class='btn' hidden='hidden' data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{invite}' data-web-share-text-value='Hit this link to join me in Rustfire and start chatting.' data-web-share-title-value='Link to join Rustfire'><span class='for-screen-reader'>Share join link</span><img aria-hidden='true' class='colorize--black' src='/assets/share-bf28da4f.svg' width='20' height='20'></button>{regenerate}</div></div></div></div></div>"
     )
 }
 fn room_notifications_html(rid: i64, kind: &str, headers: &HeaderMap) -> String {
@@ -4021,6 +4025,10 @@ fn room_notifications_html(rid: i64, kind: &str, headers: &HeaderMap) -> String 
         if direct { "Ping" } else { "room" },
     )
 }
+fn room_composer_footer(rid: i64, user: &User, headers: &HeaderMap) -> String {
+    format!(r##"<div class="composer flex align-end gap position-relative" data-controller="typing-notifications" data-typing-notifications-active-class="typing-indicator--active"><a class="btn flex-item-no-shrink margin-block-end composer__context-btn" style="view-transition-name: input-switcher" href="/searches"><img aria-hidden="true" src="/assets/search-5f29565f.svg" width="20" height="20"><span class="for-screen-reader">Search</span></a><turbo-frame id="composer-frame"><form id="composer" class="margin-block flex-item-grow contain" data-controller="composer drop-target" data-action="dragenter-&gt;drop-target#dragenter dragover-&gt;drop-target#dragover drop-&gt;drop-target#drop drop-target:drop@window-&gt;composer#dropFiles trix-file-accept-&gt;composer#preventAttachment refresh-room:online@window-&gt;composer#online typing-notifications#stop paste-&gt;composer#pasteFiles turbo:submit-end-&gt;composer#submitEnd refresh-room:offline@window-&gt;composer#offline" data-composer-messages-outlet="#message-area" data-composer-toolbar-class="composer--rich-text" data-composer-room-id-value="{rid}" action="/rooms/{rid}/messages" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="{}"><fieldset data-composer-target="fields" contents><div class="flex flex-column"><div class="composer__filelist flex flex--align-center gap flex-wrap" data-composer-target="fileList"></div><div class="flex composer__input input input--actor fill-white min-width" style="--input-border-radius: 1.3rem"><div class="flex align-end gap full-width"><img aria-hidden="true" class="composer__input-hint colorize--black" style="view-transition-name: input-btn;" src="/assets/messages-outlined-87ff0331.svg" width="22" height="22"><div class="flex flex-column flex-item-grow min-width gap"><input type="hidden" name="message[body]" id="message_body_trix_input_message"><trix-editor rows="1" class="input" style="order: -1" aria-multiline="true" aria-label="Write a message" data-controller="rich-autocomplete" data-action="trix-change-&gt;typing-notifications#start keydown-&gt;composer#submitByKeyboard trix-focus-&gt;rich-autocomplete#focus trix-change-&gt;rich-autocomplete#search trix-blur-&gt;rich-autocomplete#blur" data-rich-autocomplete-url-value="/autocompletable/users?room_id={rid}" data-permitted-attachment-types="application/vnd.actiontext.opengraph-embed" data-composer-target="text" data-direct-upload-url="{}" data-blob-url-template="{}" id="message_body" input="message_body_trix_input_message"></trix-editor></div><label class="btn btn--borderless txt-small flex-item-no-shrink composer__attachment-btn input--file"><img class="colorize--black" aria-hidden="true" src="/assets/attachment-8bcccab0.svg" width="22" height="22"><input type="file" data-action="composer#filePicked" multiple><span class="for-screen-reader">Attach a file</span></label><button class="btn btn--borderless txt-small flex-item-no-shrink composer__rich-text-btn" type="button" data-action="composer#toggleToolbar"><img class="colorize--black" aria-hidden="true" src="/assets/text-options-055e0d16.svg" width="20" height="20"><span class="for-screen-reader">Rich text</span></button><button name="send" type="submit" data-action="composer#submit" class="btn btn--reversed flex-item-no-shrink txt-small"><img aria-hidden="true" src="/assets/arrow-up-f96b3895.svg" width="20" height="20"><span class="for-screen-reader">Send Message</span></button></div></div></div></fieldset><div class="typing-indicator gap txt-small align-center flex-inline" data-typing-notifications-target="indicator"><div class="typing-indicator__author spinner" data-typing-notifications-target="author"></div></div><input data-composer-target="clientid" type="hidden" name="message[client_message_id]" id="message_client_message_id"></form></turbo-frame></div>"##,
+        esc(user.csrf_token.as_deref().unwrap_or("")), esc(&public_url(headers, "/rails/active_storage/direct_uploads")), esc(&public_url(headers, "/rails/active_storage/blobs/redirect/:signed_id/:filename")))
+}
 async fn room_show_with_target(
     s: Arc<AppState>,
     headers: HeaderMap,
@@ -4033,8 +4041,13 @@ async fn room_show_with_target(
         Err(StatusCode::NOT_FOUND) => return Ok(Redirect::to("/").into_response()),
         Err(error) => return Err(error),
     };
-    let refresh_since = Utc::now().timestamp_millis();
     let db = pool(&s)?;
+    let (room_updated_at, has_logo): (String, bool) = db
+        .query_row("SELECT r.updated_at, EXISTS(SELECT 1 FROM account_logos WHERE id=1) FROM rooms r WHERE r.id=?1", [rid], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(db_err)?;
+    let refresh_since = message_timestamp_ns(&room_updated_at)
+        .map(|nanos| nanos / 1_000_000)
+        .unwrap_or_else(|| Utc::now().timestamp_millis());
     db.execute(
         "UPDATE memberships SET unread_at=NULL WHERE room_id=?1 AND user_id=?2",
         params![rid, u.id],
@@ -4081,38 +4094,35 @@ async fn room_show_with_target(
     } else {
         message_list(&s, rid, 40, None, None)?
     };
-    let has_newer: bool = if target.is_some() {
-        let last_loaded = messages.last().map(|message| message.id).unwrap_or(0);
-        pool(&s)?
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND created_at_ns>(SELECT created_at_ns FROM messages WHERE id=?2 AND room_id=?1))",
-                params![rid, last_loaded],
-                |row| row.get(0),
-            )
-            .map_err(db_err)?
-    } else {
-        false
-    };
-    let at_message = target.map(|id| id.to_string()).unwrap_or_default();
     let messages_target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
     let notifications = room_notifications_html(rid, &room.kind, &headers);
-    let mut content = format!(
-        "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/assets/menu-dots-horizontal-f6a5d793.svg' alt=''></a>{notifications}<button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
-        sidebar(&s, &u, Some(rid))?,
-        rid,
+    let room_kind = match room.kind.as_str() {
+        "Rooms::Open" => "opens",
+        "Rooms::Closed" => "closeds",
+        "Rooms::Direct" => "directs",
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    let logo = if has_logo {
+        let updated_at: String = pool(&s)?.query_row("SELECT updated_at FROM accounts WHERE id=1", [], |row| row.get(0)).map_err(db_err)?;
+        let version: String = updated_at.chars().filter(char::is_ascii_digit).take(14).collect();
+        format!("<figure class=\"account-logo avatar \"><img alt=\"Account logo\" src=\"/account/logo?v={version}\" width=\"300\" height=\"300\"></figure>")
+    } else { String::new() };
+    let nav = format!("{logo}<span class=\"btn btn--reversed btn--faux room--current\"><h1 class=\"room__contents txt-medium overflow-ellipsis\">{}{}</h1></span><a class=\"btn\" style=\"view-transition-name: edit-room-{rid}\" data-room-id=\"{rid}\" href=\"/rooms/{room_kind}/{rid}/edit\"><img aria-hidden=\"true\" src=\"/assets/menu-dots-horizontal-f6a5d793.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Settings for this {}</span></a>{notifications}",
+        if room.kind == "Rooms::Direct" { "<span class=\"for-screen-reader\">Ping with</span>" } else { "" },
         esc(&room.name),
-        rid,
-        messages_target
+        if room.kind == "Rooms::Direct" { "Ping" } else { "room" },
+    );
+    let template_avatar = avatar_path(s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key), u.id, &u.updated_at)?;
+    let mut content = format!(r#"<div id="message-area" class="message-area" contents="true" data-controller="messages presence drop-target" data-action="turbo:before-stream-render@document-&gt;messages#beforeStreamRender keydown.up@document-&gt;messages#editMyLastMessage dragenter-&gt;drop-target#dragenter dragover-&gt;drop-target#dragover drop-&gt;drop-target#drop visibilitychange@document-&gt;presence#visibilityChanged" data-messages-first-of-day-class="message--first-of-day" data-messages-formatted-class="message--formatted" data-messages-me-class="message--me" data-messages-mentioned-class="message--mentioned" data-messages-threaded-class="message--threaded" data-messages-page-url-value="{}"><script type="text/template" data-messages-target="template"><div class="message message--me $messageClasses$" id="message_$clientMessageId$" data-format-message-target="message" data-user-id="{}" data-message-timestamp="$messageTimestamp$" data-messages-target="message"><div class="message__day-separator"><time class="message__timestamp" datetime="$messageDatetime$" data-local-time-target="date"></time></div><figure class="avatar message__avatar"><a title="{}" class="btn avatar" data-turbo-frame="_top" href="/users/{}"><img aria-hidden="true" src="{}" width="48" height="48"></a></figure><div class="message__body"><div class="message__body-content"><div class="message__meta"><h3 class="message__heading"><span class="message__author"><strong>{}</strong></span><span class="message__permalink"><time class="message__timestamp" datetime="$messageDatetime$" data-local-time-target="time"></time></span></h3><div class="message__actions"><div class="position-relative"><span class="btn message__action-btn message__options-btn"><img class="colorize--black" aria-hidden="true" src="/assets/menu-dots-horizontal-f6a5d793.svg"><span class="for-screen-reader">Message options</span></span></div></div></div>$body$</div></div></div></script><div id="{}" class="messages" data-controller="maintain-scroll refresh-room" data-action="turbo:before-stream-render@document-&gt;maintain-scroll#beforeStreamRender visibilitychange@document-&gt;refresh-room#visibilityChanged online@window-&gt;refresh-room#online" data-messages-target="messages" data-refresh-room-loaded-at-value="{refresh_since}" data-refresh-room-url-value="{}">"#,
+        esc(&public_url(&headers, &format!("/rooms/{rid}/messages"))),
+        u.id, esc(&u.name), u.id, esc(&template_avatar), esc(&u.name),
+        messages_target, esc(&public_url(&headers, &format!("/rooms/{rid}/refresh"))),
     );
     let stream_key = s
         .imported_turbo_stream_signing_key
         .as_deref()
         .unwrap_or(&s.turbo_stream_signing_key);
     let stream_token = room_stream_token(stream_key, &room.kind, rid).map_err(db_err)?;
-    content.push_str(&format!(
-        "<turbo-cable-stream-source channel='RoomMessagesChannel' signed-stream-name='{}'></turbo-cable-stream-source>",
-        esc(&stream_token)
-    ));
     if let Some((join_code, updated_at)) = invitation {
         let version: String = updated_at
             .chars()
@@ -4124,13 +4134,17 @@ async fn room_show_with_target(
             &join_code,
             &version,
             is_admin(&u),
+            u.csrf_token.as_deref().unwrap_or(""),
         ));
     }
     for m in messages {
         content.push_str(&message_html(&s, &m, Some(&headers)));
     }
-    content.push_str(&format!("</div><div class='typing-indicator' id='typing-indicator' aria-live='polite' hidden></div><form class='composer' id='composer' method='post' enctype='multipart/form-data' action='/rooms/{rid}/messages'><div class='composer-filelist' id='composer-filelist' aria-live='polite'></div><a class='search-round' href='/searches' aria-label='Search'><img src='/static/icons/search.svg' alt=''></a><input type='hidden' id='message-body' name='message[body]'><input type='hidden' name='message[format]' value='html'><img class='composer-chat-icon' src='/static/assets/messages-outlined-87ff0331.svg' alt=''><trix-editor input='message-body' aria-label='Write a message' aria-controls='mention-suggestions' placeholder='Write a message…'></trix-editor><div class='mention-suggestions' id='mention-suggestions' role='listbox' aria-label='Mention a person' hidden></div><label class='file-btn' title='Attach file'><img src='/assets/attachment-8bcccab0.svg' alt='' width='22' height='22'><input type='file' name='message[attachment]' multiple></label><button type='button' id='rich-toggle' class='rich-toggle' aria-label='Rich text toolbar' aria-expanded='false'><img src='/static/assets/text-options-055e0d16.svg' alt=''></button><input type='hidden' name='message[client_message_id]' value='{}'><button class='button' aria-label='Send message'><img src='/assets/arrow-up-f96b3895.svg' alt='' width='20' height='20'></button></form></section></div>",Uuid::new_v4()));
-    let mut response = render(&room.name, &content, Some(&u));
+    content.push_str(&format!("</div><turbo-cable-stream-source channel=\"RoomMessagesChannel\" signed-stream-name=\"{}\"></turbo-cable-stream-source><button class=\"message-area__return-to-latest btn\" data-action=\"messages#returnToLatest\" data-messages-target=\"latest\" hidden=\"hidden\"><img aria-hidden=\"true\" src=\"/assets/arrow-down-3f174d76.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Jump to newest message</span></button></div>", esc(&stream_token)));
+    let footer = room_composer_footer(rid, &u, &headers);
+    let sidebar_frame = "<turbo-frame data-turbo-permanent=\"true\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-action=\"presence:present@window-&gt;rooms-list#read read-rooms:read-&gt;rooms-list#read turbo:frame-load-&gt;rooms-list#loaded refresh-room:visible@window-&gt;turbo-frame#reload\" id=\"user_sidebar\" src=\"/users/me/sidebar\" target=\"_top\"></turbo-frame>";
+    let head = format!("<meta name=\"turbo-cache-control\" content=\"no-preview\"><meta name=\"current-room-id\" content=\"{rid}\"><script defer src=\"/static/trix.js\"></script>");
+    let mut response = render_source_page_sections(&room.name, &content, &nav, &footer, sidebar_frame, "sidebar", if has_logo { "account-has-logo" } else { "" }, &head, Some(&u), u.csrf_token.as_deref().unwrap_or(""));
     response.headers_mut().append(
         header::SET_COOKIE,
         format!(

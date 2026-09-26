@@ -112,12 +112,12 @@ def main():
                 assert check_db.execute("SELECT name FROM accounts WHERE id=1").fetchone() == ("Campfire",)
                 assert check_db.execute("SELECT name FROM rooms WHERE id=1").fetchone() == ("All Talk",)
             code, _, page = request(admin, base, "/rooms/1")
-            assert code == 200 and "All Talk" in page and "name='authenticity_token'" in page and "id='messages_rooms_open_1'" in page
-            assert "href='/webmanifest.json'" in page
+            assert code == 200 and "All Talk" in page and 'name="authenticity_token"' in page and 'id="messages_rooms_open_1"' in page
+            assert 'href="/webmanifest.json"' in page
             assert "id='system_welcome'" in page and "Welcome to Rustfire" in page and "id='invite_url'" in page
             assert 'data-controller="notifications"' in page and 'data-turbo-frame-url-param="/rooms/1/involvement"' in page
             assert 'data-notifications-target="notAllowedNotice"' in page and "Notifications aren’t allowed" in page
-            assert "id='composer-filelist'" in page and "name='message[attachment]' multiple" in page
+            assert 'class="composer__filelist flex flex--align-center gap flex-wrap" data-composer-target="fileList"' in page and 'data-action="composer#filePicked" multiple' in page
             assert request(admin, base, "/rooms/1/messages")[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"http://127.0.0.1/secret"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"file:///etc/passwd"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
@@ -137,7 +137,7 @@ def main():
             assert set(message) == {"id", "created_at", "body", "creator", "room", "url"}
             assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", message["created_at"])
             code, _, page = request(admin, base, f"/rooms/1/@{message['id']}")
-            assert code == 200 and "hello from smoke" in page and "data-at-message='1'" in page and "id='composer'" in page, code
+            assert code == 200 and "hello from smoke" in page and 'name="current-room-id" content="1"' in page and 'id="composer"' in page, code
             assert f"<span class='message__room'><a href='/rooms/1/@{message['id']}' target='_top' data-reply-target='link'>All Talk</a></span>" in page
             assert f"data-copy-to-clipboard-content-value='{base}/rooms/1/@{message['id']}'" in page
             assert "custom-boost-form" not in page
@@ -389,7 +389,7 @@ def main():
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": "1"}, method="PATCH")
             assert code == 302
             code, _, page = request(admin, base, "/rooms/2")
-            assert code == 200 and "Private Two" in page and "id='messages_rooms_closed_2'" in page
+            assert code == 200 and "Private Two" in page and 'id="messages_rooms_closed_2"' in page
             assert request(admin, base, "/")[1].endswith("/rooms/2")
             assert request(admin, base, "/rooms/1")[0] == 200
             assert request(admin, base, "/")[1].endswith("/rooms/1")
@@ -469,7 +469,7 @@ def main():
                 plan = " ".join(row[3] for row in check_db.execute("EXPLAIN QUERY PLAN SELECT room_id FROM direct_room_sets WHERE member_ids='1,2' ORDER BY room_id LIMIT 1"))
                 assert "idx_direct_room_sets_members" in plan, plan
             code, _, page = request(member, base, "/rooms/3")
-            assert code == 200 and "class='room-pill'>Admin</h1>" in page and "id='messages_rooms_direct_3'" in page
+            assert code == 200 and "Ping with</span>Admin</h1>" in page and 'id="messages_rooms_direct_3"' in page
             code, repeated_url, _ = request(admin, base, "/rooms/directs", {"user_ids": "2"})
             assert repeated_url == direct_url
             assert request(member, base, "/rooms/3/involvement", {"involvement": "invisible"})[0] == 200
