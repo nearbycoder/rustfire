@@ -2826,7 +2826,11 @@ async fn root(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     })
 }
 async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
-    let u = user(&s, &headers)?;
+    let u = match user(&s, &headers) {
+        Ok(user) => user,
+        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(error) => return Err(error),
+    };
     let rid: Option<i64> = pool(&s)?
         .query_row(
             "SELECT r.id FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=?1 ORDER BY r.id DESC LIMIT 1",
@@ -2839,6 +2843,16 @@ async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         &rid.map(|id| format!("/rooms/{id}"))
             .unwrap_or_else(|| "/".to_string()),
     ))
+}
+async fn room_namespace_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+    if first_run_needed(&s)? {
+        return Ok(found_redirect("/session/new"));
+    }
+    match user(&s, &headers) {
+        Ok(_) => Ok(found_redirect("/")),
+        Err(StatusCode::UNAUTHORIZED) => Ok(found_redirect("/session/new")),
+        Err(error) => Err(error),
+    }
 }
 struct SignupSubmission {
     name: String,
@@ -4059,10 +4073,14 @@ async fn room_show_with_target(
     rid: i64,
     requested_message: Option<i64>,
 ) -> AppResult {
-    let u = user(&s, &headers)?;
+    let u = match user(&s, &headers) {
+        Ok(user) => user,
+        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(error) => return Err(error),
+    };
     let room = match room_for(&s, u.id, rid) {
         Ok(room) => room,
-        Err(StatusCode::NOT_FOUND) => return Ok(Redirect::to("/").into_response()),
+        Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
         Err(error) => return Err(error),
     };
     let db = pool(&s)?;
@@ -6099,10 +6117,15 @@ async fn room_kind_show(
     headers: HeaderMap,
     Path(rid): Path<i64>,
 ) -> AppResult {
-    let u = user(&s, &headers)?;
-    let r = room_for(&s, u.id, rid)?;
-    if r.kind == "Rooms::Direct" {
-        return Err(StatusCode::NOT_FOUND);
+    let u = match user(&s, &headers) {
+        Ok(user) => user,
+        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(error) => return Err(error),
+    };
+    match room_for(&s, u.id, rid) {
+        Ok(room) if room.kind != "Rooms::Direct" => {},
+        Ok(_) | Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
+        Err(error) => return Err(error),
     }
     Ok(found_redirect(&format!("/rooms/{rid}")))
 }
@@ -6238,7 +6261,11 @@ async fn direct_show(
     headers: HeaderMap,
     Path(rid): Path<i64>,
 ) -> AppResult {
-    let u = user(&s, &headers)?;
+    let u = match user(&s, &headers) {
+        Ok(user) => user,
+        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(error) => return Err(error),
+    };
     let room = room_for(&s, u.id, rid)?;
     if room.kind != "Rooms::Direct" {
         return Err(StatusCode::NOT_FOUND);
@@ -10536,9 +10563,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/opens/{id}/edit", get(room_kind_edit))
         .route("/rooms/closeds/{id}/edit", get(room_kind_edit))
         .route("/rooms/directs/new", get(direct_new))
-        .route("/rooms/directs", get(root).post(direct_create))
-        .route("/rooms/opens", get(root).post(create_open_room))
-        .route("/rooms/closeds", get(root).post(create_closed_room))
+        .route("/rooms/directs", get(room_namespace_index).post(direct_create))
+        .route("/rooms/opens", get(room_namespace_index).post(create_open_room))
+        .route("/rooms/closeds", get(room_namespace_index).post(create_closed_room))
         .route(
             "/rooms/directs/{id}",
             get(direct_show).post(direct_post_override).delete(direct_delete),
