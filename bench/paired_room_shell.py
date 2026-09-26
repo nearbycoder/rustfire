@@ -142,7 +142,14 @@ def assert_head_runtime_metadata(source, target):
     for name in ("csrf-param", "action-cable-url", "turbo-prefetch", "current-user-id", "current-user-name"):
         assert name in original.values and original.values[name] == rustfire.values.get(name), (name, original.values.get(name), rustfire.values.get(name))
     assert original.values.get("csrf-token") and rustfire.values.get("csrf-token"), "Missing CSRF token metadata"
-    assert original.links == rustfire.links and set(original.links) == {"icon", "apple-touch-icon"}, (original.links, rustfire.links)
+    assert set(original.links) == set(rustfire.links) == {"icon", "apple-touch-icon"}, (original.links, rustfire.links)
+    for name in original.links:
+        source_link, target_link = original.links[name], rustfire.links[name]
+        if source_link.startswith("/account/logo?v="):
+            assert re.fullmatch(r"/account/logo\?v=\d+", source_link), source_link
+            assert re.fullmatch(r"/account/logo\?v=\d+", target_link), target_link
+        else:
+            assert source_link == target_link, (name, source_link, target_link)
 
 
 def message_template(page):
@@ -163,6 +170,51 @@ def get_room(port, cookie, path):
         return body
     finally:
         connection.close()
+
+
+def raw_get(port, path, cookie, extra_headers=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    headers = {"Cookie": cookie, **(extra_headers or {})}
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        return response.status, {key.lower(): value for key, value in response.getheaders()}, response.read()
+    finally:
+        connection.close()
+
+
+def representation_routes(page, port, cookie, filename, expected):
+    match = re.search(rb"/rails/active_storage/representations/redirect/[^'\" ]+/" + filename.encode(), page)
+    assert match, ("representation URL", filename)
+    redirect_path = match.group().decode()
+    proxy_path = redirect_path.replace("/representations/redirect/", "/representations/proxy/", 1)
+    redirect_status, redirect_headers, _ = raw_get(port, redirect_path, cookie)
+    proxy_status, proxy_headers, proxy_body = raw_get(port, proxy_path, cookie)
+    assert proxy_body == expected, (filename, "proxy bytes", proxy_status, len(proxy_body), len(expected))
+    disk_path = urllib.parse.urlsplit(redirect_headers.get("location", "")).path
+    assert redirect_status == 302 and disk_path.startswith("/rails/active_storage/disk/"), (filename, redirect_status, disk_path)
+    disk_status, _, disk_body = raw_get(port, disk_path, cookie)
+    assert (disk_status, disk_body) == (200, expected), (filename, "disk bytes", disk_status, len(disk_body))
+    legacy_path = redirect_path.replace("/representations/redirect/", "/representations/", 1)
+    legacy_status, legacy_headers, _ = raw_get(port, legacy_path, cookie)
+    assert legacy_status == 302, (filename, "legacy redirect", legacy_status)
+    legacy_disk_path = urllib.parse.urlsplit(legacy_headers.get("location", "")).path
+    legacy_disk_status, _, legacy_disk_body = raw_get(port, legacy_disk_path, cookie)
+    assert (legacy_disk_status, legacy_disk_body) == (200, expected), (filename, "legacy disk bytes", legacy_disk_status)
+    assert proxy_headers.get("etag") and proxy_headers.get("last-modified"), (filename, proxy_headers)
+    expected_etag = f'W/"{hashlib.sha256(proxy_path.encode()).hexdigest()[:32]}"'
+    assert proxy_headers["etag"] == expected_etag, (filename, proxy_headers["etag"], expected_etag)
+    etag_status, _, etag_body = raw_get(port, proxy_path, cookie, {"If-None-Match": proxy_headers["etag"]})
+    date_status, _, date_body = raw_get(port, proxy_path, cookie, {"If-Modified-Since": proxy_headers["last-modified"]})
+    assert (etag_status, etag_body, date_status, date_body) == (304, b"", 304, b""), filename
+    range_status, range_headers, range_body = raw_get(port, proxy_path, cookie, {"Range": "bytes=0-5"})
+    assert range_body in (expected, expected[:6]), (filename, "range", range_status, len(range_body))
+    attachment_status, attachment_headers, attachment_body = raw_get(port, proxy_path + "?disposition=attachment", cookie)
+    assert (attachment_status, attachment_body) == (200, expected), (filename, "attachment", attachment_status)
+    assert attachment_headers.get("content-disposition", "").startswith("attachment;"), attachment_headers
+    return redirect_status, proxy_status, {
+        key: proxy_headers.get(key) for key in ("content-type", "content-disposition", "cache-control", "last-modified")
+    }, range_status, range_headers.get("content-range"), attachment_headers.get("content-disposition")
 
 
 def post_message(port, cookie, csrf, body="Room page message check", client_id="room-page-1"):
@@ -410,6 +462,9 @@ def main():
                 assert source_jpeg == target_jpeg, (len(source_jpeg), len(target_jpeg))
                 assert jpeg_representation(target_image_page, rust_port, "session_token=benchmark-session", env["SECRET_KEY_BASE"]) == target_jpeg
                 print(f"JPEG representations: {len(source_jpeg)} byte-identical bytes")
+                source_route = representation_routes(source_image_page, camp_port, camp_cookie, "moon.jpg", source_jpeg)
+                target_route = representation_routes(target_image_page, rust_port, "session_token=benchmark-session", "moon.jpg", target_jpeg)
+                assert source_route == target_route, ("JPEG representation routes", source_route, target_route)
                 compare_message_page(4, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 video_file = temp / "room-page-video.mp4"
                 subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=16x16:r=5:d=1", "-c:v", "mpeg4", "-y", str(video_file)], check=True)
@@ -420,6 +475,9 @@ def main():
                 target_poster = video_poster(target_video_page, rust_port, "session_token=benchmark-session")
                 assert source_poster == target_poster, (len(source_poster), len(target_poster))
                 print(f"WebP posters: {len(source_poster)} byte-identical bytes")
+                source_video_route = representation_routes(source_video_page, camp_port, camp_cookie, "clip.mp4", source_poster)
+                target_video_route = representation_routes(target_video_page, rust_port, "session_token=benchmark-session", "clip.mp4", target_poster)
+                assert source_video_route == target_video_route, ("video representation routes", source_video_route, target_video_route)
                 compare_message_page(5, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
                     post_file_message(port, cookie, csrf, "page.pdf", "application/pdf", minimal_pdf(), "room-page-pdf")
@@ -428,6 +486,9 @@ def main():
                 target_pdf_preview = pdf_preview(target_pdf_page, rust_port, "session_token=benchmark-session")
                 assert source_pdf_preview == target_pdf_preview, (len(source_pdf_preview), len(target_pdf_preview))
                 print(f"PDF PNG previews: {len(source_pdf_preview)} byte-identical bytes")
+                source_pdf_route = representation_routes(source_pdf_page, camp_port, camp_cookie, "page.pdf", source_pdf_preview)
+                target_pdf_route = representation_routes(target_pdf_page, rust_port, "session_token=benchmark-session", "page.pdf", target_pdf_preview)
+                assert source_pdf_route == target_pdf_route, ("PDF representation routes", source_pdf_route, target_pdf_route)
                 compare_message_page(6, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 compare_room("original with six mixed messages", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True, ignore_csrf_inputs=True, normalize_blob_paths=True)
                 if args.read_media_clients:

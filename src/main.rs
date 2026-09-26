@@ -17,7 +17,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use bcrypt::{DEFAULT_COST, hash, verify};
-use chrono::{Duration, SecondsFormat, Utc};
+use chrono::{Duration, SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use openssl::{
     bn::BigNumContext,
@@ -9794,26 +9794,11 @@ async fn signed_blob_proxy(
     } else {
         content_type.as_str()
     };
-    let fullpath = uri.path_and_query().map(|part| part.as_str()).unwrap_or(uri.path());
-    let digest = openssl::hash::hash(MessageDigest::sha256(), fullpath.as_bytes()).map_err(db_err)?;
-    let etag = format!("W/\"{}\"", digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>());
-    let cache_control = "max-age=3155695200, public, immutable";
-    let last_modified = "Sat, 01 Jan 2011 00:00:00 GMT";
-    let fresh = if let Some(request_etag) = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) {
-        request_etag.split(',').any(|candidate| candidate.trim() == etag || candidate.trim() == "*")
-    } else {
-        let fixed = chrono::DateTime::parse_from_rfc2822(last_modified).map_err(db_err)?;
-        headers
-            .get(header::IF_MODIFIED_SINCE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
-            .is_some_and(|value| value >= fixed)
-    };
-    if headers.get(header::RANGE).is_none() && fresh {
+    let etag = storage_proxy_etag(&uri)?;
+    let last_modified = storage_proxy_last_modified();
+    if headers.get(header::RANGE).is_none() && storage_proxy_fresh(&headers, &etag, &last_modified) {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
-        response.headers_mut().insert(header::ETAG, etag.parse().map_err(db_err)?);
-        response.headers_mut().insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
-        response.headers_mut().insert(header::LAST_MODIFIED, last_modified.parse().unwrap());
+        storage_proxy_cache_headers(&mut response, &etag, &last_modified);
         return Ok(response);
     }
     let mut response = serve_attachment(
@@ -9837,11 +9822,40 @@ async fn signed_blob_proxy(
         );
     }
     if response.status() == StatusCode::OK {
-        response.headers_mut().insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
-        response.headers_mut().insert(header::LAST_MODIFIED, last_modified.parse().unwrap());
-        response.headers_mut().insert(header::ETAG, etag.parse().map_err(db_err)?);
+        storage_proxy_cache_headers(&mut response, &etag, &last_modified);
     }
     Ok(response)
+}
+fn storage_proxy_last_modified() -> String {
+    chrono::Local
+        .with_ymd_and_hms(2011, 1, 1, 0, 0, 0)
+        .single()
+        .unwrap()
+        .with_timezone(&Utc)
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+}
+fn storage_proxy_etag(uri: &axum::http::Uri) -> Result<String, StatusCode> {
+    let fullpath = uri.path_and_query().map(|part| part.as_str()).unwrap_or(uri.path());
+    let digest = openssl::hash::hash(MessageDigest::sha256(), fullpath.as_bytes()).map_err(db_err)?;
+    Ok(format!("W/\"{}\"", digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>()))
+}
+fn storage_proxy_fresh(headers: &HeaderMap, etag: &str, last_modified: &str) -> bool {
+    if let Some(request_etag) = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) {
+        request_etag.split(',').any(|candidate| candidate.trim() == etag || candidate.trim() == "*")
+    } else {
+        let Ok(fixed) = chrono::DateTime::parse_from_rfc2822(last_modified) else { return false; };
+        headers
+            .get(header::IF_MODIFIED_SINCE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
+            .is_some_and(|value| value >= fixed)
+    }
+}
+fn storage_proxy_cache_headers(response: &mut Response, etag: &str, last_modified: &str) {
+    response.headers_mut().insert(header::CACHE_CONTROL, "max-age=3155695200, public, immutable".parse().unwrap());
+    response.headers_mut().insert(header::LAST_MODIFIED, last_modified.parse().unwrap());
+    response.headers_mut().insert(header::ETAG, etag.parse().unwrap());
 }
 async fn direct_upload_create(
     State(s): State<Arc<AppState>>,
@@ -9909,14 +9923,30 @@ async fn direct_upload_disk_get(
     let data = disk_token_data(&s.blob_signing_key, &token, "blob_key").ok_or(StatusCode::NOT_FOUND)?;
     let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
     let row: Option<(String,String,bool)> = pool(&s)?.query_row("SELECT filename,content_type,uploaded FROM direct_upload_blobs WHERE storage_key=?1",[storage_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_err)?;
-    let (actual_filename, content_type, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
-    if !uploaded || filename != actual_filename { return Err(StatusCode::NOT_FOUND); }
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-    serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,&content_type,&headers,false).await
+    if let Some((actual_filename, content_type, uploaded)) = row {
+        if !uploaded || filename != actual_filename { return Err(StatusCode::NOT_FOUND); }
+        return serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,&content_type,&headers,false).await;
+    }
+    let variant_name = storage_key
+        .strip_prefix("variants/")
+        .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains(".."))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let actual_filename = data.get("filename").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    let content_type = data.get("content_type").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
+    let mut response = serve_attachment(&std::path::Path::new(&dir).join("variants").join(variant_name),actual_filename,content_type,&headers,inline).await?;
+    if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
+        let disposition = value.to_str().map_err(db_err)?.to_owned();
+        response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(actual_filename)).parse().map_err(db_err)?);
+    }
+    Ok(response)
 }
 async fn signed_representation_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    Query(query): Query<HashMap<String, String>>,
     Path((token, variation, _filename)): Path<(String, String, String)>,
 ) -> AppResult {
     let key = [
@@ -10037,7 +10067,34 @@ async fn signed_representation_get(
     } else {
         &content_type
     };
-    serve_attachment(&output, &filename, response_type, &headers, true).await
+    let base = filename.rsplit_once('.').map(|(base, _)| base).unwrap_or(&filename);
+    let variant_filename = format!("{base}.{format}");
+    let inline = query.get("disposition").map(String::as_str) != Some("attachment");
+    if uri.path().starts_with("/rails/active_storage/representations/proxy/") {
+        let etag = storage_proxy_etag(&uri)?;
+        let last_modified = storage_proxy_last_modified();
+        if storage_proxy_fresh(&headers, &etag, &last_modified) {
+            let mut response = StatusCode::NOT_MODIFIED.into_response();
+            storage_proxy_cache_headers(&mut response, &etag, &last_modified);
+            return Ok(response);
+        }
+        let mut stream_headers = headers.clone();
+        stream_headers.remove(header::RANGE);
+        let mut response = serve_attachment(&output, &variant_filename, response_type, &stream_headers, inline).await?;
+        if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
+            let disposition = value.to_str().map_err(db_err)?.to_owned();
+            response.headers_mut().insert(
+                header::CONTENT_DISPOSITION,
+                format!("{disposition}; filename*=UTF-8''{}", encoded_blob_filename(&variant_filename)).parse().map_err(db_err)?,
+            );
+        }
+        storage_proxy_cache_headers(&mut response, &etag, &last_modified);
+        return Ok(response);
+    }
+    let storage_key = format!("variants/{stored}-{kind}.{format}");
+    let disposition = format!("{}; filename=\"{variant_filename}\"; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, encoded_blob_filename(&variant_filename));
+    let disk_token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"disposition":disposition,"content_type":response_type,"service_name":"local","filename":variant_filename})).map_err(db_err)?;
+    Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{disk_token}/{}", encoded_blob_filename(&variant_filename)))))
 }
 fn remove_attachment_files(stored: &str) {
     if Uuid::parse_str(stored).is_err() {
@@ -11414,6 +11471,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rails/active_storage/disk/{token}/{filename}",get(direct_upload_disk_get))
         .route(
             "/rails/active_storage/representations/redirect/{token}/{variation}/{filename}",
+            get(signed_representation_get),
+        )
+        .route(
+            "/rails/active_storage/representations/proxy/{token}/{variation}/{filename}",
+            get(signed_representation_get),
+        )
+        .route(
+            "/rails/active_storage/representations/{token}/{variation}/{filename}",
             get(signed_representation_get),
         )
         .nest_service("/assets", ServeDir::new("static/assets"))
