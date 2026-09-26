@@ -36,6 +36,16 @@ def raw_request(port, method, path, body=b"", headers=None):
         connection.close()
 
 
+def read_response(port, path, headers=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.request("GET", path, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, {key.lower(): value for key, value in response.getheaders()}, response.read()
+    finally:
+        connection.close()
+
+
 def path_from_url(url):
     parsed = urllib.parse.urlsplit(url)
     return parsed.path + (f"?{parsed.query}" if parsed.query else "")
@@ -101,6 +111,32 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
     assert status == 302, ("blob redirect", status)
     status, _, downloaded = raw_request(port, "GET", path_from_url(location))
     assert (status, downloaded) == (200, DATA), ("disk download", status, downloaded[:100])
+    for redirect_path in (
+        f"/rails/active_storage/blobs/{metadata['signed_id']}/paired-upload.txt",
+        f"/rails/active_storage/blobs/redirect/{metadata['signed_id']}/another-name.txt",
+    ):
+        redirect_status, redirect_location, _ = raw_request(port, "GET", redirect_path)
+        assert redirect_status == 302, ("blob redirect alias", redirect_path, redirect_status)
+        final_status, _, final_body = raw_request(port, "GET", path_from_url(redirect_location))
+        assert (final_status, final_body) == (200, DATA), ("blob redirect alias bytes", final_status)
+    proxy_path = f"/rails/active_storage/blobs/proxy/{metadata['signed_id']}/paired-upload.txt"
+    proxy_status, proxy_headers, proxy_body = read_response(port, proxy_path)
+    assert (proxy_status, proxy_body) == (200, DATA), ("blob proxy", proxy_status, proxy_body[:100])
+    assert proxy_headers.get("content-type", "").startswith("text/plain"), proxy_headers
+    assert proxy_headers.get("content-disposition", "").startswith("attachment;"), proxy_headers
+    range_status, range_headers, range_body = read_response(port, proxy_path, {"Range": "bytes=0-5"})
+    assert (range_status, range_body) == (206, DATA[:6]), ("blob proxy range", range_status, range_body)
+    assert range_headers.get("content-range") == f"bytes 0-5/{len(DATA)}", range_headers
+    assert read_response(port, proxy_path.replace("paired-upload.txt", "another-name.txt"))[2] == DATA
+    assert read_response(port, "/rails/active_storage/blobs/proxy/invalid/paired-upload.txt")[0] == 404
+    assert proxy_headers.get("etag"), proxy_headers
+    expected_etag = f'W/"{hashlib.sha256(proxy_path.encode()).hexdigest()[:32]}"'
+    assert proxy_headers["etag"] == expected_etag, (proxy_headers["etag"], expected_etag)
+    conditional_status, _, conditional_body = read_response(port, proxy_path, {"If-None-Match": proxy_headers["etag"]})
+    assert (conditional_status, conditional_body) == (304, b""), (conditional_status, conditional_body)
+    assert proxy_headers.get("last-modified"), proxy_headers
+    modified_status, _, modified_body = read_response(port, proxy_path, {"If-Modified-Since": proxy_headers["last-modified"]})
+    assert (modified_status, modified_body) == (304, b""), (modified_status, modified_body)
     with sqlite3.connect(database) as db:
         if campfire:
             stored = db.execute("SELECT key FROM active_storage_blobs WHERE id=?", [metadata["id"]]).fetchone()[0]
@@ -110,7 +146,9 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
             assert uploaded == 1
             path = upload_root / stored
     assert path.read_bytes() == DATA
-    return path
+    return path, (proxy_status, proxy_headers.get("content-type"), proxy_headers.get("content-disposition"),
+                  proxy_headers.get("cache-control"), bool(proxy_headers.get("etag")),
+                  range_status, range_headers.get("content-range"))
 
 
 def concurrent_metadata(port, cookie, csrf):
@@ -140,7 +178,7 @@ def main():
         rust_uploads = temp / "rust-uploads"
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(rust_uploads)})
         try:
-            rust_file = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, rust_uploads, False)
+            rust_file, rust_proxy = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, rust_uploads, False)
             concurrent_metadata(rust_port, "session_token=benchmark-session", "benchmark-csrf")
         finally:
             stop_server(rust)
@@ -151,7 +189,7 @@ def main():
         try:
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_file = workflow(camp_port, cookie, csrf, camp_db, repo / "storage/files", True)
+            camp_file, camp_proxy = workflow(camp_port, cookie, csrf, camp_db, repo / "storage/files", True)
             concurrent_metadata(camp_port, cookie, csrf)
         except Exception:
             log.flush()
@@ -169,7 +207,8 @@ def main():
                     except OSError:
                         pass
         assert rust_file.read_bytes() == DATA
-        print("PASS matched direct-upload metadata, concurrent blob IDs, authenticated writes, checksum rejection, and public downloads")
+        assert rust_proxy == camp_proxy, (rust_proxy, camp_proxy)
+        print("PASS matched direct-upload metadata, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
 
 
 if __name__ == "__main__":

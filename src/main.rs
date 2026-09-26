@@ -9692,7 +9692,7 @@ async fn attachment_get(
 async fn signed_blob_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((token, filename)): Path<(String, String)>,
+    Path((token, _filename)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     let id = blob_id_from_token(&s.blob_signing_key, &token)
@@ -9712,7 +9712,7 @@ async fn signed_blob_get(
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             ).optional().map_err(db_err)?;
             let (actual_filename, content_type, storage_key, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
-            if !uploaded || filename != actual_filename { return Err(StatusCode::NOT_FOUND); }
+            if !uploaded { return Err(StatusCode::NOT_FOUND); }
             let token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"content_type":content_type,"service_name":"local"})).map_err(db_err)?;
             return Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{token}/{}", encoded_blob_filename(&actual_filename)))));
         }
@@ -9728,6 +9728,120 @@ async fn signed_blob_get(
             && (safe_inline_image(&content_type) || safe_inline_video(&content_type)),
     )
     .await
+}
+async fn signed_blob_proxy(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    Path((token, _filename)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> AppResult {
+    let id = blob_id_from_token(&s.blob_signing_key, &token)
+        .or_else(|| {
+            s.imported_blob_signing_key
+                .as_deref()
+                .and_then(|key| blob_id_from_token(key, &token))
+        })
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let (filename, content_type, stored) = match attachment_record_unchecked(&s, id) {
+        Ok((_, filename, content_type, stored)) => (filename, content_type, stored),
+        Err(StatusCode::NOT_FOUND) => {
+            let db = pool(&s)?;
+            let row: Option<(String, String, String, bool)> = db
+                .query_row(
+                    "SELECT filename,content_type,storage_key,uploaded FROM direct_upload_blobs WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()
+                .map_err(db_err)?;
+            let (filename, content_type, stored, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
+            if !uploaded {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            (filename, content_type, stored)
+        }
+        Err(error) => return Err(error),
+    };
+    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+    let inline = query.get("disposition").map(String::as_str) != Some("attachment")
+        && matches!(
+            content_type.as_str(),
+            "image/webp"
+                | "image/avif"
+                | "image/png"
+                | "image/gif"
+                | "image/jpeg"
+                | "image/tiff"
+                | "image/bmp"
+                | "image/vnd.adobe.photoshop"
+                | "image/vnd.microsoft.icon"
+                | "application/pdf"
+        );
+    let served_type = if matches!(
+        content_type.as_str(),
+        "text/html"
+            | "image/svg+xml"
+            | "application/postscript"
+            | "application/x-shockwave-flash"
+            | "text/xml"
+            | "application/xml"
+            | "application/xhtml+xml"
+            | "application/mathml+xml"
+            | "text/cache-manifest"
+    ) {
+        "application/octet-stream"
+    } else {
+        content_type.as_str()
+    };
+    let fullpath = uri.path_and_query().map(|part| part.as_str()).unwrap_or(uri.path());
+    let digest = openssl::hash::hash(MessageDigest::sha256(), fullpath.as_bytes()).map_err(db_err)?;
+    let etag = format!("W/\"{}\"", digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>());
+    let cache_control = "max-age=3155695200, public, immutable";
+    let last_modified = "Sat, 01 Jan 2011 00:00:00 GMT";
+    let fresh = if let Some(request_etag) = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()) {
+        request_etag.split(',').any(|candidate| candidate.trim() == etag || candidate.trim() == "*")
+    } else {
+        let fixed = chrono::DateTime::parse_from_rfc2822(last_modified).map_err(db_err)?;
+        headers
+            .get(header::IF_MODIFIED_SINCE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
+            .is_some_and(|value| value >= fixed)
+    };
+    if headers.get(header::RANGE).is_none() && fresh {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().insert(header::ETAG, etag.parse().map_err(db_err)?);
+        response.headers_mut().insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
+        response.headers_mut().insert(header::LAST_MODIFIED, last_modified.parse().unwrap());
+        return Ok(response);
+    }
+    let mut response = serve_attachment(
+        &std::path::Path::new(&dir).join(stored),
+        &filename,
+        served_type,
+        &headers,
+        inline,
+    )
+    .await?;
+    if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
+        let disposition = value.to_str().map_err(db_err)?.to_owned();
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "{disposition}; filename*=UTF-8''{}",
+                encoded_blob_filename(&filename)
+            )
+            .parse()
+            .map_err(db_err)?,
+        );
+    }
+    if response.status() == StatusCode::OK {
+        response.headers_mut().insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
+        response.headers_mut().insert(header::LAST_MODIFIED, last_modified.parse().unwrap());
+        response.headers_mut().insert(header::ETAG, etag.parse().map_err(db_err)?);
+    }
+    Ok(response)
 }
 async fn direct_upload_create(
     State(s): State<Arc<AppState>>,
@@ -11285,6 +11399,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/attachments/{id}/{kind}", get(attachment_variant))
         .route(
             "/rails/active_storage/blobs/redirect/{token}/{filename}",
+            get(signed_blob_get),
+        )
+        .route(
+            "/rails/active_storage/blobs/proxy/{token}/{filename}",
+            get(signed_blob_proxy),
+        )
+        .route(
+            "/rails/active_storage/blobs/{token}/{filename}",
             get(signed_blob_get),
         )
         .route("/rails/active_storage/direct_uploads",post(direct_upload_create))
