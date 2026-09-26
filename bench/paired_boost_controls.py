@@ -95,6 +95,13 @@ def check_app(name, port, cookie, csrf, database, samples):
     status, _, body = request(port, cookie, "GET", "/messages/1/boosts", frame="boosting_message_boost-fixture")
     assert status == 200
     samples.joinpath(f"{name}-created.html").write_text(body)
+    rejected_methods = []
+    for label, fields in (("plain-post", {}), ("patch-override", {"_method": "patch"})):
+        rejected_status, _, _ = request(port, cookie, "POST", f"/messages/1/boosts/{boost[0]}", csrf, fields)
+        with sqlite3.connect(database) as db:
+            remaining = db.execute("SELECT count(*) FROM boosts WHERE id=?", (boost[0],)).fetchone()[0]
+        rejected_methods.append((label, rejected_status, remaining))
+    assert rejected_methods == [("plain-post", 404, 1), ("patch-override", 404, 1)], (name, rejected_methods)
     status, _, body = request(port, cookie, "POST", f"/messages/1/boosts/{boost[0]}", csrf,
                               {"_method": "delete"}, frame="boosting_message_boost-fixture")
     samples.joinpath(f"{name}-deleted.html").write_text(body)
@@ -121,7 +128,7 @@ def check_app(name, port, cookie, csrf, database, samples):
                                         frame="boosting_message_boost-fixture")
     assert edge_status == 200, (name, edge_status)
     samples.joinpath(f"{name}-edge-list.html").write_text(edge_body)
-    return status, anonymous, edge_results, contents
+    return status, anonymous, rejected_methods, edge_results, contents
 
 
 def main():
@@ -179,7 +186,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired boost frames, create/delete, anonymous redirect, and raw form edge cases")
+    print("PASS paired boost frames, delete method restrictions, anonymous redirect, and raw form edge cases")
 
 
 if __name__ == "__main__":

@@ -10163,6 +10163,28 @@ async fn boost_delete(
     s.events.send(Event{room_id:rid,payload:json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content}).to_string()});
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+async fn boost_delete_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((mid, bid)): Path<(i64, i64)>,
+    raw: Bytes,
+) -> AppResult {
+    let form_method = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("application/x-www-form-urlencoded"))
+        .and_then(|_| fields(&raw).0.remove("_method"));
+    let method = form_method.or_else(|| {
+        headers
+            .get("x-http-method-override")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    });
+    match method.as_deref().map(str::to_ascii_uppercase).as_deref() {
+        Some("DELETE") => boost_delete(State(s), headers, Path((mid, bid))).await,
+        _ => Err(StatusCode::NOT_FOUND),
+    }
+}
 async fn bot_boost_create(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -11210,7 +11232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/new", get(boost_new))
         .route(
             "/messages/{id}/boosts/{bid}",
-            delete(boost_delete).post(boost_delete),
+            delete(boost_delete).post(boost_delete_post_override),
         )
         .route("/messages/{id}/boosts/{bid}/delete", post(boost_delete))
         .route("/attachments/{id}", get(attachment_get))
