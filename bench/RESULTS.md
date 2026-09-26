@@ -739,3 +739,12 @@ These are same-host, ten-second trials with one Rustfire process, 22 Campfire Pu
 ## Link preview presentation filters
 
 `python bench/paired_link_preview.py` posts five identical rich messages to disposable Campfire and Rustfire instances, then compares the complete parsed presentation subtree. The cases cover ordinary text beside a preview, a preview-only attachment, a URL followed only by its matching preview, an X URL with a query string whose preview points to Twitter, and a Twitter profile-image preview. All five now match the pinned source's tag order, attributes, and visible text. Rustfire removes a duplicate solo URL only in the presented message, retaining the original body for search and webhooks. The source's `cf-twitter-avatar` layout marker is applied to the displayed message when the preview image uses Twitter's profile-image path. A fresh debug build passed the full HTTP smoke test, including creation and editing of a preview-only message. This is a rendering parity check, not a load test or proof for other ActionText attachments.
+
+The optional read mode added 40 distinct solo URL previews to each disposable app, then checked every preview presentation on the latest-40 page before timing 32 keep-alive readers for ten seconds. The Go reader required HTTP 200, HTML content type, and 40 message roots on every response. Rustfire ran as one process and Campfire used 22 Puma workers; servers and load generator shared one host. Both trial orders had zero checked response errors.
+
+| Campfire first | Rustfire reads/s / p95 | Campfire reads/s / p95 | Rustfire / Campfire response bytes |
+| :---: | ---: | ---: | ---: |
+| No | 3,148 / 15.52 ms | 1,914 / 30.60 ms | 364,410 / 390,911 |
+| Yes | 2,909 / 16.70 ms | 1,927 / 27.37 ms | 364,410 / 390,911 |
+
+Rustfire was faster on this checked preview-rich read route in both short runs. The presentations match as parsed HTML, but the full page bytes differ and writes were outside the timed interval. This does not establish parity or a speed advantage for other rich-text constructs or the whole application.

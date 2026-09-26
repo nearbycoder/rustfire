@@ -1,8 +1,10 @@
-"""Compare rendered Open Graph messages from identical Campfire and Rustfire posts."""
+"""Compare rendered Open Graph messages and optionally benchmark preview-heavy reads."""
 
+import argparse
 import html
 import html.parser
 import http.client
+import json
 import pathlib
 import sqlite3
 import subprocess
@@ -12,6 +14,7 @@ import urllib.parse
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_message_cache import fetch
 
 
 CASES = [
@@ -80,34 +83,81 @@ def post(port, cookie, csrf, case):
         connection.close()
 
 
+def measure_reads(binary, port, cookie, clients, seconds):
+    command = [str(binary), "--base", f"http://127.0.0.1:{port}", "--path", "/rooms/1/messages",
+               "--cookie", cookie, "--expected-status", "200", "--expected-content-type", "text/html",
+               "--expected-message-count", "40", "--accept", "text/html", "--clients", str(clients),
+               "--seconds", str(seconds)]
+    result = subprocess.run(command, text=True, capture_output=True, check=True)
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["errors"] == 0, report
+    return report
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--read-clients", type=int, default=0, help="benchmark latest-40 preview page reads with this many clients")
+    parser.add_argument("--seconds", type=float, default=10)
+    parser.add_argument("--campfire-workers", type=int, default=22)
+    parser.add_argument("--campfire-first", action="store_true", help="reverse the benchmark trial order")
+    args = parser.parse_args()
+    if args.read_clients < 0 or args.campfire_workers < 1 or (args.read_clients and args.seconds <= 0):
+        parser.error("read clients and seconds must be positive")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-link-preview-") as scratch:
         temp = pathlib.Path(scratch)
+        binary = temp / "checked_get"
+        if args.read_clients:
+            subprocess.run(["go", "build", "-o", str(binary), "bench/checked_get.go"], check=True)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
-        camp_env["WEB_CONCURRENCY"] = "1"
+        camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers if args.read_clients else 1)
         with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
             rust.executemany("UPDATE users SET name=?2,updated_at=?3 WHERE id=?1", camp.execute("SELECT id,name,updated_at FROM users WHERE id IN(1,2)").fetchall())
             rust.execute("UPDATE rooms SET name=? WHERE id=1", [camp.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]])
         redis, redis_log = start_redis(temp, redis_port)
         try:
-            rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
-            try:
-                rust_previews = [post(rust_port, "session_token=benchmark-session", "benchmark-csrf", case) for case in CASES]
-            finally:
-                stop_server(rust)
-            with open(temp / "puma.log", "w+") as log:
-                camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=REPOSITORY, env=camp_env, stdout=log, stderr=log)
+            def run_rustfire():
+                rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
                 try:
-                    wait_for_server(camp_port, camp)
-                    cookie, csrf = login_campfire(camp_port)
-                    camp_previews = [post(camp_port, cookie, csrf, case) for case in CASES]
+                    cookie, csrf = "session_token=benchmark-session", "benchmark-csrf"
+                    previews = [post(rust_port, cookie, csrf, case) for case in CASES]
+                    page, report = None, None
+                    if args.read_clients:
+                        for index in range(40):
+                            url = f"https://example.com/page/{index}"
+                            post(rust_port, cookie, csrf, (f"bench-{index}", url, url, "https://example.com/image.png"))
+                        page = fetch(rust_port, cookie, "/rooms/1/messages")[2]
+                        report = measure_reads(binary, rust_port, cookie, args.read_clients, args.seconds)
+                    return previews, page, report
                 finally:
-                    stop_server(camp)
+                    stop_server(rust)
+
+            def run_campfire():
+                with open(temp / "puma.log", "w+") as log:
+                    camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=REPOSITORY, env=camp_env, stdout=log, stderr=log)
+                    try:
+                        wait_for_server(camp_port, camp)
+                        cookie, csrf = login_campfire(camp_port)
+                        previews = [post(camp_port, cookie, csrf, case) for case in CASES]
+                        page, report = None, None
+                        if args.read_clients:
+                            for index in range(40):
+                                url = f"https://example.com/page/{index}"
+                                post(camp_port, cookie, csrf, (f"bench-{index}", url, url, "https://example.com/image.png"))
+                            page = fetch(camp_port, cookie, "/rooms/1/messages")[2]
+                            report = measure_reads(binary, camp_port, cookie, args.read_clients, args.seconds)
+                        return previews, page, report
+                    finally:
+                        stop_server(camp)
+
+            if args.campfire_first:
+                (camp_previews, camp_page, camp_report), (rust_previews, rust_page, rust_report) = run_campfire(), run_rustfire()
+            else:
+                (rust_previews, rust_page, rust_report), (camp_previews, camp_page, camp_report) = run_rustfire(), run_campfire()
         finally:
             redis.terminate()
             redis.wait(timeout=10)
@@ -115,6 +165,16 @@ def main():
     for case, rust_preview, camp_preview in zip(CASES, rust_previews, camp_previews):
         assert rust_preview == camp_preview, (case[0], rust_preview, camp_preview)
     print("PASS parsed preview messages, preview-only attachment, solo URLs, tweet URLs, and Twitter avatar layout match pinned Campfire")
+    if args.read_clients:
+        for index in range(40):
+            client_id = f"paired-link-preview-bench-{index}"
+            rust, camp = Presentation(client_id), Presentation(client_id)
+            rust.feed(rust_page.decode())
+            camp.feed(camp_page.decode())
+            assert rust.structure and rust.structure == camp.structure, (index, rust.structure, camp.structure)
+        print(json.dumps({"clients": args.read_clients, "seconds": args.seconds, "campfire_workers": args.campfire_workers, "campfire_first": args.campfire_first,
+                          "rustfire": {"reads": rust_report, "page_bytes": len(rust_page)},
+                          "campfire": {"reads": camp_report, "page_bytes": len(camp_page)}}, sort_keys=True))
 
 
 if __name__ == "__main__":
