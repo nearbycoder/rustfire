@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis, wait_for_worker
@@ -21,7 +22,9 @@ from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, w
 
 BOT_ID = 52
 BOT_TOKEN = "pairedBot123"
-CASES = ("plain", "signed", "duplicate", "trix-figure")
+PEER_ID = 53
+PEER_TOKEN = "peerBot12345"
+CASES = ("plain", "signed", "duplicate", "trix-figure", "direct")
 
 
 class Receiver(BaseHTTPRequestHandler):
@@ -43,31 +46,44 @@ def seed_bot(database, campfire, url):
         if campfire:
             db.execute("DELETE FROM sqlite_sequence WHERE name='messages'")
         db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES(52,'Probe Bot',2,0,?1,?2,?2)", (BOT_TOKEN, stamp))
+        db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES(53,'Peer Bot',2,0,?1,?2,?2)", (PEER_TOKEN, stamp))
+        db.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(2,NULL,'Rooms::Direct',1,?1,?1)", (stamp,))
+        db.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(3,NULL,'Rooms::Direct',52,?1,?1)", (stamp,))
         if campfire:
             db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(1,52,'mentions',?1,?1)", (stamp,))
+            db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(1,53,'mentions',?1,?1)", (stamp,))
+            db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(2,?1,'everything',?2,?2)", [(1, stamp), (BOT_ID, stamp)])
+            db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(3,?1,'everything',?2,?2)", [(BOT_ID, stamp), (PEER_ID, stamp)])
             db.execute("INSERT INTO webhooks(user_id,url,created_at,updated_at) VALUES(52,?1,?2,?2)", (url, stamp))
+            db.execute("INSERT INTO webhooks(user_id,url,created_at,updated_at) VALUES(53,?1,?2,?2)", (url.replace("/hook", "/peer"), stamp))
         else:
             db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,52,'mentions',?1)", (stamp,))
+            db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,53,'mentions',?1)", (stamp,))
+            db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(2,?1,'everything',?2)", [(1, stamp), (BOT_ID, stamp)])
+            db.executemany("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(3,?1,'everything',?2)", [(BOT_ID, stamp), (PEER_ID, stamp)])
             db.execute("INSERT INTO webhooks(user_id,url) VALUES(52,?1)", (url,))
+            db.execute("INSERT INTO webhooks(user_id,url) VALUES(53,?1)", (url.replace("/hook", "/peer"),))
 
 
-def bot_sgid(port, cookie, campfire):
-    path = "/autocompletable/users.json?query=Probe%20Bot" if campfire else "/autocompletable/users?query=Probe%20Bot"
+def bot_sgid(port, cookie, campfire, bot_id=BOT_ID):
+    name = "Probe%20Bot" if bot_id == BOT_ID else "Peer%20Bot"
+    path = f"/autocompletable/users.json?query={name}" if campfire else f"/autocompletable/users?query={name}"
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
         connection.request("GET", path, headers={"Cookie": cookie, "Accept": "application/json"})
         response = connection.getresponse()
         body = response.read()
         assert response.status == 200, (response.status, body[:300])
-        return next(user["sgid"] for user in json.loads(body) if user["value"] == BOT_ID)
+        return next(user["sgid"] for user in json.loads(body) if user["value"] == bot_id)
     finally:
         connection.close()
 
 
 def post(port, cookie, csrf, sgid, case):
-    import urllib.parse
     attachment = f'<action-text-attachment sgid="{html.escape(sgid, quote=True)}" content-type="application/vnd.campfire.mention"></action-text-attachment>'
-    if case == "plain":
+    if case == "direct":
+        message = "<div>Direct ping</div>"
+    elif case == "plain":
         message = "<div>Hello @Probe Bot!</div>"
     elif case == "trix-figure":
         data = html.escape(json.dumps({"contentType": "application/vnd.campfire.mention", "sgid": sgid, "content": "<span>Probe Bot</span>"}), quote=True)
@@ -77,7 +93,8 @@ def post(port, cookie, csrf, sgid, case):
     body = urllib.parse.urlencode({"message[body]": message, "message[client_message_id]": f"paired-webhook-{case}", "authenticity_token": csrf})
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
-        connection.request("POST", "/rooms/1/messages", body, {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded", "Accept": "text/vnd.turbo-stream.html, text/html"})
+        room_id = 2 if case == "direct" else 1
+        connection.request("POST", f"/rooms/{room_id}/messages", body, {"Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded", "Accept": "text/vnd.turbo-stream.html, text/html"})
         response = connection.getresponse()
         result = response.read()
         assert response.status == 200, (response.status, result[:300])
@@ -85,14 +102,49 @@ def post(port, cookie, csrf, sgid, case):
         connection.close()
 
 
+def bot_post(port, room_id, body):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("POST", f"/rooms/{room_id}/{BOT_ID}-{BOT_TOKEN}/messages", body, {"Content-Type": "text/plain"})
+        response = connection.getresponse()
+        payload = response.read()
+        assert response.status == 201, (response.status, payload[:300])
+    finally:
+        connection.close()
+
+
+def bot_index(port, room_id):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("GET", f"/rooms/{room_id}/{BOT_ID}-{BOT_TOKEN}/messages", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        payload = response.read()
+        assert response.status == 200, (response.status, payload[:300])
+        messages = json.loads(payload)
+        for message in messages:
+            message.pop("created_at")
+            for obj, key in ((message, "url"), (message["creator"], "avatar_url")):
+                url = urllib.parse.urlsplit(obj[key])
+                obj[key] = url.path + ("?" + url.query if url.query else "")
+        return messages
+    finally:
+        connection.close()
+
+
 def workflow(port, cookie, csrf, campfire):
     sgid = bot_sgid(port, cookie, campfire)
+    peer_sgid = bot_sgid(port, cookie, campfire, PEER_ID)
     for case in CASES:
         post(port, cookie, csrf, sgid, case)
-    received = [Receiver.received.get(timeout=15) for _ in range(3)]
+    bot_post(port, 2, "Talking to myself")
+    bot_post(port, 3, "Hello peer")
+    own = f'<action-text-attachment sgid="{html.escape(sgid, quote=True)}" content-type="application/vnd.campfire.mention"></action-text-attachment>'
+    peer = f'<action-text-attachment sgid="{html.escape(peer_sgid, quote=True)}" content-type="application/vnd.campfire.mention"></action-text-attachment>'
+    bot_post(port, 1, f"<div>Hey {own} {peer}</div>")
+    received = [Receiver.received.get(timeout=15) for _ in range(6)]
     time.sleep(0.5)
     assert Receiver.received.empty(), "unexpected extra bot webhook"
-    return sgid, sorted(received, key=lambda item: item[1]["message"]["id"])
+    return (sgid, peer_sgid), sorted(received, key=lambda item: item[1]["message"]["id"]), {room_id: bot_index(port, room_id) for room_id in (1, 2, 3)}
 
 
 def main():
@@ -120,7 +172,7 @@ def main():
             try:
                 rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "0"})
                 try:
-                    rust_sgid, rust_received = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", False)
+                    rust_sgid, rust_received, rust_bot_messages = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", False)
                 finally:
                     stop_server(rust)
                 with open(temp / "puma.log", "w+") as puma_log, open(temp / "worker.log", "w+") as worker_log:
@@ -130,7 +182,7 @@ def main():
                         wait_for_server(camp_port, camp)
                         wait_for_worker(redis_port, worker)
                         cookie, csrf = login_campfire(camp_port)
-                        camp_sgid, camp_received = workflow(camp_port, cookie, csrf, True)
+                        camp_sgid, camp_received, camp_bot_messages = workflow(camp_port, cookie, csrf, True)
                     finally:
                         stop_server(camp)
                         if worker.poll() is None:
@@ -145,9 +197,20 @@ def main():
         receiver.server_close()
     assert rust_sgid == camp_sgid, (rust_sgid, camp_sgid)
     assert rust_received == camp_received, (rust_received, camp_received)
-    assert [payload["message"]["id"] for path, payload in rust_received] == [2, 3, 4]
-    assert all(path == "/hook" for path, _ in rust_received)
-    print("PASS plain @bot text triggers no webhook; signed, duplicate, and Trix-figure mentions each deliver one JSON payload matching pinned Campfire")
+    assert {room: rust_bot_messages[room] for room in (2, 3)} == {room: camp_bot_messages[room] for room in (2, 3)}, (rust_bot_messages, camp_bot_messages)
+    rust_shared, camp_shared = rust_bot_messages[1], camp_bot_messages[1]
+    assert len(rust_shared) == len(camp_shared)
+    for rust_message, camp_message in zip(rust_shared, camp_shared):
+        for key in ("id", "creator", "room", "url"):
+            assert rust_message[key] == camp_message[key], (key, rust_message, camp_message)
+        assert rust_message["body"]["plain_text"] == camp_message["body"]["plain_text"]
+    rich_html_differences = [rust_message["id"] for rust_message, camp_message in zip(rust_shared, camp_shared) if rust_message["body"]["html"] != camp_message["body"]["html"]]
+    assert [message["id"] for message in rust_bot_messages[3]] == [7], rust_bot_messages[3]
+    assert rust_bot_messages[1][-1]["id"] == 8, rust_bot_messages[1]
+    assert rust_bot_messages[1][-1]["body"]["plain_text"] == "Hey @Probe Bot @Peer Bot", rust_bot_messages[1][-1]
+    assert [payload["message"]["id"] for path, payload in rust_received] == [2, 3, 4, 5, 7, 8]
+    assert [path for path, _ in rust_received] == ["/hook"] * 4 + ["/peer"] * 2
+    print(f"PASS mention, direct-room, and bot-originated webhook payloads and plain bot API JSON match pinned Campfire; plain @bot and bot self-messages trigger none; remaining rich mention JSON HTML differences={rich_html_differences}")
 
 
 if __name__ == "__main__":

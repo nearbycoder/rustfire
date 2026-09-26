@@ -8785,7 +8785,12 @@ async fn bot_messages_post(
             None,
         )
     };
-    let m = insert_message(&s, &u, rid, &body, None, attachment, false, Some(&headers), false)?;
+    let m = insert_message(&s, &u, rid, &body, None, attachment, true, Some(&headers), false)?;
+    if s.webhooks_enabled {
+        if let Err(error) = enqueue_webhooks(&s, &m) {
+            eprintln!("Rustfire webhook dispatch error: {error}");
+        }
+    }
     let mut r = StatusCode::CREATED.into_response();
     r.headers_mut().insert(
         header::LOCATION,
