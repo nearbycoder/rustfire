@@ -25,7 +25,8 @@ document.addEventListener('keydown',event=>{
 });
 const decodeAutocompleteName=value=>{const textarea=document.createElement('textarea');textarea.innerHTML=value;return textarea.value;};
 const formatReplyLinks=root=>root.querySelectorAll('[data-reply-target="body"] a').forEach(link=>{link.target=link.href.startsWith(location.origin)?'_top':'_blank';});
-const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.dateTime);if(Number.isNaN(date.getTime()))return;const style=node.dataset.localTimeTarget==='date'?{dateStyle:'long'}:{dateStyle:'short',timeStyle:'short'};node.textContent=new Intl.DateTimeFormat(undefined,style).format(date);node.title=node.textContent});
+const localTimeFormatters={time:new Intl.DateTimeFormat(undefined,{timeStyle:'short'}),date:new Intl.DateTimeFormat(undefined,{dateStyle:'long'}),datetime:new Intl.DateTimeFormat(undefined,{timeStyle:'short',dateStyle:'short'})};
+const formatLocalTimes=(root=document)=>root.querySelectorAll('[data-local-time-target]').forEach(node=>{const date=new Date(node.getAttribute('datetime'));const formatter=localTimeFormatters[node.dataset.localTimeTarget];if(!formatter||Number.isNaN(date.getTime()))return;node.textContent=formatter.format(date);node.title=localTimeFormatters.datetime.format(date)});
 formatLocalTimes();
 const badgeSidebar=document.querySelector('#sidebar');
 if(badgeSidebar&&'setAppBadge' in navigator){
