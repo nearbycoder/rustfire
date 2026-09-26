@@ -840,8 +840,11 @@ def main():
             preview = preview.replace("javascript:alert(1)", "https://example.com/page").replace("data:image/svg+xml;base64,PHN2Zy8+", "https://example.com/image.png")
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": preview, "message[format]": "html"}, headers={"Accept": "application/json"})
             assert code == 201
-            rendered = request(admin, base, f"/rooms/1/messages/{json.loads(payload)['id']}")[2]
+            preview_id = json.loads(payload)["id"]
+            rendered = request(admin, base, f"/rooms/1/messages/{preview_id}")[2]
             assert "href=\"https://example.com/page\"" in rendered and "src=\"https://example.com/image.png\"" in rendered
+            code, _, edited_preview = request(admin, base, f"/rooms/1/messages/{preview_id}", {"message[body]": preview.replace("Cookies here", "Updated preview"), "message[format]": "html"}, method="PATCH", headers={"Accept": "application/json"})
+            assert code == 200 and "Updated preview" in edited_preview and json.loads(edited_preview)["body"]["plain_text"] == ""
             own_host_preview = preview.replace("https://example.com/page", "https://once.campfire.test/rooms/1").replace("https://example.com/image.png", "https://once.campfire.test/account/logo")
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": own_host_preview, "message[format]": "html"}, headers={"Accept": "application/json", "Host": "once.campfire.test"})
             assert code == 201

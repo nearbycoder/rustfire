@@ -582,6 +582,9 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
         };
     (action_text_plain(&plain_input).trim().to_string(), html)
 }
+fn has_preview_card(html: Option<&str>) -> bool {
+    html.is_some_and(|html| html.contains("class=\"og-embed gap\""))
+}
 fn trim_plain_newlines(value: &str) -> &str {
     value.trim_end_matches('\n')
 }
@@ -3592,6 +3595,59 @@ fn attachment_presentation_html(s: &AppState, a: &Attachment) -> String {
         )
     }
 }
+fn normalize_preview_url(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value.trim()) else {
+        return value.to_string();
+    };
+    match url.host_str().map(str::to_ascii_lowercase).as_deref() {
+        Some("x.com") => {
+            if url.set_host(Some("twitter.com")).is_err() {
+                return value.to_string();
+            }
+            url.set_query(None);
+            url.to_string()
+        }
+        Some("twitter.com") => {
+            url.set_query(None);
+            url.to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+fn preview_presentation_body(plain: &str, html: &str) -> String {
+    if !html.contains("og-embed") {
+        return html.to_string();
+    }
+    let document = ParsedHtml::parse_fragment(html);
+    let selector = Selector::parse(".og-embed").unwrap();
+    let mut previews = document.select(&selector);
+    let Some(preview) = previews.next() else {
+        return html.to_string();
+    };
+    let only_preview = previews.next().is_none();
+    let href = preview
+        .select(&Selector::parse(".og-embed__title a[href]").unwrap())
+        .next()
+        .and_then(|link| link.value().attr("href"));
+    let avatar = document
+        .select(&Selector::parse(".og-embed .og-embed__image img[src]").unwrap())
+        .any(|image| image.value().attr("src").is_some_and(|url| url.starts_with("https://pbs.twimg.com/profile_images")));
+    if only_preview && href.is_some_and(|url| normalize_preview_url(url) == normalize_preview_url(plain)) {
+        return format!(
+            "<div{}>{}</div>",
+            if avatar { " class='cf-twitter-avatar'" } else { "" },
+            preview.html()
+        );
+    }
+    if avatar {
+        static FIRST_DIV: OnceLock<Regex> = OnceLock::new();
+        return FIRST_DIV
+            .get_or_init(|| Regex::new(r"(?i)<div\b[^>]*>").unwrap())
+            .replacen(html, 1, "<div class='cf-twitter-avatar'>")
+            .into_owned();
+    }
+    html.to_string()
+}
 fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
     let attachment = m
         .attachment
@@ -3605,7 +3661,7 @@ fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
             .or_else(|| {
                 m.body_html
                     .as_ref()
-                    .map(|html| format!("<div class='trix-content'>{html}</div>"))
+                    .map(|html| format!("<div class='trix-content'>{}</div>", preview_presentation_body(&m.body, html)))
             })
             .unwrap_or_else(|| {
                 format!(
@@ -4613,9 +4669,7 @@ fn insert_message(
     if !allow_blank
         && plain.is_empty()
         && upload.is_none()
-        && !body_html
-            .as_ref()
-            .is_some_and(|html| html.contains("class=\"og-embed\""))
+        && !has_preview_card(body_html.as_deref())
     {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     };
@@ -5343,7 +5397,7 @@ async fn message_update(
     } else {
         (body.to_string(), None, None, Vec::new())
     };
-    if plain.trim().is_empty() {
+    if plain.trim().is_empty() && !has_preview_card(body_html.as_deref()) {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let updated_at = now();
@@ -10763,6 +10817,30 @@ mod tests {
         assert!(html.contains("class=\"og-embed__description\""), "{html}");
         assert!(html.contains("class=\"og-embed__image\""), "{html}");
         assert!(html.contains("class=\"image center\""), "{html}");
+    }
+    #[test]
+    fn solo_preview_hides_duplicate_url_only_in_presentation() {
+        let attachment = "<action-text-attachment content-type='application/vnd.actiontext.opengraph-embed' href='https://example.com/page' url='https://example.com/image.png' filename='Example' caption='Description'></action-text-attachment>";
+        let source = format!("<div>https://example.com/page{attachment}</div>");
+        let (plain, html) = super::rich_body(&source, None);
+        assert_eq!(plain, "https://example.com/page");
+        assert!(html.contains("https://example.com/page<div"), "{html}");
+        let presented = super::preview_presentation_body(&plain, &html);
+        assert!(!presented.contains("https://example.com/page<div"), "{presented}");
+        assert!(presented.contains("class=\"og-embed gap\""));
+        let with_text = format!("<div>See https://example.com/page{attachment}</div>");
+        let (plain, html) = super::rich_body(&with_text, None);
+        assert!(super::preview_presentation_body(&plain, &html).contains("See https://example.com/page"));
+    }
+    #[test]
+    fn tweet_preview_normalizes_domain_and_styles_profile_image() {
+        let source = "<div>https://x.com/37signals/status/123?s=20<action-text-attachment content-type='application/vnd.actiontext.opengraph-embed' href='https://twitter.com/37signals/status/123' url='https://pbs.twimg.com/profile_images/example/avatar.png' filename='Example' caption='Description'></action-text-attachment></div>";
+        let (plain, html) = super::rich_body(source, None);
+        let presented = super::preview_presentation_body(&plain, &html);
+        assert!(!presented.contains("https://x.com/37signals/status/123?s=20"), "{presented}");
+        assert!(presented.starts_with("<div class='cf-twitter-avatar'>"), "{presented}");
+        let multiple = "<div>Two cards<div class='og-embed'><div class='og-embed__image'><img src='https://example.com/first.png'></div></div><div class='og-embed'><div class='og-embed__image'><img src='https://pbs.twimg.com/profile_images/example/second.png'></div></div></div>";
+        assert!(super::preview_presentation_body("Two cards", multiple).starts_with("<div class='cf-twitter-avatar'>"));
     }
     #[test]
     fn trix_preview_ignores_untrusted_embedded_html() {
