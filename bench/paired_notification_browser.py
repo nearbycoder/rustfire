@@ -14,6 +14,91 @@ from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 from paired_reply_browser import browser
 
 
+EXISTING_SUBSCRIPTION_SCRIPT = """(() => {
+  window.__existingPushEvents=[];
+  Object.defineProperty(window,'Notification',{configurable:true,value:{permission:'granted'}});
+  Object.defineProperty(navigator.serviceWorker,'getRegistration',{configurable:true,value:async origin=>{
+    window.__existingPushEvents.push(`getRegistration:${origin}`);
+    return {pushManager:{getSubscription:async()=>{
+      window.__existingPushEvents.push('getSubscription');
+      return {endpoint:'https://fcm.googleapis.com/fcm/send/existing-browser'};
+    }}};
+  }});
+})()"""
+INSTALL_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+STANDALONE_SCRIPT = """(() => {
+  const originalMatchMedia=window.matchMedia.bind(window);
+  window.matchMedia=query=>query==='(display-mode: standalone)'?{matches:true}:originalMatchMedia(query);
+})()"""
+
+
+def check_install_prompt(session, port, standalone, init_script):
+    def install_browser(*arguments):
+        result = subprocess.run(
+            ["agent-browser", "--session", session, "--user-agent", INSTALL_USER_AGENT, *arguments],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode:
+            raise RuntimeError(f"agent-browser install {arguments!r}: {result.stdout}\n{result.stderr}")
+        return result.stdout
+
+    command = ["agent-browser", "--session", session, "--user-agent", INSTALL_USER_AGENT]
+    if standalone:
+        command += ["--init-script", str(init_script)]
+    command += ["open", f"http://127.0.0.1:{port}/session/new"]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise RuntimeError(f"agent-browser install setup: {result.stdout}\n{result.stderr}")
+    install_browser("fill", 'input[name="email_address"]', "benchmark@example.invalid")
+    install_browser("fill", 'input[name="password"]', "benchmark-password")
+    install_browser("click", 'button[name="log_in"]')
+    install_browser("wait", "--url", "**/rooms/*")
+    install_browser("wait", "--fn", "!!document.querySelector('.button_to_change_notifying .pwa__instructions[data-controller=pwa-install]')")
+    install_browser("wait", "--load", "networkidle")
+    before = json.loads(install_browser("eval", """(() => {
+      window.__installCalls=0;
+      const event=new Event('beforeinstallprompt',{cancelable:true});
+      event.prompt=()=>{window.__installCalls++;return Promise.resolve()};
+      window.dispatchEvent(event);
+      return {prevented:event.defaultPrevented,canInstall:document.querySelector('.button_to_change_notifying .pwa__instructions').classList.contains('pwa--can-install')};
+    })()"""))
+    if standalone:
+        return {"before": before}
+    install_browser("eval", """(() => {
+      document.querySelector('.button_to_change_notifying [data-notifications-target=notAllowedNotice]').showModal();
+      document.querySelector('.button_to_change_notifying .pwa__instructions').open=true;
+    })()""")
+    install_browser("click", '.button_to_change_notifying [data-action="pwa-install#promptInstall"]')
+    install_browser("eval", "window.dispatchEvent(new Event('appinstalled'))")
+    after = json.loads(install_browser("eval", """(() => ({
+      promptCalls:window.__installCalls,
+      canInstall:document.querySelector('.button_to_change_notifying .pwa__instructions').classList.contains('pwa--can-install')
+    }))()"""))
+    return {"before": before, "after": after}
+
+
+def check_existing(session, port, init_script):
+    result = subprocess.run(
+        ["agent-browser", "--session", session, "--init-script", str(init_script), "open", f"http://127.0.0.1:{port}/session/new"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeError(f"agent-browser init: {result.stdout}\n{result.stderr}")
+    browser(session, "fill", 'input[name="email_address"]', "benchmark@example.invalid")
+    browser(session, "fill", 'input[name="password"]', "benchmark-password")
+    browser(session, "click", 'button[name="log_in"]')
+    browser(session, "wait", "--url", "**/rooms/*")
+    browser(session, "wait", "--fn", "!!document.querySelector('.button_to_change_notifying turbo-frame form')")
+    state = json.loads(browser(session, "eval", """(() => ({
+      events:window.__existingPushEvents,
+      bellGone:!document.querySelector('.button_to_change_notifying [data-notifications-target=bell]'),
+      settingsForm:!!document.querySelector('.button_to_change_notifying turbo-frame form')
+    }))()"""))
+    assert state["events"][0] == f"getRegistration:http://127.0.0.1:{port}", state
+    state["events"][0] = "getRegistration:<origin>"
+    return state
+
+
 def check_browser(session, port, scenario):
     browser(session, "open", f"http://127.0.0.1:{port}/session/new")
     browser(session, "fill", 'input[name="email_address"]', "benchmark@example.invalid")
@@ -92,8 +177,14 @@ def main():
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     scenarios = ("rejected", "success", "pwa-denied", "prompt-granted", "prompt-denied")
     sessions = [f"notification-{scenario}-{app}-{uuid.uuid4().hex[:8]}" for scenario in scenarios for app in ("rust", "camp")]
+    sessions += [f"notification-existing-{app}-{uuid.uuid4().hex[:8]}" for app in ("rust", "camp")]
+    sessions += [f"notification-install-{mode}-{app}-{uuid.uuid4().hex[:8]}" for mode in ("browser", "standalone") for app in ("rust", "camp")]
     with tempfile.TemporaryDirectory(prefix="paired-notification-browser-") as scratch:
         temp = pathlib.Path(scratch)
+        init_script = temp / "existing-push.js"
+        init_script.write_text(EXISTING_SUBSCRIPTION_SCRIPT)
+        standalone_script = temp / "standalone.js"
+        standalone_script.write_text(STANDALONE_SCRIPT)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
@@ -116,6 +207,15 @@ def main():
                             camp_result = check_browser(sessions[2 * index + 1], camp_port, scenario)
                             print(json.dumps({"scenario": scenario, "rust": rust_result, "camp": camp_result}, indent=2))
                             assert rust_result == camp_result, f"Browser push {scenario} differs from Campfire"
+                        rust_existing = check_existing(sessions[10], rust_port, init_script)
+                        camp_existing = check_existing(sessions[11], camp_port, init_script)
+                        print(json.dumps({"scenario": "existing", "rust": rust_existing, "camp": camp_existing}, indent=2))
+                        assert rust_existing == camp_existing, "Existing browser subscription differs from Campfire"
+                        for index, mode in enumerate(("browser", "standalone")):
+                            rust_install = check_install_prompt(sessions[12 + index * 2], rust_port, mode == "standalone", standalone_script)
+                            camp_install = check_install_prompt(sessions[13 + index * 2], camp_port, mode == "standalone", standalone_script)
+                            print(json.dumps({"scenario": f"install-{mode}", "rust": rust_install, "camp": camp_install}, indent=2))
+                            assert rust_install == camp_install, f"Install prompt in {mode} differs from Campfire"
                         with sqlite3.connect(rust_db) as db:
                             rust_rows = db.execute("SELECT user_id,endpoint,p256dh_key,auth_key FROM push_subscriptions").fetchall()
                         with sqlite3.connect(camp_db) as db:
@@ -131,7 +231,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS browser push failure, success, standalone denial, and permission prompts match Campfire")
+    print("PASS browser push opt-in, existing-subscription loading, and PWA install prompts match Campfire")
 
 
 if __name__ == "__main__":

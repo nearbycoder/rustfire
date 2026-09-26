@@ -111,9 +111,16 @@ document.addEventListener('click',async event=>{
     await navigator.share(data);
   }catch(error){if(error.name!=='AbortError')alert('Could not share');}
 });
+const profileInstallControls=[...document.querySelectorAll('.profile-settings [data-controller~="pwa-install"]')];
 let profileInstallPrompt;
-window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();profileInstallPrompt=event;document.querySelectorAll('.profile-settings [data-controller~="pwa-install"]').forEach(node=>node.classList.add('pwa--can-install'));});
-document.addEventListener('click',event=>{const button=event.target.closest('[data-action~="pwa-install#promptInstall"]');if(button&&profileInstallPrompt){event.preventDefault();profileInstallPrompt.prompt();profileInstallPrompt=undefined;}});
+if(profileInstallControls.length&&'serviceWorker' in navigator&&!window.matchMedia('(display-mode: standalone)').matches){
+  window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();profileInstallPrompt=event;profileInstallControls.forEach(node=>node.classList.add('pwa--can-install'));});
+  window.addEventListener('appinstalled',()=>profileInstallControls.forEach(node=>node.classList.remove('pwa--can-install')));
+}
+document.addEventListener('click',event=>{
+  const button=event.target.closest('.profile-settings [data-controller~="pwa-install"] [data-action~="pwa-install#promptInstall"]');
+  if(button&&profileInstallPrompt){event.preventDefault();profileInstallPrompt.prompt();}
+});
 document.querySelectorAll('[data-controller~="upload-preview"]').forEach(control=>{
   const input=control.querySelector('[data-upload-preview-target="input"]');
   const image=control.querySelector('[data-upload-preview-target="image"]');
@@ -867,12 +874,16 @@ if(notificationsControl){
   let frame=notificationsControl.querySelector('turbo-frame[id^="involvement_rooms_"]');
   const roomBell=frame?.querySelector('[data-notifications-target="bell"]');
   const dialog=notificationsControl.querySelector('[data-notifications-target="notAllowedNotice"]');
+  const installControl=dialog?.querySelector('.pwa__instructions[data-controller~="pwa-install"]');
   let installPrompt=null;
-  window.addEventListener('beforeinstallprompt',event=>{
-    event.preventDefault();
-    installPrompt=event;
-    dialog?.querySelector('.pwa__instructions')?.classList.add('pwa--can-install');
-  });
+  if(installControl&&'serviceWorker' in navigator&&!window.matchMedia('(display-mode: standalone)').matches){
+    window.addEventListener('beforeinstallprompt',event=>{
+      event.preventDefault();
+      installPrompt=event;
+      installControl.classList.add('pwa--can-install');
+    });
+    window.addEventListener('appinstalled',()=>installControl.classList.remove('pwa--can-install'));
+  }
   const showHelp=()=>{
     if(dialog instanceof HTMLDialogElement&&!dialog.open){
       dialog.showModal();
@@ -933,9 +944,9 @@ if(notificationsControl){
     finally{roomBell.disabled=false}
   });
   notificationsControl.addEventListener('click',async event=>{
-    if(!event.target.closest('[data-action="pwa-install#promptInstall"]')||!installPrompt)return;
+    const button=event.target.closest('[data-action="pwa-install#promptInstall"]');
+    if(!button||!installControl?.contains(button)||!installPrompt)return;
     await installPrompt.prompt();
-    installPrompt=null;
   });
   notificationsControl.addEventListener('submit',async event=>{
     const form=event.target;
