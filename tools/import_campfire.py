@@ -146,6 +146,7 @@ def import_data(source, target, source_files, uploads):
         source, target, "sessions",
         ("id", "user_id", "token", "created_at", "last_active_at", "ip_address"),
     )
+    target.execute("CREATE TABLE import_missing_search(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE)")
 
     messages = rows(source, """SELECT m.id,m.room_id,m.creator_id,m.client_message_id,m.created_at,m.updated_at,
         rich.body,idx.body,attachment.id FROM messages m
@@ -155,12 +156,16 @@ def import_data(source, target, source_files, uploads):
     counts["messages"] = 0
     for message in messages:
         mid, room_id, creator_id, client_id, created, updated, source_body, plain, attachment_id = message
-        if plain is None:
-            raise ValueError(f"Campfire message {mid} is missing its plain-text search entry")
+        missing_search = plain is None
+        if missing_search:
+            plain = ""
         body = "" if attachment_id is not None and not source_body else plain
         target.execute("""INSERT INTO messages(id,room_id,creator_id,body,body_source,client_message_id,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?,?)""", (mid, room_id, creator_id, body, source_body, client_id, created, updated))
+        if missing_search:
+            target.execute("INSERT INTO import_missing_search(message_id) VALUES(?)", (mid,))
         counts["messages"] += 1
+    counts["reindexed_messages"] = target.execute("SELECT count(*) FROM import_missing_search").fetchone()[0]
     counts["boosts"] = copy_table(source, target, "boosts", tables["boosts"])
     counts["searches"] = 0
     for search in rows(source, "SELECT id,user_id,query,updated_at FROM searches ORDER BY updated_at,id"):

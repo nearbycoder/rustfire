@@ -198,6 +198,7 @@ def main():
                     VALUES(?,?,'media.txt','text/plain','{}','local',?,'2026-01-01 00:00:00')""", (blob_id, media_key, len(file_bytes)))
                 fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                     VALUES(?,?,?,?,?,'2026-01-01 00:00:00')""", (blob_id, name, record_type, record_id, blob_id))
+            fixture.execute("DELETE FROM message_search_index WHERE rowid IN (1,2)")
             fixture.commit()
         target_db = root / "rustfire.sqlite3"
         target_uploads = root / "uploads"
@@ -212,13 +213,16 @@ def main():
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
         assert result["messages"] == 10 and result["attachments"] == 1 and result["inline_embeds"] == 9, result
+        assert result["reindexed_messages"] == 2, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
             assert imported.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert imported.execute("SELECT count(*) FROM sqlite_master WHERE name='import_missing_search'").fetchone() == (0,)
             assert imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=1").fetchone() == (
                 "Hello\n• One\n• Two", source_body, source_body,
             )
+            assert imported.execute("SELECT body FROM message_search_index WHERE rowid=1").fetchone() == ("Hello\n• One\n• Two",)
             assert imported.execute("SELECT body FROM messages WHERE id=2").fetchone() == ("",)
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=2").fetchone() == ("imported.txt",)
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
@@ -401,7 +405,7 @@ def main():
             fixture.execute("UPDATE active_storage_blobs SET metadata=? WHERE id=11", (json.dumps({"width": 2, "height": 1, "identified": True}),))
         invalid_image = subprocess.run(bad_command, env=environment, capture_output=True, text=True)
         assert invalid_image.returncode != 0 and not bad_target.exists() and not bad_uploads.exists()
-        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, preview URLs, search text, boost, session, push key, avatar, and logo import; unsupported previews fail safely")
+        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; unsupported previews fail safely")
 
 
 if __name__ == "__main__":

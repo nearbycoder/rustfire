@@ -9639,25 +9639,30 @@ fn render_imported_rich_text(
     blob_key: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = db.get()?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS import_missing_search(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE)")?;
     let mut last_id = 0_i64;
     loop {
         let batch = {
-            let mut query = conn.prepare("SELECT id,body_source FROM messages WHERE id>?1 AND body_source IS NOT NULL ORDER BY id LIMIT 1000")?;
+            let mut query = conn.prepare("SELECT m.id,m.body_source,EXISTS(SELECT 1 FROM import_missing_search missing WHERE missing.message_id=m.id) FROM messages m WHERE m.id>?1 AND m.body_source IS NOT NULL ORDER BY m.id LIMIT 1000")?;
             query
-                .query_map([last_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .query_map([last_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?
                 .collect::<Result<Vec<_>, _>>()?
         };
         if batch.is_empty() {
             break;
         }
         let tx = conn.transaction()?;
-        for (id, source) in &batch {
+        for (id, source, missing_search) in &batch {
             let (inline, _) = render_imported_inline_files(&source, &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
-            let (_, html) = rich_body(&trusted, None);
-            tx.execute("UPDATE messages SET body_html=?1 WHERE id=?2", params![html, id])?;
+            let (plain, html) = rich_body(&trusted, None);
+            if *missing_search {
+                tx.execute("UPDATE messages SET body=?1,body_html=?2 WHERE id=?3", params![plain, html, id])?;
+            } else {
+                tx.execute("UPDATE messages SET body_html=?1 WHERE id=?2", params![html, id])?;
+            }
             tx.execute("DELETE FROM message_mentions WHERE message_id=?1", [id])?;
             for user_id in mention_ids(source, signing_key, imported_key) {
                 tx.execute("INSERT OR IGNORE INTO message_mentions(message_id,user_id) VALUES(?1,?2)", params![id,user_id])?;
@@ -9666,6 +9671,7 @@ fn render_imported_rich_text(
         last_id = batch.last().unwrap().0;
         tx.commit()?;
     }
+    conn.execute_batch("DROP TABLE import_missing_search")?;
     Ok(())
 }
 #[tokio::main]
