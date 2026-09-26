@@ -503,6 +503,24 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   const richToggle=composer.querySelector('.composer__rich-text-btn');
   richToggle.setAttribute('aria-expanded','false');
   richToggle.addEventListener('click',()=>{const opened=composer.classList.toggle('composer--rich-text');richToggle.setAttribute('aria-expanded',String(opened));typingInput.focus();});
+  typingInput.addEventListener('keydown',event=>{
+    if(event.defaultPrevented||!mentionBox.hidden)return;
+    const touchDevice='ontouchstart' in window||navigator.maxTouchPoints>0||navigator.msMaxTouchPoints>0;
+    const modifiedEnter=event.key==='Enter'&&(event.metaKey||event.ctrlKey);
+    const plainEnter=event.key==='Enter'&&!event.shiftKey&&!event.isComposing;
+    if(touchDevice||!(modifiedEnter||(plainEnter&&!composer.classList.contains('composer--rich-text'))))return;
+    event.preventDefault();
+    if(composer.querySelector('[data-composer-target="fields"]').disabled)return;
+    composer.requestSubmit();
+    composer.classList.remove('composer--rich-text');
+    richToggle.setAttribute('aria-expanded','false');
+    typingInput.focus();
+  });
+  document.addEventListener('keydown',event=>{
+    if(event.key!=='ArrowUp'||historyMode||!typingInput.matches(':empty'))return;
+    const mine=messages.querySelectorAll('.message--me');
+    mine[mine.length-1]?.querySelector('.message__edit-btn')?.click();
+  });
   let typingTimer;
   let lastTypingSent=0;
   typingInput.addEventListener('trix-change',()=>{clearTimeout(typingTimer);if(typingInput.editor?.getDocument().toString().trim()){if(Date.now()-lastTypingSent>750){sendTyping('start');lastTypingSent=Date.now();}typingTimer=setTimeout(()=>sendTyping('stop'),2500);}else sendTyping('stop');});
