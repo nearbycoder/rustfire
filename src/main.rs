@@ -9713,21 +9713,32 @@ async fn signed_blob_get(
             ).optional().map_err(db_err)?;
             let (actual_filename, content_type, storage_key, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
             if !uploaded { return Err(StatusCode::NOT_FOUND); }
-            let token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"content_type":content_type,"service_name":"local"})).map_err(db_err)?;
+            let (served_type, inline) = active_storage_serving(&content_type, query.get("disposition").map(String::as_str));
+            let disposition = format!("{}; filename=\"{actual_filename}\"; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, encoded_blob_filename(&actual_filename));
+            let token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"content_type":served_type,"disposition":disposition,"service_name":"local"})).map_err(db_err)?;
             return Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{token}/{}", encoded_blob_filename(&actual_filename)))));
         }
         Err(error) => return Err(error),
     };
-    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-    serve_attachment(
-        &std::path::Path::new(&dir).join(stored),
-        &filename,
-        &content_type,
-        &headers,
-        query.get("disposition").map(String::as_str) != Some("attachment")
-            && (safe_inline_image(&content_type) || safe_inline_video(&content_type)),
-    )
-    .await
+    let (served_type, inline) = active_storage_serving(&content_type, query.get("disposition").map(String::as_str));
+    let disposition = format!("{}; filename=\"{filename}\"; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, encoded_blob_filename(&filename));
+    let disk_token = disk_token(&s.blob_signing_key, "blob_key", json!({
+        "key":stored,"attachment_id":id,"filename":filename,"content_type":served_type,
+        "disposition":disposition,"service_name":"local"
+    })).map_err(db_err)?;
+    Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{disk_token}/{}", encoded_blob_filename(&filename)))))
+}
+fn active_storage_serving<'a>(content_type: &'a str, requested_disposition: Option<&str>) -> (&'a str, bool) {
+    let forced_binary = matches!(content_type,
+        "text/html" | "image/svg+xml" | "application/postscript" | "application/x-shockwave-flash"
+        | "text/xml" | "application/xml" | "application/xhtml+xml" | "application/mathml+xml"
+        | "text/cache-manifest");
+    let allowed_inline = matches!(content_type,
+        "image/webp" | "image/avif" | "image/png" | "image/gif" | "image/jpeg"
+        | "image/tiff" | "image/bmp" | "image/vnd.adobe.photoshop"
+        | "image/vnd.microsoft.icon" | "application/pdf");
+    (if forced_binary { "application/octet-stream" } else { content_type },
+     !forced_binary && allowed_inline && requested_disposition != Some("attachment"))
 }
 async fn signed_blob_proxy(
     State(s): State<Arc<AppState>>,
@@ -9764,36 +9775,7 @@ async fn signed_blob_proxy(
         Err(error) => return Err(error),
     };
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-    let inline = query.get("disposition").map(String::as_str) != Some("attachment")
-        && matches!(
-            content_type.as_str(),
-            "image/webp"
-                | "image/avif"
-                | "image/png"
-                | "image/gif"
-                | "image/jpeg"
-                | "image/tiff"
-                | "image/bmp"
-                | "image/vnd.adobe.photoshop"
-                | "image/vnd.microsoft.icon"
-                | "application/pdf"
-        );
-    let served_type = if matches!(
-        content_type.as_str(),
-        "text/html"
-            | "image/svg+xml"
-            | "application/postscript"
-            | "application/x-shockwave-flash"
-            | "text/xml"
-            | "application/xml"
-            | "application/xhtml+xml"
-            | "application/mathml+xml"
-            | "text/cache-manifest"
-    ) {
-        "application/octet-stream"
-    } else {
-        content_type.as_str()
-    };
+    let (served_type, inline) = active_storage_serving(&content_type, query.get("disposition").map(String::as_str));
     let etag = storage_proxy_etag(&uri)?;
     let last_modified = storage_proxy_last_modified();
     if headers.get(header::RANGE).is_none() && storage_proxy_fresh(&headers, &etag, &last_modified) {
@@ -9809,6 +9791,7 @@ async fn signed_blob_proxy(
         inline,
     )
     .await?;
+    strip_active_storage_stream_headers(&mut response);
     if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
         let disposition = value.to_str().map_err(db_err)?.to_owned();
         response.headers_mut().insert(
@@ -9856,6 +9839,10 @@ fn storage_proxy_cache_headers(response: &mut Response, etag: &str, last_modifie
     response.headers_mut().insert(header::CACHE_CONTROL, "max-age=3155695200, public, immutable".parse().unwrap());
     response.headers_mut().insert(header::LAST_MODIFIED, last_modified.parse().unwrap());
     response.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+}
+fn strip_active_storage_stream_headers(response: &mut Response) {
+    response.headers_mut().remove("x-content-type-options");
+    response.headers_mut().remove("content-security-policy");
 }
 async fn direct_upload_create(
     State(s): State<Arc<AppState>>,
@@ -9918,15 +9905,41 @@ async fn direct_upload_put(
 async fn direct_upload_disk_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((token, filename)): Path<(String, String)>,
+    Path((token, _filename)): Path<(String, String)>,
 ) -> AppResult {
     let data = disk_token_data(&s.blob_signing_key, &token, "blob_key").ok_or(StatusCode::NOT_FOUND)?;
     let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
     let row: Option<(String,String,bool)> = pool(&s)?.query_row("SELECT filename,content_type,uploaded FROM direct_upload_blobs WHERE storage_key=?1",[storage_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_err)?;
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
     if let Some((actual_filename, content_type, uploaded)) = row {
-        if !uploaded || filename != actual_filename { return Err(StatusCode::NOT_FOUND); }
-        return serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,&content_type,&headers,false).await;
+        if !uploaded { return Err(StatusCode::NOT_FOUND); }
+        let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
+        let (served_type, allowed_inline) = active_storage_serving(&content_type, if inline { None } else { Some("attachment") });
+        let mut response = serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,served_type,&headers,inline && allowed_inline).await?;
+        response.headers_mut().remove("content-security-policy");
+        if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
+            let disposition = value.to_str().map_err(db_err)?.to_owned();
+            response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(&actual_filename)).parse().map_err(db_err)?);
+        }
+        return Ok(response);
+    }
+    if let Some(id) = data.get("attachment_id").and_then(Value::as_i64) {
+        let (_, actual_filename, content_type, stored) = attachment_record_unchecked(&s, id)?;
+        if stored != storage_key || data.get("filename").and_then(Value::as_str) != Some(actual_filename.as_str()) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
+        let (served_type, allowed_inline) = active_storage_serving(&content_type, if inline { None } else { Some("attachment") });
+        if data.get("content_type").and_then(Value::as_str) != Some(served_type) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        let mut response = serve_attachment(&std::path::Path::new(&dir).join(stored),&actual_filename,served_type,&headers,inline && allowed_inline).await?;
+        response.headers_mut().remove("content-security-policy");
+        if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
+            let disposition = value.to_str().map_err(db_err)?.to_owned();
+            response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(&actual_filename)).parse().map_err(db_err)?);
+        }
+        return Ok(response);
     }
     let variant_name = storage_key
         .strip_prefix("variants/")
@@ -9936,6 +9949,7 @@ async fn direct_upload_disk_get(
     let content_type = data.get("content_type").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
     let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
     let mut response = serve_attachment(&std::path::Path::new(&dir).join("variants").join(variant_name),actual_filename,content_type,&headers,inline).await?;
+    response.headers_mut().remove("content-security-policy");
     if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
         let disposition = value.to_str().map_err(db_err)?.to_owned();
         response.headers_mut().insert(header::CONTENT_DISPOSITION,format!("{disposition}; filename*=UTF-8''{}",encoded_blob_filename(actual_filename)).parse().map_err(db_err)?);
@@ -10081,6 +10095,7 @@ async fn signed_representation_get(
         let mut stream_headers = headers.clone();
         stream_headers.remove(header::RANGE);
         let mut response = serve_attachment(&output, &variant_filename, response_type, &stream_headers, inline).await?;
+        strip_active_storage_stream_headers(&mut response);
         if let Some(value) = response.headers().get(header::CONTENT_DISPOSITION) {
             let disposition = value.to_str().map_err(db_err)?.to_owned();
             response.headers_mut().insert(
@@ -10637,8 +10652,9 @@ async fn health() -> impl IntoResponse {
 async fn campfire_response_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let asset = path.starts_with("/assets/") || path.starts_with("/static/");
+    let active_storage = path.starts_with("/rails/active_storage/");
     let application_controller = !asset && path != "/up" && path != "/cable"
-        && !path.starts_with("/rails/active_storage/");
+        && !active_storage;
     let format_negotiated = matches!(path,
         "/autocompletable/users" | "/webmanifest" | "/webmanifest.json" |
         "/service-worker" | "/service-worker.js");
@@ -10654,7 +10670,7 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
         };
         response.headers_mut().insert(header::VARY, HeaderValue::from_static(vary));
     }
-    if !asset && (response.status().is_success() || response.status().is_redirection() || response.status() == StatusCode::FORBIDDEN) {
+    if !asset && !active_storage && (response.status().is_success() || response.status().is_redirection() || response.status() == StatusCode::FORBIDDEN) {
         let headers = response.headers_mut();
         headers.insert("referrer-policy", HeaderValue::from_static("strict-origin-when-cross-origin"));
         headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));

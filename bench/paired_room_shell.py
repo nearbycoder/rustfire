@@ -217,6 +217,23 @@ def representation_routes(page, port, cookie, filename, expected):
     }, range_status, range_headers.get("content-range"), attachment_headers.get("content-disposition")
 
 
+def original_blob_routes(page, port, cookie, filename, expected):
+    match = re.search(rb"/rails/active_storage/blobs/redirect/[^'\" ]+/" + re.escape(filename.encode()), page)
+    assert match, ("original blob URL", filename)
+    redirect_path = match.group().decode()
+    proxy_path = redirect_path.replace("/blobs/redirect/", "/blobs/proxy/", 1)
+    redirect_status, redirect_headers, _ = raw_get(port, redirect_path, cookie)
+    disk_path = urllib.parse.urlsplit(redirect_headers.get("location", "")).path
+    assert redirect_status == 302 and disk_path.startswith("/rails/active_storage/disk/"), (filename, redirect_status, disk_path)
+    disk_status, disk_headers, disk_body = raw_get(port, disk_path, cookie)
+    assert (disk_status, disk_body) == (200, expected), (filename, "disk bytes", disk_status, len(disk_body))
+    proxy_status, proxy_headers, proxy_body = raw_get(port, proxy_path, cookie)
+    assert (proxy_status, proxy_body) == (200, expected), (filename, "proxy bytes", proxy_status, len(proxy_body))
+    return redirect_status, disk_status, proxy_status, tuple((key, proxy_headers.get(key)) for key in (
+        "content-type", "content-disposition", "cache-control", "last-modified")), tuple(
+            (key, disk_headers.get(key)) for key in ("content-type", "content-disposition"))
+
+
 def post_message(port, cookie, csrf, body="Room page message check", client_id="room-page-1"):
     payload = urllib.parse.urlencode({
         "message[body]": body,
@@ -452,7 +469,10 @@ def main():
                 compare_message_page(2, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
                 for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
                     post_file_message(port, cookie, csrf, "note.txt", "text/plain", b"file contents", "room-page-file")
-                compare_message_page(3, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                source_file_page, target_file_page = compare_message_page(3, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                source_file_routes = original_blob_routes(source_file_page, camp_port, camp_cookie, "note.txt", b"file contents")
+                target_file_routes = original_blob_routes(target_file_page, rust_port, "session_token=benchmark-session", "note.txt", b"file contents")
+                assert source_file_routes == target_file_routes, ("text blob routes", source_file_routes, target_file_routes)
                 compare_message_page(3, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
                     post_file_message(port, cookie, csrf, "moon.jpg", "image/jpeg", jpeg, "room-page-image")
@@ -460,6 +480,9 @@ def main():
                 source_jpeg = jpeg_representation(source_image_page, camp_port, camp_cookie)
                 target_jpeg = jpeg_representation(target_image_page, rust_port, "session_token=benchmark-session")
                 assert source_jpeg == target_jpeg, (len(source_jpeg), len(target_jpeg))
+                source_image_routes = original_blob_routes(source_image_page, camp_port, camp_cookie, "moon.jpg", jpeg)
+                target_image_routes = original_blob_routes(target_image_page, rust_port, "session_token=benchmark-session", "moon.jpg", jpeg)
+                assert source_image_routes == target_image_routes, ("JPEG blob routes", source_image_routes, target_image_routes)
                 assert jpeg_representation(target_image_page, rust_port, "session_token=benchmark-session", env["SECRET_KEY_BASE"]) == target_jpeg
                 print(f"JPEG representations: {len(source_jpeg)} byte-identical bytes")
                 source_route = representation_routes(source_image_page, camp_port, camp_cookie, "moon.jpg", source_jpeg)
