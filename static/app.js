@@ -680,9 +680,12 @@ if(notificationsControl){
   let frame=notificationsControl.querySelector('turbo-frame[id^="involvement_rooms_"]');
   const roomBell=frame?.querySelector('[data-notifications-target="bell"]');
   const dialog=notificationsControl.querySelector('[data-notifications-target="notAllowedNotice"]');
-  const browserName=/Edg\//.test(navigator.userAgent)?'Edge':/Firefox\//.test(navigator.userAgent)?'Firefox':/Chrome\//.test(navigator.userAgent)?'Chrome':'Safari';
-  const browserLabel=dialog?.querySelector('[data-browser-settings-label]');
-  if(browserLabel)browserLabel.textContent=`Check your ${browserName} settings`;
+  let installPrompt=null;
+  window.addEventListener('beforeinstallprompt',event=>{
+    event.preventDefault();
+    installPrompt=event;
+    dialog?.querySelector('.pwa__instructions')?.classList.add('pwa--can-install');
+  });
   const showHelp=()=>{
     if(dialog instanceof HTMLDialogElement&&!dialog.open){
       dialog.showModal();
@@ -737,6 +740,11 @@ if(notificationsControl){
       else showHelp();
     }catch(error){showHelp()}
     finally{roomBell.disabled=false}
+  });
+  notificationsControl.addEventListener('click',async event=>{
+    if(!event.target.closest('[data-action="pwa-install#promptInstall"]')||!installPrompt)return;
+    await installPrompt.prompt();
+    installPrompt=null;
   });
   notificationsControl.addEventListener('submit',async event=>{
     const form=event.target;

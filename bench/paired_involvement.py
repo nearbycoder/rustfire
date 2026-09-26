@@ -22,6 +22,28 @@ REPOSITORY = pathlib.Path("/tmp/once-campfire-reference")
 RUBY = pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby")
 BUNDLE = pathlib.Path("/tmp/rustfire-baseline/bundle")
 REVISION = "91d294f4a09f9bbe37f9548959bfcb43645678fb"
+HELP_AGENTS = {
+    "Chrome Linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Chrome Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Chrome Android": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Chrome iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6045.109 Mobile/15E148 Safari/604.1",
+    "Firefox Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Firefox Android": "Mozilla/5.0 (Android 14; Mobile; rv:121.0) Gecko/121.0 Firefox/121.0",
+    "Firefox iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/120.0 Mobile/15E148 Safari/605.1.15",
+    "Safari macOS": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Safari iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+    "Edge Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+}
+HELP_ASSETS = (
+    "external/gear-50e77d2b.svg",
+    "external/install-edge-0b7cd918.svg",
+    "external/share-f9d3e998.svg",
+    "external/sliders-3979a007.svg",
+    "external/switch-eec22a2d.svg",
+    "external/web-24ffe636.svg",
+    "lock-7cdf4b3d.svg",
+    "menu-dots-vertical-c247e3cc.svg",
+)
 
 
 class FrameParser(HTMLParser):
@@ -43,11 +65,13 @@ class FrameParser(HTMLParser):
             self.events.append(("text", value))
 
 
-def request(port, method, path, cookie, csrf, frame=None, body=b""):
+def request(port, method, path, cookie, csrf, frame=None, body=b"", agent=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     headers = {"Cookie": cookie, "Accept": "text/html", "X-CSRF-Token": csrf}
     if frame:
         headers["Turbo-Frame"] = frame
+    if agent:
+        headers["User-Agent"] = agent
     if method == "POST":
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     try:
@@ -65,6 +89,28 @@ def frame_events(page, frame_id=None):
     parser = FrameParser()
     parser.feed(match.group())
     return parser.events
+
+
+def help_snapshots(port, cookie, csrf):
+    def normalize(value):
+        if isinstance(value, str):
+            return re.sub(r"http://127\.0\.0\.1:\d+/", "ROOT_URL", value)
+        if isinstance(value, tuple):
+            return tuple(normalize(item) for item in value)
+        return value
+
+    snapshots = {}
+    for name, agent in HELP_AGENTS.items():
+        status, _, page = request(port, "GET", "/rooms/1", cookie, csrf, agent=agent)
+        assert status == 200, (name, status, page[:300])
+        match = re.search(r'<dialog\b[^>]*data-notifications-target=["\']notAllowedNotice["\'][^>]*>.*?</dialog>', page, re.S)
+        assert match, (name, page[:300])
+        dialog = match.group().replace("Campfire", "Rustfire")
+        dialog = re.sub(r"http://127\.0\.0\.1:\d+/", "ROOT_URL", dialog)
+        parser = FrameParser()
+        parser.feed(dialog)
+        snapshots[name] = [normalize(event) for event in parser.events]
+    return snapshots
 
 
 def room_state(database, room_id):
@@ -105,6 +151,8 @@ def workflow(port, cookie, csrf, database):
 def main():
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip()
     assert revision == REVISION, revision
+    for asset in HELP_ASSETS:
+        assert (pathlib.Path(__file__).resolve().parents[1] / "static/assets" / asset).read_bytes() == (REPOSITORY / "public/assets" / asset).read_bytes(), asset
     with tempfile.TemporaryDirectory(prefix="paired-involvement-") as temporary:
         temp = pathlib.Path(temporary)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
@@ -125,6 +173,7 @@ def main():
         try:
             rust = start_server(rust_db, rust_port)
             try:
+                rust_help = help_snapshots(rust_port, "session_token=benchmark-session", "benchmark-csrf")
                 rust_observations = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db)
             finally:
                 stop_server(rust)
@@ -136,6 +185,7 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
+                    camp_help = help_snapshots(camp_port, cookie, csrf)
                     camp_observations = workflow(camp_port, cookie, csrf, camp_db)
                 except Exception:
                     log.flush()
@@ -151,7 +201,11 @@ def main():
     assert rust_observations == camp_observations, next(
         ((rust, camp) for rust, camp in zip(rust_observations, camp_observations) if rust != camp), None
     )
+    for name in HELP_AGENTS:
+        rust, camp = rust_help[name], camp_help[name]
+        assert rust == camp, (name, next(((index, left, right) for index, (left, right) in enumerate(zip(rust, camp)) if left != right), (len(rust), len(camp))))
     print(f"PASS {len(rust_observations)} paired involvement frames, redirects, and persisted transitions")
+    print(f"PASS notification help markup for {len(HELP_AGENTS)} browser and system profiles")
 
 
 if __name__ == "__main__":

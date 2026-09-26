@@ -11,6 +11,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, patch, post},
 };
+mod notification_help;
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
@@ -3696,15 +3697,17 @@ fn room_invitation(
         "<div id='system_welcome' class='message message--formatted txt-align-center center'><div class='message__body center'><div class='message__body-content position-relative'><figure class='account-logo avatar center margin-block-end txt-large'><img alt='Account logo' src='/account/logo?v={logo_version}' width='300' height='300'></figure><div class='flex align-center gap welcome-intro'><div class='system-welcome--translation'>{translate}</div><p><strong>Welcome to Rustfire</strong><br>To invite people to chat, share the join link below.</p></div><div class='flex flex-column align-center gap welcome-invite'><label class='flex flex-column gap full-width' style='--row-gap: 0.5em'><strong id='invite_label' class='invite-label'>Share to invite more people</strong><span class='flex align-center gap input input--actor fill-white'><img aria-hidden='true' class='colorize--black' src='/assets/person-add-1432b76b.svg' width='20' height='20'><input type='text' class='input' id='invite_url' value='{invite}' aria-labelledby='invite_label' readonly></span></label><div class='flex align-center gap welcome-actions'><a class='btn' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{qr}' href='{qr}'><span class='for-screen-reader'>Show join link QR code</span><img aria-hidden='true' class='colorize--black' src='/assets/qr-code-dac3b273.svg' width='20' height='20'></a><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{invite}'><span class='for-screen-reader'>Copy join link</span><img aria-hidden='true' class='colorize--black' src='/assets/copy-paste-4c379063.svg' width='20' height='20'></button><button class='btn' hidden data-controller='web-share' data-action='web-share#share' data-web-share-url-value='{invite}' data-web-share-text-value='Hit this link to join me in Rustfire and start chatting.' data-web-share-title-value='Link to join Rustfire'><span class='for-screen-reader'>Share join link</span><img aria-hidden='true' src='/assets/share-bf28da4f.svg' width='20' height='20'></button>{regenerate}</div></div></div></div></div>"
     )
 }
-fn room_notifications_html(rid: i64, kind: &str, _involvement: &str) -> String {
+fn room_notifications_html(rid: i64, kind: &str, headers: &HeaderMap) -> String {
     let direct = kind == "Rooms::Direct";
+    let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let help = notification_help::render(user_agent, &esc(&public_url(headers, "/")));
     let frame_id = match kind {
         "Rooms::Direct" => format!("involvement_rooms_direct_{rid}"),
         "Rooms::Closed" => format!("involvement_rooms_closed_{rid}"),
         _ => format!("involvement_rooms_open_{rid}"),
     };
     format!(
-        "<span><span class=\"button_to_change_notifying\" data-controller=\"notifications\" data-notifications-subscriptions-url-value=\"/users/me/push_subscriptions\" data-notifications-attention-class=\"btn--pulsing\"><turbo-frame data-controller=\"turbo-frame\" data-action=\"notifications:ready@window-&gt;turbo-frame#load\" data-turbo-frame-url-param=\"/rooms/{rid}/involvement\" id=\"{frame_id}\"><button class=\"btn\" data-action=\"click-&gt;notifications#attemptToSubscribe\" data-notifications-target=\"bell\"><img aria-hidden=\"true\" src=\"/assets/notification-bell-loading-7533ce55.svg\" width=\"20\" height=\"20\" /><img aria-hidden=\"true\" hidden=\"hidden\" src=\"/assets/notification-bell-alert-b467cde7.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Notification settings for this {}</span></button></turbo-frame><dialog data-notifications-target=\"notAllowedNotice\" class=\"dialog pad center center-block border-radius border shadow\" style=\"--inline-space: var(--block-space)\"><div class=\"flex flex-column txt-align-center\"><span class=\"btn btn--faux center txt-x-large\"><img aria-hidden=\"true\" src=\"/assets/notification-bell-alert-b467cde7.svg\" width=\"48\" height=\"48\" /><span class=\"for-screen-reader\">Notifications alert</span></span><section><h1 class=\"txt-large margin-none\">Notifications aren’t allowed</h1><div class=\"txt-align-start margin-block-start\"><details class=\"notifications-help\" data-notifications-target=\"details\"><summary class=\"btn\"><img aria-hidden=\"true\" src=\"/static/icons/web.svg\" width=\"20\" height=\"20\" /><strong data-browser-settings-label>Check your browser settings</strong><img aria-hidden=\"true\" class=\"disclosure\" src=\"/assets/disclosure-26d63471.svg\" width=\"10\" height=\"10\" /></summary><p>Allow notifications for this website in your browser settings, then reload Rustfire.</p></details><details class=\"notifications-help hide-in-browser\" data-notifications-target=\"details\"><summary class=\"btn\"><img aria-hidden=\"true\" src=\"/static/assets/external/install-f762b3be.svg\" width=\"20\" height=\"20\" /><strong>Check your system settings</strong><img aria-hidden=\"true\" class=\"disclosure\" src=\"/assets/disclosure-26d63471.svg\" width=\"10\" height=\"10\" /></summary><p>Allow notifications for Rustfire in your operating system settings.</p></details></div></section><form method=\"dialog\" class=\"flex align-center gap center\"><button class=\"btn dialog__close\" autofocus=\"true\"><span class=\"for-screen-reader\">Close</span><img aria-hidden=\"true\" src=\"/assets/remove-0e7a045d.svg\" width=\"20\" height=\"20\" /></button></form></div></dialog></span></span>",
+        "<span><span class=\"button_to_change_notifying\" data-controller=\"notifications\" data-notifications-subscriptions-url-value=\"/users/me/push_subscriptions\" data-notifications-attention-class=\"btn--pulsing\"><turbo-frame data-controller=\"turbo-frame\" data-action=\"notifications:ready@window-&gt;turbo-frame#load\" data-turbo-frame-url-param=\"/rooms/{rid}/involvement\" id=\"{frame_id}\"><button class=\"btn\" data-action=\"click-&gt;notifications#attemptToSubscribe\" data-notifications-target=\"bell\"><img aria-hidden=\"true\" src=\"/assets/notification-bell-loading-7533ce55.svg\" width=\"20\" height=\"20\" /><img aria-hidden=\"true\" hidden=\"hidden\" src=\"/assets/notification-bell-alert-b467cde7.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Notification settings for this {}</span></button></turbo-frame><dialog data-notifications-target=\"notAllowedNotice\" class=\"dialog pad center center-block border-radius border shadow\" style=\"--inline-space: var(--block-space)\"><div class=\"flex flex-column txt-align-center\"><span class=\"btn btn--faux center txt-x-large\"><img aria-hidden=\"true\" src=\"/assets/notification-bell-alert-b467cde7.svg\" width=\"48\" height=\"48\" /><span class=\"for-screen-reader\">Notifications alert</span></span><section><h1 class=\"txt-large margin-none\">Notifications aren’t allowed</h1><div class=\"txt-align-start margin-block-start\">{help}</div></section><form method=\"dialog\" class=\"flex align-center gap center\"><button class=\"btn dialog__close\" autofocus=\"true\"><span class=\"for-screen-reader\">Close</span><img aria-hidden=\"true\" src=\"/assets/remove-0e7a045d.svg\" width=\"20\" height=\"20\" /></button></form></div></dialog></span></span>",
         if direct { "Ping" } else { "room" },
     )
 }
@@ -3722,13 +3725,6 @@ async fn room_show_with_target(
     };
     let refresh_since = Utc::now().timestamp_millis();
     let db = pool(&s)?;
-    let involvement: String = db
-        .query_row(
-            "SELECT involvement FROM memberships WHERE room_id=?1 AND user_id=?2",
-            params![rid, u.id],
-            |row| row.get(0),
-        )
-        .map_err(db_err)?;
     db.execute(
         "UPDATE memberships SET unread_at=NULL WHERE room_id=?1 AND user_id=?2",
         params![rid, u.id],
@@ -3789,7 +3785,7 @@ async fn room_show_with_target(
     };
     let at_message = target.map(|id| id.to_string()).unwrap_or_default();
     let messages_target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
-    let notifications = room_notifications_html(rid, &room.kind, &involvement);
+    let notifications = room_notifications_html(rid, &room.kind, &headers);
     let mut content = format!(
         "<div class='app-shell'>{}<section class='chat' data-room-id='{}' data-at-message='{at_message}' data-history-mode='{has_newer}' data-refresh-since='{refresh_since}'><div class='chat-head'><a class='room-logo' href='/account' aria-label='Account'><img src='/account/logo' alt=''></a><h1 class='room-pill'>{}</h1><div class='room-header-actions'><a class='icon-btn' href='/rooms/{}/edit' aria-label='Room settings'><img src='/assets/menu-dots-horizontal-f6a5d793.svg' alt=''></a>{notifications}<button class='icon-btn menu-toggle' data-toggle-sidebar aria-label='Open menu'><img src='/static/icons/menu.svg' alt=''></button></div></div><div class='messages' id='{}'>",
         sidebar(&s, &u, Some(rid))?,
