@@ -103,14 +103,14 @@ try{
   const editEvents=[await nextFrame(),await nextFrame()];
   assert(editEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="replace" target="presentation_message_${streamClientId}">`)&&frame.message.includes('signed stream edited')));
   const streamBoost=await fetch(base+`/messages/${streamMessageId}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});
-  assert.equal(streamBoost.status,303);
+  assert.equal(streamBoost.status,302);
   const boostEvents=[await nextFrame(),await nextFrame()];
   const streamBoostId=Number(execFileSync('python',['-c','import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute("select max(id) from boosts").fetchone()[0])',path.join(temp,'test.db')]).toString().trim());
   assert(boostEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream maintain_scroll="true" action="append" target="boosts_message_${streamClientId}">`)&&frame.message.includes(`id='boost_${streamBoostId}'`)&&frame.message.includes("aria-label='Socket boosted 🔥'")&&frame.message.includes("class='txt-small txt-medium'")&&frame.message.includes("data-boost-delete-target='button'")));
   const roomWithBoost=await (await fetch(base+'/rooms/1',{headers:{Cookie:cookie}})).text();
   assert(roomWithBoost.includes(`id='boost_${streamBoostId}'`)&&roomWithBoost.includes("aria-label='Socket boosted 🔥'")&&roomWithBoost.includes("class='txt-small txt-medium'")&&roomWithBoost.includes("data-boost-delete-target='button'"));
   const streamBoostDelete=await fetch(base+`/messages/${streamMessageId}/boosts/${streamBoostId}`,{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf,Accept:'text/vnd.turbo-stream.html'},redirect:'manual'});
-  assert.equal(streamBoostDelete.status,200);
+  assert.equal(streamBoostDelete.status,204);
   const boostDeleteEvents=[await nextFrame(),await nextFrame()];
   assert(boostDeleteEvents.some(frame=>frame.identifier===signedIdentifier&&frame.message===`<turbo-stream action="remove" target="boost_${streamBoostId}"></turbo-stream>`));
   const streamDelete=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'DELETE',headers:{Cookie:cookie,Accept:'text/vnd.turbo-stream.html','X-CSRF-Token':csrf},redirect:'manual'});
@@ -169,12 +169,12 @@ try{
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no room event')),3000))]);if(frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='live test'){delivered=frame;break;}}
   assert(delivered,'live message delivered');
   const created=await post.json();
-  const boost=await fetch(base+`/messages/${created.id}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});assert.equal(boost.status,303);
+  const boost=await fetch(base+`/messages/${created.id}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});assert.equal(boost.status,302);
   let boosted;
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no boost event')),3000))]);if(frame.identifier===identifier&&frame.message?.type==='boost'){boosted=frame;break;}}
   assert(boosted&&boosted.message.room_id===1&&boosted.message.message_id===created.id&&boosted.message.content==='🔥','room boost delivered');
   const boostId=Number(execFileSync('python',['-c','import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute("select max(id) from boosts").fetchone()[0])',path.join(temp,'test.db')]).toString().trim());
-  const removed=await fetch(base+`/messages/${created.id}/boosts/${boostId}`,{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf,Accept:'text/vnd.turbo-stream.html'},redirect:'manual'});assert.equal(removed.status,200);
+  const removed=await fetch(base+`/messages/${created.id}/boosts/${boostId}`,{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf,Accept:'text/vnd.turbo-stream.html'},redirect:'manual'});assert.equal(removed.status,204);
   let deletion;
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no boost removal event')),3000))]);if(frame.identifier===identifier&&frame.message?.type==='boost_deleted'){deletion=frame;break;}}
   assert(deletion&&deletion.message.room_id===1&&deletion.message.id===boostId&&deletion.message.content==='🔥','room boost removal delivered');
@@ -197,7 +197,7 @@ try{
   sendCommand({command:'subscribe',identifier:userListIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
   const privateRoom=await fetch(base+'/rooms/closeds',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams([['room[name]','Private socket room'],['user_ids[]','1'],['user_ids[]','2']]),redirect:'manual'});
-  assert.equal(privateRoom.status,303);
+  assert.equal(privateRoom.status,302);
   const privateRoomId=Number(privateRoom.headers.get('location').match(/\/rooms\/(\d+)/)[1]);
   const createdEvents=[await nextFrame(),await nextFrame()];
   assert(createdEvents.some(event=>event.identifier===roomListIdentifier&&event.message.type==='rooms_changed'));
@@ -211,12 +211,12 @@ try{
   await otherReady;
   const otherClosed=new Promise(resolve=>otherSocket.once('close',resolve));
   const revoke=await fetch(base+`/rooms/closeds/${privateRoomId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams([['room[name]','Private socket room'],['user_ids[]','1']]),redirect:'manual'});
-  assert.equal(revoke.status,303);
+  assert.equal(revoke.status,302);
   const updatedEvents=[await nextFrame(),await nextFrame()];
   assert(updatedEvents.some(event=>event.identifier===roomListIdentifier&&event.message.type==='rooms_changed'));
   assert(updatedEvents.some(event=>event.identifier===userListIdentifier&&event.message.includes(`action="replace" target="list_rooms_closed_${privateRoomId}"`)));
   const deleteRoom=await fetch(base+`/rooms/closeds/${privateRoomId}`,{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf},redirect:'manual'});
-  assert.equal(deleteRoom.status,303);
+  assert.equal(deleteRoom.status,302);
   const deletedEvents=[await nextFrame(),await nextFrame()];
   assert(deletedEvents.some(event=>event.identifier===roomListIdentifier&&event.message.type==='rooms_changed'));
   assert(deletedEvents.some(event=>event.identifier===globalListIdentifier&&event.message===`<turbo-stream action="remove" target="list_rooms_closed_${privateRoomId}"></turbo-stream>`));

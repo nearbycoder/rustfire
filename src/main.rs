@@ -3482,6 +3482,28 @@ fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
         esc(&m.client_message_id)
     )
 }
+fn boost_area_html(s: &AppState, m: &ChatMessage) -> String {
+    let client_id = esc(&m.client_message_id);
+    let boosts = m
+        .boosts
+        .iter()
+        .map(|boost| {
+            boost_html(
+                s,
+                boost.id,
+                m.id,
+                boost.booster_id,
+                &boost.booster_name,
+                &boost.booster_updated_at,
+                &boost.content,
+            )
+        })
+        .collect::<String>();
+    format!(
+        "<turbo-frame id='boosting_message_{client_id}'><div class='boosts flex flex-wrap align-center gap full-width' style='--column-gap: 0.4ch; --row-gap: 0' data-controller='turbo-streaming' data-action='turbo:submit-start-&gt;turbo-streaming#unsubscribe'><div class='flex-inline flex-wrap gap' id='boosts_message_{client_id}' data-turbo-streaming-target='container'>{boosts}</div><turbo-frame id='new_boost_message_{client_id}'><div class='flex-inline message__boost-inline' data-controller='soft-keyboard'><a class='boost__action txt-small btn' href='/messages/{}/boosts/new' action='soft-keyboard#open'><img aria-hidden='true' src='/assets/boost-4a7bab66.svg' width='20' height='20'><span class='for-screen-reader'>Add a boost</span></a></div></turbo-frame></div></turbo-frame>",
+        m.id
+    )
+}
 fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMap>) -> String {
     let fallback_headers = HeaderMap::new();
     let request_headers = request_headers.unwrap_or(&fallback_headers);
@@ -3522,21 +3544,6 @@ fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMa
         message_id = m.id,
         room_id = m.room_id
     );
-    let boosts = m
-        .boosts
-        .iter()
-        .map(|boost| {
-            boost_html(
-                s,
-                boost.id,
-                m.id,
-                boost.booster_id,
-                &boost.booster_name,
-                &boost.booster_updated_at,
-                &boost.content,
-            )
-        })
-        .collect::<String>();
     let creator_name = esc(&m.creator_name);
     let datetime = esc(&datetime);
     let message_classes = if all_emoji(&m.body) {
@@ -3544,10 +3551,7 @@ fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMa
     } else {
         "message "
     };
-    let boost_area = format!(
-        "<turbo-frame id='boosting_message_{client_id}'><div class='boosts flex flex-wrap align-center gap full-width' style='--column-gap: 0.4ch; --row-gap: 0' data-controller='turbo-streaming' data-action='turbo:submit-start-&gt;turbo-streaming#unsubscribe'><div class='flex-inline flex-wrap gap' id='boosts_message_{client_id}' data-turbo-streaming-target='container'>{boosts}</div><turbo-frame id='new_boost_message_{client_id}'><div class='flex-inline message__boost-inline' data-controller='soft-keyboard'><a class='boost__action txt-small btn' href='/messages/{}/boosts/new' action='soft-keyboard#open'><img aria-hidden='true' src='/assets/boost-4a7bab66.svg' width='20' height='20'><span class='for-screen-reader'>Add a boost</span></a></div></turbo-frame></div></turbo-frame>",
-        m.id
-    );
+    let boost_area = boost_area_html(s, m);
     let metadata = format!(
         "<div class='message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-time-target='time'></time></a><span class='message__room'><a href='/rooms/{room_id}/@{message_id}' target='_top' data-reply-target='link'>{room_name}</a></span></h3><div class='message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
         room_id = m.room_id,
@@ -8933,7 +8937,7 @@ async fn boost_create(
             json!({"type":"boost","room_id":rid,"message_id":mid,"client_message_id":client_message_id,"id":bid,"content":content,"user_id":u.id,"boost_html":boost_html})
                 .to_string(),
     });
-    Ok(Redirect::to(&format!("/messages/{mid}/boosts")).into_response())
+    Ok(found_redirect(&format!("/messages/{mid}/boosts")))
 }
 async fn boosts_index(
     State(s): State<Arc<AppState>>,
@@ -8950,41 +8954,9 @@ async fn boosts_index(
         .map_err(db_err)?;
     let rid = rid.ok_or(StatusCode::NOT_FOUND)?;
     room_for(&s, u.id, rid)?;
-    let mut query=db.prepare("SELECT b.id,b.content,b.booster_id,u.name FROM boosts b JOIN users u ON u.id=b.booster_id WHERE b.message_id=?1 ORDER BY b.id").map_err(db_err)?;
-    let boosts = query
-        .query_map([mid], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(db_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    let mut list = String::new();
-    for (id, content, booster, name) in boosts {
-        let remove = if booster == u.id {
-            format!(
-                "<form method='post' action='/messages/{mid}/boosts/{id}/delete'><button type='submit' class='danger'>Remove</button></form>"
-            )
-        } else {
-            String::new()
-        };
-        list.push_str(&format!(
-            "<li id='boost-{id}'>{} <span>{}</span>{remove}</li>",
-            esc(&content),
-            esc(&name)
-        ));
-    }
-    Ok(render(
-        "Boosts",
-        &format!(
-            "<section class='form-card'><h1>Boosts</h1><ul>{list}</ul><a class='button' href='/messages/{mid}/boosts/new'>Add a boost</a> <a href='/rooms/{rid}/@{mid}'>Back to message</a></section>"
-        ),
-        Some(&u),
-    ))
+    drop(db);
+    let message = message_by_id(&s, rid, mid)?;
+    Ok(render("Boosts", &boost_area_html(&s, &message), Some(&u)))
 }
 async fn boost_new(
     State(s): State<Arc<AppState>>,
@@ -9004,34 +8976,30 @@ async fn boost_new(
     let (rid, client_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     room_for(&s, u.id, rid)?;
     let frame_id = format!("new_boost_message_{client_id}");
-    if headers
+    let frame_request = headers
         .get("Turbo-Frame")
         .and_then(|value| value.to_str().ok())
-        == Some(frame_id.as_str())
-    {
-        let avatar_key = s
-            .imported_avatar_signing_key
-            .as_deref()
-            .unwrap_or(&s.avatar_signing_key);
-        let avatar = avatar_path(avatar_key, u.id, &u.updated_at)
-            .unwrap_or_else(|_| format!("/users/{}/avatar", u.id));
-        let frame_id_html = esc(&frame_id);
-        let client_id_html = esc(&client_id);
-        return Ok(Html(format!(
-            "<turbo-frame id='{frame_id_html}'><div class='boost flex-inline position-relative max-width fill-white'><form class='custom-boost-form boost__form flex align-center gap expanded' method='post' action='/messages/{mid}/boosts' data-turbo-frame='boosting_message_{client_id_html}'><label class='boost__form-label flex gap' role='button' tabindex='0' aria-label='Add a boost'><figure class='avatar boost__avatar flex-item-no-shrink'><a title='{user_name}' class='btn avatar' href='/users/{user_id}'><img aria-hidden='true' src='{avatar}' width='22' height='22'></a><span class='for-screen-reader'>{user_name}</span></figure><input name='boost[content]' maxlength='16' required pattern='.*\\S.*' autocomplete='off' autocorrect='off' aria-label='Boost text' autofocus></label><button class='btn btn--reversed' type='submit' aria-label='Submit boost'>✓</button><a class='btn btn--negative' href='/messages/{mid}/boosts' data-cancel-custom-boost aria-label='Cancel boost'>−</a></form></div></turbo-frame>",
-            user_name = esc(&u.name),
-            user_id = u.id,
-            avatar = esc(&avatar),
-        ))
-        .into_response());
+        == Some(frame_id.as_str());
+    let avatar_key = s
+        .imported_avatar_signing_key
+        .as_deref()
+        .unwrap_or(&s.avatar_signing_key);
+    let avatar = avatar_path(avatar_key, u.id, &u.updated_at)
+        .unwrap_or_else(|_| format!("/users/{}/avatar", u.id));
+    let frame_id_html = esc(&frame_id);
+    let client_id_html = esc(&client_id);
+    let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
+    let frame = format!(
+            "<turbo-frame id='{frame_id_html}'><div class='boost flex-inline postion--relative max-width fill-white' style='--column-gap: var(--inline-space-half)'><form class='boost__form flex align-center gap expanded' data-controller='form scroll-into-view' data-turbo-frame='boosting_message_{client_id_html}' data-action='keydown.esc-&gt;form#cancel' action='/messages/{mid}/boosts' accept-charset='UTF-8' method='post'><input type='hidden' name='authenticity_token' value='{csrf}'><label class='boost__form-label flex gap' style='--column-gap: 0.7ch;' role='button' tabindex='0' aria-label='Add a boost'><figure class='avatar boost__avatar flex-item-no-shrink'><a title='{user_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{user_id}'><img aria-hidden='true' src='{avatar}' width='48' height='48'></a><span class='for-screen-reader'>{user_name}</span></figure><input type='text' name='boost[content]' autofocus='autofocus' autocomplete='off' autocorrect='off' maxlength='16' size='16' required='required' pattern='\\S+.*' data-boost-form-target='input' class='input input--boost txt-small'></label><button name='button' class='btn btn--reversed' type='submit'><img aria-hidden='true' src='/assets/check-7897ff7e.svg'><span class='for-screen-reader'>Submit</span></button><a data-turbo-frame='boosts_message_{client_id_html}' data-form-target='cancel' class='btn btn--negative' href='/messages/{mid}/boosts'><img aria-hidden='true' src='/assets/minus-b31a1093.svg'><span class='for-screen-reader'>Cancel</span></a></form></div></turbo-frame>",
+        user_name = esc(&u.name),
+        user_id = u.id,
+        avatar = esc(&avatar),
+    );
+    if frame_request {
+        Ok(Html(frame).into_response())
+    } else {
+        Ok(render("Add a boost", &frame, Some(&u)))
     }
-    Ok(render(
-        "Add a boost",
-        &format!(
-            "<section class='form-card'><h1>Add a boost</h1><form method='post' action='/messages/{mid}/boosts'><label>Boost<input name='boost[content]' maxlength='16' required autofocus></label><button class='button'>Save</button></form><a href='/messages/{mid}/boosts'>Cancel</a></section>"
-        ),
-        Some(&u),
-    ))
 }
 async fn boost_delete(
     State(s): State<Arc<AppState>>,
@@ -9061,19 +9029,7 @@ async fn boost_delete(
         .map_err(db_err)?;
     touch_message(&db, mid, rid)?;
     s.events.send(Event{room_id:rid,payload:json!({"type":"boost_deleted","room_id":rid,"message_id":mid,"id":bid,"content":content}).to_string()});
-    if headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .contains("turbo-stream")
-    {
-        Ok(Html(format!(
-            "<turbo-stream action='remove' target='boost_{bid}'></turbo-stream>"
-        ))
-        .into_response())
-    } else {
-        Ok(Redirect::to(&format!("/messages/{mid}/boosts")).into_response())
-    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 async fn bot_boost_create(
     State(s): State<Arc<AppState>>,

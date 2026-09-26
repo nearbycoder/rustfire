@@ -126,7 +126,7 @@ def main():
             assert f"data-copy-to-clipboard-content-value='{base}/rooms/1/@{message['id']}'" in page
             assert "custom-boost-form" not in page
             code, _, boost_frame = request(admin, base, f"/messages/{message['id']}/boosts/new", headers={"Turbo-Frame": "new_boost_message_test-1"})
-            assert code == 200 and "<turbo-frame id='new_boost_message_test-1'>" in boost_frame and "class='custom-boost-form boost__form" in boost_frame
+            assert code == 200 and "<turbo-frame id='new_boost_message_test-1'>" in boost_frame and "class='boost__form flex align-center gap expanded'" in boost_frame
             browser_visitor = client()
             code, login_url, _ = request(browser_visitor, base, f"/rooms/1/@{message['id']}", headers={"Accept": "text/html"})
             assert code == 200 and login_url.endswith("/session/new")
@@ -144,11 +144,11 @@ def main():
             assert "Add a boost" in request(admin,base,f"/messages/{message['id']}/boosts/new")[2]
             code,_,page=request(admin,base,f"/messages/{message['id']}/boosts",{"boost[content]":"🔥"})
             assert code==200 and "🔥" in page
-            custom_id=int(re.search(r"<li id='boost-(\d+)'>🔥",page).group(1))
+            custom_id=max(int(value) for value in re.findall(r"<div id='boost_(\d+)'",page))
             code,_,page=request(admin,base,f"/messages/{message['id']}/boosts",{"boost[content]":"🔥"})
-            duplicate_id=max(int(value) for value in re.findall(r"<li id='boost-(\d+)'>🔥",page))
+            duplicate_id=max(int(value) for value in re.findall(r"<div id='boost_(\d+)'",page))
             assert duplicate_id>custom_id
-            assert request(admin,base,f"/messages/{message['id']}/boosts/{custom_id}/delete",{},method="POST")[0]==200
+            assert request(admin,base,f"/messages/{message['id']}/boosts/{custom_id}/delete",{},method="POST")[0]==204
             code,_,room_page=request(admin,base,"/rooms/1")
             assert code==200 and f"id='boost_{custom_id}'" not in room_page and f"id='boost_{duplicate_id}'" in room_page
             boundary = "test-boundary"
