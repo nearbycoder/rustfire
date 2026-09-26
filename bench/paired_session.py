@@ -13,6 +13,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 from paired_join import browser
+from paired_room_shell import HeadMeta
 from paired_turbo_fanout import MessageTagSequence
 
 
@@ -52,6 +53,13 @@ def form_shape(page):
     return parser.tags, parser.attribute_keys
 
 
+def icon_links(page):
+    parser = HeadMeta()
+    parser.feed(page)
+    assert set(parser.links) == {"icon", "apple-touch-icon"}, parser.links
+    return parser.links
+
+
 def session_count(database):
     with sqlite3.connect(database) as db:
         return db.execute("SELECT count(*) FROM sessions WHERE user_id=1").fetchone()[0]
@@ -66,6 +74,7 @@ def check(port, database):
     assert "name='authenticity_token'" in page or 'name="authenticity_token"' in page
     assert "user[email_address]" not in page and 'name="email_address"' in page
     original_shape = form_shape(page)
+    original_icons = icon_links(page)
 
     status, _, rejected = request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "wrong-password"}, token(page))
     assert status == 401 and "shake" in rejected and "Too many requests or unauthorized." in rejected
@@ -84,7 +93,7 @@ def check(port, database):
     status, _, sign_in_page = request(opener, port, "/session/new")
     assert status == 200
     assert request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "benchmark-password"}, token(sign_in_page))[:2] == (302, "/rooms/1")
-    return original_shape
+    return original_shape, original_icons
 
 
 def main():
@@ -99,9 +108,10 @@ def main():
         camp_env["WEB_CONCURRENCY"] = "1"
         with sqlite3.connect(camp_db) as db:
             db.execute("UPDATE accounts SET name='Benchmark' WHERE id=1")
+            account_updated_at = db.execute("SELECT updated_at FROM accounts WHERE id=1").fetchone()[0]
             digest = db.execute("SELECT password_digest FROM users WHERE id=1").fetchone()[0]
         with sqlite3.connect(rust_db) as db:
-            db.execute("UPDATE accounts SET name='Benchmark' WHERE id=1")
+            db.execute("UPDATE accounts SET name='Benchmark',updated_at=? WHERE id=1", [account_updated_at])
             db.execute("UPDATE users SET email_address='benchmark@example.invalid',password_digest=? WHERE id=1", [digest])
         redis, redis_log = start_redis(temp, redis_port)
         try:
@@ -122,9 +132,10 @@ def main():
                     raise
                 finally:
                     stop_server(camp)
-            for rust_part, camp_part in zip(rust_shape, camp_shape):
+            for rust_part, camp_part in zip(rust_shape[0], camp_shape[0]):
                 mismatches = [(i, left, right) for i, (left, right) in enumerate(zip(rust_part, camp_part)) if left != right]
                 assert not mismatches and len(rust_part) == len(camp_part), (len(rust_part), len(camp_part), mismatches[:12])
+            assert rust_shape[1] == camp_shape[1], (rust_shape[1], camp_shape[1])
         finally:
             redis.terminate()
             redis.wait(timeout=10)

@@ -237,6 +237,8 @@ struct User {
     updated_at: String,
     #[serde(skip_serializing)]
     csrf_token: Option<String>,
+    #[serde(skip_serializing)]
+    account_updated_at: String,
 }
 #[derive(Clone, Serialize)]
 struct Room {
@@ -1734,7 +1736,7 @@ fn safe_return_path(encoded: &str) -> Option<String> {
 fn user(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
     let token = session_token(state, headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let db = pool(state)?;
-    db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
+    db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at,a.updated_at FROM users u JOIN sessions s ON s.user_id=u.id JOIN accounts a ON a.id=1 WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)?,account_updated_at:r.get(7)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
 fn generate_bot_token() -> Result<String, StatusCode> {
     const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -1754,11 +1756,11 @@ fn bot_user(state: &AppState, key: &str) -> Result<User, StatusCode> {
     let (id, token) = key.split_once('-').ok_or(StatusCode::UNAUTHORIZED)?;
     let id: i64 = id.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
     let db = pool(state)?;
-    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND bot_token=?2 AND role=2 AND status=0", params![id,token], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
+    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND bot_token=?2 AND role=2 AND status=0", params![id,token], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None,account_updated_at:String::new()})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
 fn webhook_bot_user(state: &AppState, id: i64) -> Result<User, StatusCode> {
     let db = pool(state)?;
-    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND role=2", [id], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)
+    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND role=2", [id], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None,account_updated_at:String::new()})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)
 }
 fn bot_api_actor(state: &AppState, headers: &HeaderMap, key: &str) -> Result<User, StatusCode> {
     match user(state, headers) {
@@ -1859,12 +1861,12 @@ fn render(title: &str, body: &str, current: Option<&User>) -> Response {
         current.and_then(|u| u.csrf_token.as_deref()).unwrap_or(""),
     )
 }
-fn render_unauth(title: &str, body: &str) -> Response {
-    render_unauth_with_nav(title, body, "")
+fn render_unauth(title: &str, body: &str, logo_version: Option<&str>) -> Response {
+    render_unauth_with_nav(title, body, "", logo_version)
 }
-fn render_unauth_with_nav(title: &str, body: &str, nav: &str) -> Response {
+fn render_unauth_with_nav(title: &str, body: &str, nav: &str, logo_version: Option<&str>) -> Response {
     let token = Uuid::new_v4().to_string();
-    let mut response = render_source_page(title, body, nav, None, &token);
+    let mut response = render_source_page_sections_with_logo(title, body, nav, "", "", "", "", "", None, &token, logo_version);
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
@@ -1883,6 +1885,10 @@ fn render_source_page_with_footer(title: &str, body: &str, nav: &str, footer: &s
     render_source_page_sections(title, body, nav, footer, "", "", "", "", current, token)
 }
 fn render_source_page_sections(title: &str, body: &str, nav: &str, footer: &str, sidebar: &str, body_class_extra: &str, body_class_suffix: &str, head_extra: &str, current: Option<&User>, token: &str) -> Response {
+    let logo_version = current.map(|user| user.account_updated_at.chars().filter(char::is_ascii_digit).take(14).collect::<String>());
+    render_source_page_sections_with_logo(title, body, nav, footer, sidebar, body_class_extra, body_class_suffix, head_extra, current, token, logo_version.as_deref())
+}
+fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, footer: &str, sidebar: &str, body_class_extra: &str, body_class_suffix: &str, head_extra: &str, current: Option<&User>, token: &str, logo_version: Option<&str>) -> Response {
     const CAMPFIRE_STYLES: &[&str] = &[
         "_reset-9c3efd7b.css", "actiontext-2aab36c6.css", "animation-bcdb4bab.css",
         "autocomplete-cdf3d8bd.css", "avatars-279376ab.css", "base-637a0ec8.css",
@@ -1905,8 +1911,9 @@ fn render_source_page_sections(title: &str, body: &str, nav: &str, footer: &str,
         format!("{body_class_extra} {body_class_suffix}").trim().to_string()
     };
     let current_user_meta = current.map(|user| format!("<meta name=\"current-user-id\" content=\"{}\"><meta name=\"current-user-name\" content=\"{}\">", user.id, esc(&user.name))).unwrap_or_default();
+    let logo_url = logo_version.map_or_else(|| "/account/logo".to_string(), |version| format!("/account/logo?v={version}"));
     let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="/account/logo" type="image/png"><link rel="apple-touch-icon" href="/account/logo">{styles}{custom_styles}<script defer src="/static/app.js"></script>{head_extra}</head>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}<script defer src="/static/app.js"></script>{head_extra}</head>
 <body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav><main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
         title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
     );
@@ -2777,13 +2784,19 @@ fn transfer_link(state: &AppState, uid: i64) -> Result<String, StatusCode> {
     let token = transfer_token(key, uid, Utc::now() + Duration::hours(4)).map_err(db_err)?;
     Ok(format!("/session/transfers/{token}"))
 }
-async fn transfer_show(Path(token): Path<String>) -> AppResult {
+async fn transfer_show(State(s): State<Arc<AppState>>, Path(token): Path<String>) -> AppResult {
+    let updated_at: Option<String> = pool(&s)?
+        .query_row("SELECT updated_at FROM accounts LIMIT 1", [], |row| row.get(0))
+        .optional()
+        .map_err(db_err)?;
+    let logo_version = updated_at.map(|value| value.chars().filter(char::is_ascii_digit).take(14).collect::<String>());
     Ok(render_unauth(
         "Sign in on this device",
         &format!(
             "<form data-controller='auto-submit' method='post' action='/session/transfers/{}'><input type='hidden' name='_method' value='put'></form>",
             esc(&token)
         ),
+        logo_version.as_deref(),
     ))
 }
 async fn transfer_update(
@@ -2981,6 +2994,7 @@ async fn first_run_get(State(s): State<Arc<AppState>>) -> AppResult {
     Ok(render_unauth(
         "Set up Rustfire",
         &body,
+        None,
     ))
 }
 async fn first_run_post(
@@ -3081,7 +3095,7 @@ fn login_page(s: &AppState, email_address: &str, rejection: Option<StatusCode>) 
         account_name = esc(&account_name),
         email_address = esc(email_address),
     );
-    let mut response = render_unauth("Sign in", &body);
+    let mut response = render_unauth("Sign in", &body, Some(&logo_version));
     if let Some(status) = rejection {
         *response.status_mut() = status;
     }
@@ -7497,6 +7511,7 @@ async fn join_get(
         "Sign up",
         &body,
         "<div class=\"flex-item-justify-end\"><a href=\"/session/new\" class=\"btn flex-item-justify-end\"><img aria-hidden=\"true\" src=\"/assets/login-keys-df926967.svg\"><span class=\"for-screen-reader\">Sign in</span></a></div>",
+        Some(&logo_version),
     ))
 }
 async fn join_post(

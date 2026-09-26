@@ -857,6 +857,17 @@ The full room with those six messages also matched the pinned source after the s
 
 These short bursts show about 3.2–5.0× more checked room reads/s for Rustfire on this mixed-media fixture. At a provisional 250 ms p95 target, Rustfire passed at 256 clients in both orders and exceeded it at 512; Campfire exceeded it at 256 and 512. The 128-client Campfire result straddled that target across orders. The client shared the server host, timed bodies were checked for status, type, and message count rather than parsed equality, media bytes were fetched before load rather than with each room read, and neither app was driven to a sustained failure limit. This supports a scoped speed and sampled-concurrency advantage, not whole-app speed or maximum-scale parity.
 
+After matching Campfire's account-versioned browser icon links in authenticated and public page heads, the same paired six-message fixture and checked reader ran again for five seconds per app at 32 and 256 clients in both orders. The page probe first compared the icon links and existing parsed sections, and every timed read passed status, content-type, and six-message checks with zero errors:
+
+| Clients | First server | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| ---: | --- | ---: | ---: |
+| 32 | Campfire | 3,552.2 / 11.03 ms | 949.8 / 75.52 ms |
+| 32 | Rustfire | 3,687.0 / 10.75 ms | 870.5 / 77.91 ms |
+| 256 | Campfire | 3,575.4 / 120.99 ms | 853.0 / 403.35 ms |
+| 256 | Rustfire | 3,547.7 / 124.17 ms | 801.7 / 429.62 ms |
+
+Rustfire retained a **3.74–4.43×** checked read-throughput advantage in these samples. This validates the sampled workload after the account lookup change; it does not establish a sustained capacity limit or whole-app parity.
+
 The checked read mode used the original room after one message and logo upload, 22 Campfire Puma workers, one Rustfire process, and the Go keep-alive client. Every timed response had HTTP 200, HTML content type, and one message root; no errors occurred. Five-second runs at 32 clients and ten-second runs at 128 and 256 clients gave:
 
 | Clients | Rustfire first | Rustfire reads/s / p95 | Campfire reads/s / p95 |

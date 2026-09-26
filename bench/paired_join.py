@@ -13,6 +13,7 @@ import urllib.request
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_room_shell import HeadMeta
 from paired_turbo_fanout import MessageTagSequence
 
 
@@ -65,6 +66,13 @@ def navigation_shape(page):
     return parser.tags, parser.attribute_keys, parser.text
 
 
+def icon_links(page):
+    parser = HeadMeta()
+    parser.feed(page)
+    assert set(parser.links) == {"icon", "apple-touch-icon"}, parser.links
+    return parser.links
+
+
 def check(port, database, signed_cookie):
     opener = browser()
     status, _, page, _ = fetch(opener, port, "/join/benchmark")
@@ -75,6 +83,7 @@ def check(port, database, signed_cookie):
     assert re.search(r'name=[\'\"]authenticity_token[\'\"] value=[\'\"][^\'\"]+', page)
     assert "Benchmark" in page and "Sign up" in page
     navigation = navigation_shape(page)
+    icons = icon_links(page)
     assert fetch(opener, port, "/join/wrong")[0] == 404
     assert fetch(browser(), port, "/join/benchmark", cookie=signed_cookie)[0:2] == (302, "/")
     status, _, page, _ = fetch(opener, port, "/join/benchmark")
@@ -100,7 +109,7 @@ def check(port, database, signed_cookie):
         memberships = db.execute("SELECT room_id FROM memberships WHERE user_id=? ORDER BY room_id", [uid]).fetchall()
         open_rooms = db.execute("SELECT id FROM rooms WHERE type='Rooms::Open' ORDER BY id").fetchall()
     assert (name, email, memberships) == ("New Member", "new-member@example.invalid", open_rooms)
-    return (status, path, len(memberships)), navigation
+    return (status, path, len(memberships)), navigation, icons
 
 
 def main():
@@ -116,6 +125,9 @@ def main():
             db.execute("UPDATE users SET email_address='benchmark@example.invalid' WHERE id=1")
         with sqlite3.connect(source_db) as db:
             db.execute("UPDATE accounts SET name='Benchmark',join_code='benchmark' WHERE id=1")
+            account_updated_at = db.execute("SELECT updated_at FROM accounts WHERE id=1").fetchone()[0]
+        with sqlite3.connect(rust_db) as db:
+            db.execute("UPDATE accounts SET updated_at=? WHERE id=1", [account_updated_at])
         redis, redis_log = start_redis(temp, redis_port)
         try:
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": source_env["SECRET_KEY_BASE"]})

@@ -113,6 +113,7 @@ class HeadMeta(HTMLParser):
         super().__init__()
         self.in_head = False
         self.values = {}
+        self.links = {}
 
     def handle_starttag(self, tag, attrs):
         if tag == "head":
@@ -121,6 +122,10 @@ class HeadMeta(HTMLParser):
             values = dict(attrs)
             if "name" in values:
                 self.values[values["name"]] = values.get("content")
+        elif self.in_head and tag == "link":
+            values = dict(attrs)
+            if values.get("rel") in {"icon", "apple-touch-icon"}:
+                self.links[values["rel"]] = values.get("href")
 
     def handle_endtag(self, tag):
         if tag == "head":
@@ -132,11 +137,12 @@ def assert_head_runtime_metadata(source, target):
     for page in (source, target):
         parser = HeadMeta()
         parser.feed(page.decode())
-        pages.append(parser.values)
+        pages.append(parser)
     original, rustfire = pages
     for name in ("csrf-param", "action-cable-url", "turbo-prefetch", "current-user-id", "current-user-name"):
-        assert name in original and original[name] == rustfire.get(name), (name, original.get(name), rustfire.get(name))
-    assert original.get("csrf-token") and rustfire.get("csrf-token"), "Missing CSRF token metadata"
+        assert name in original.values and original.values[name] == rustfire.values.get(name), (name, original.values.get(name), rustfire.values.get(name))
+    assert original.values.get("csrf-token") and rustfire.values.get("csrf-token"), "Missing CSRF token metadata"
+    assert original.links == rustfire.links and set(original.links) == {"icon", "apple-touch-icon"}, (original.links, rustfire.links)
 
 
 def message_template(page):
