@@ -108,6 +108,37 @@ class Markup(HTMLParser):
             self.tokens.append(("text", " ".join(data.split()).replace("Campfire", "Rustfire")))
 
 
+class HeadMeta(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_head = False
+        self.values = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "head":
+            self.in_head = True
+        elif self.in_head and tag == "meta":
+            values = dict(attrs)
+            if "name" in values:
+                self.values[values["name"]] = values.get("content")
+
+    def handle_endtag(self, tag):
+        if tag == "head":
+            self.in_head = False
+
+
+def assert_head_runtime_metadata(source, target):
+    pages = []
+    for page in (source, target):
+        parser = HeadMeta()
+        parser.feed(page.decode())
+        pages.append(parser.values)
+    original, rustfire = pages
+    for name in ("csrf-param", "action-cable-url", "turbo-prefetch", "current-user-id", "current-user-name"):
+        assert name in original and original[name] == rustfire.get(name), (name, original.get(name), rustfire.get(name))
+    assert original.get("csrf-token") and rustfire.get("csrf-token"), "Missing CSRF token metadata"
+
+
 def message_template(page):
     match = re.search(rb'<script type="text/template" data-messages-target="template">(.*?)</script>', page, re.S)
     assert match, "Missing optimistic-message template"
@@ -217,6 +248,7 @@ def assert_equal(label, expected, actual):
 def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sample_dir, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False):
     source = get_room(camp_port, camp_cookie, path)
     target = get_room(rust_port, rust_cookie, path)
+    assert_head_runtime_metadata(source, target)
     if sample_dir:
         sample_dir.mkdir(parents=True, exist_ok=True)
         stem = label.replace(" ", "-")
