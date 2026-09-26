@@ -3987,6 +3987,7 @@ struct RefreshQuery {
 async fn room_refresh(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(rid): Path<i64>,
     Query(q): Query<RefreshQuery>,
 ) -> AppResult {
@@ -3997,6 +3998,15 @@ async fn room_refresh(
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    if !uri.path().ends_with(".turbo_stream")
+        && !accept.contains("application/json")
+        && !accept.contains("text/vnd.turbo-stream.html")
+        && !accept.contains("*/*")
+    {
+        let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
+        response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+        return Ok(response);
+    }
     if let Some(since) = q.since {
         let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
             .ok_or(StatusCode::BAD_REQUEST)?
@@ -4004,7 +4014,7 @@ async fn room_refresh(
             .ok_or(StatusCode::BAD_REQUEST)?;
         let new_messages = messages_since(&s, rid, cutoff_ns, false)?;
         let updated_messages = messages_since(&s, rid, cutoff_ns, true)?;
-        if accept.contains("json") {
+        if accept.contains("json") && !uri.path().ends_with(".turbo_stream") {
             let entries = |messages: &[ChatMessage]| {
                 messages
                     .iter()
@@ -4031,6 +4041,9 @@ async fn room_refresh(
         for message in &updated_messages {
             html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(&s, message, Some(&headers))));
         }
+        if html.is_empty() {
+            html.push('\n');
+        }
         return Ok((
             [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")],
             csrf_forms(&html, u.csrf_token.as_deref().unwrap_or("")),
@@ -4042,7 +4055,7 @@ async fn room_refresh(
     let has_more = messages.len() > 100;
     messages.truncate(100);
     let next_after = messages.last().map(|m| m.id).unwrap_or(after);
-    if accept.contains("json") {
+    if accept.contains("json") && !uri.path().ends_with(".turbo_stream") {
         let entries: Vec<Value> = messages
             .iter()
             .map(|m| json!({"id":m.id,"html":message_html(&s, m, Some(&headers))}))
@@ -4053,7 +4066,7 @@ async fn room_refresh(
         )
     } else {
         let html = if messages.is_empty() {
-            String::new()
+            "\n".to_string()
         } else {
             let entries: String = messages
                 .iter()
@@ -6365,9 +6378,29 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
 async fn account_users_index(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !uri.path().ends_with(".turbo_stream")
+        && !accept.contains("text/vnd.turbo-stream.html")
+        && !accept.contains("*/*")
+    {
+        let mut response = if accept.contains("application/json") {
+            Json(json!({"status":406,"error":"Not Acceptable"})).into_response()
+        } else {
+            StatusCode::NOT_ACCEPTABLE.into_response()
+        };
+        *response.status_mut() = StatusCode::NOT_ACCEPTABLE;
+        if !accept.contains("application/json") {
+            response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+        }
+        return Ok(response);
+    }
     let page = query
         .get("page")
         .and_then(|value| value.parse::<i64>().ok())
@@ -10009,6 +10042,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(room_show).post(room_post_override).delete(room_delete),
         )
         .route("/rooms/{id}/refresh", get(room_refresh))
+        .route("/rooms/{id}/refresh.turbo_stream", get(room_refresh))
         .route("/rooms/{id}/settings", get(room_edit))
         .route(
             "/rooms/{id}/messages",

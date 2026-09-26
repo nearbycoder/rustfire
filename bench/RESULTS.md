@@ -11,6 +11,10 @@ The 10-second write trial inserted 98,244 messages. The database contained 421,8
 
 The older HTTP results above used a different fixture and should not be compared with Campfire. A later matched-fixture trial appears below.
 
+## Turbo route format parity
+
+`python bench/paired_turbo_formats.py` passed on disposable instances of the pinned source and Rustfire. The room refresh and account user pagination routes now agree on HTTP status and media type for absent, HTML, wildcard, and Turbo Stream Accept headers, and for explicit `.turbo_stream` paths. Empty room refresh responses contain a newline as in the source. This is a route behavior check, not a timing result. Rustfire still accepts JSON on the room refresh path for its current browser client, whereas the source returns 406 for that format.
+
 ## Rustfire WebSocket fanout trial
 
 After the account CSS, bot administration, and room autocomplete additions, the release build was run on the same 32-logical-CPU host. `bench/fanout.mjs` connected one authenticated session to one room on localhost, then posted 20 small messages in sequence. It timed each delivery from the start of its POST. All messages reached every connected socket within the 30-second deadline.
