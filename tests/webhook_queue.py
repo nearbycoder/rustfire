@@ -18,13 +18,22 @@ from paired_direct_lookup import seed_rustfire
 
 class Receiver(BaseHTTPRequestHandler):
     received = queue.Queue()
+    reply_for = set()
 
     def do_POST(self):
         self.rfile.read(int(self.headers["Content-Length"]))
         time.sleep(.35)
+        if self.path in self.reply_for:
+            body = b"Reply from deactivated bot"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(204)
+            self.end_headers()
         self.received.put(self.path)
-        self.send_response(204)
-        self.end_headers()
 
     def log_message(self, *_):
         pass
@@ -52,6 +61,16 @@ def post(port):
 
 def receive(count, timeout=15):
     return [Receiver.received.get(timeout=timeout) for _ in range(count)]
+
+
+def wait_jobs_empty(database):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with sqlite3.connect(database) as db:
+            if db.execute("SELECT COUNT(*) FROM webhook_jobs").fetchone()[0] == 0:
+                return
+        time.sleep(.05)
+    raise AssertionError("completed webhook jobs remain queued")
 
 
 def main():
@@ -84,8 +103,7 @@ def main():
                 post(port)
                 paths = receive(len(bot_ids))
                 assert set(paths) == {f"/hook/{bot_id}" for bot_id in bot_ids}, paths
-                with sqlite3.connect(database) as db:
-                    assert db.execute("SELECT COUNT(*) FROM webhook_jobs").fetchone()[0] == 0
+                wait_jobs_empty(database)
             finally:
                 stop_server(process)
 
@@ -93,23 +111,27 @@ def main():
                 message_id = db.execute("SELECT id FROM messages WHERE client_message_id='webhook-burst'").fetchone()[0]
                 db.execute("INSERT INTO webhook_jobs(bot_id,message_id,created_at) VALUES(52,?1,?2)", (message_id, stamp))
                 db.execute("INSERT INTO webhook_jobs(bot_id,message_id,created_at,claimed_at) VALUES(53,?1,?2,unixepoch()-31)", (message_id, stamp))
+                db.execute("UPDATE users SET status=1 WHERE id=52")
+            Receiver.reply_for = {"/hook/52"}
             process = start_server(database, port, {"RUSTFIRE_DISABLE_WEBHOOKS": "0"})
             try:
                 assert set(receive(2)) == {"/hook/52", "/hook/53"}
+                wait_jobs_empty(database)
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     with sqlite3.connect(database) as db:
-                        if db.execute("SELECT COUNT(*) FROM webhook_jobs").fetchone()[0] == 0:
+                        reply = db.execute("SELECT body FROM messages WHERE creator_id=52 ORDER BY id DESC LIMIT 1").fetchone()
+                        if reply == ("Reply from deactivated bot",):
                             break
                     time.sleep(.05)
                 else:
-                    raise AssertionError("completed webhook jobs remain queued")
+                    raise AssertionError("deactivated bot reply was not saved")
             finally:
                 stop_server(process)
         finally:
             receiver.shutdown()
             receiver.server_close()
-    print("PASS all 80 burst webhook deliveries retained; pending and expired jobs resume after restart")
+    print("PASS all 80 burst deliveries retained; pending and expired jobs resume, including a deactivated bot reply")
 
 
 if __name__ == "__main__":

@@ -1732,6 +1732,10 @@ fn bot_user(state: &AppState, key: &str) -> Result<User, StatusCode> {
     let db = pool(state)?;
     db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND bot_token=?2 AND role=2 AND status=0", params![id,token], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
+fn webhook_bot_user(state: &AppState, id: i64) -> Result<User, StatusCode> {
+    let db = pool(state)?;
+    db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND role=2", [id], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)
+}
 fn bot_api_actor(state: &AppState, headers: &HeaderMap, key: &str) -> Result<User, StatusCode> {
     match user(state, headers) {
         Ok(actor) => Ok(actor),
@@ -5284,7 +5288,7 @@ async fn deliver_webhook(
     room_name: Option<String>,
     source_html: Option<String>,
     message: ChatMessage,
-) {
+) -> Result<(), String> {
     let plain = message
         .attachment
         .as_ref()
@@ -5303,21 +5307,12 @@ async fn deliver_webhook(
         Ok(response) => response,
         Err(error) => {
             if error.is_timeout() {
-                if let Ok(bot) = bot_user(&s, &key) {
-                    let _ = insert_message(
-                        &s,
-                        &bot,
-                        message.room_id,
-                        "Failed to respond within 7 seconds",
-                        None,
-                        None,
-                        false,
-                        None,
-                        false,
-                    );
-                }
+                let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Timeout reply bot lookup failed: {status}"))?;
+                insert_message(&s, &bot, message.room_id, "Failed to respond within 7 seconds", None, None, false, None, false)
+                    .map_err(|status| format!("Timeout reply could not be saved: {status}"))?;
+                return Ok(());
             }
-            return;
+            return Err(format!("Webhook request failed: {error}"));
         }
     };
     let text_reply = reply.status() == reqwest::StatusCode::OK;
@@ -5342,21 +5337,18 @@ async fn deliver_webhook(
         match reply.chunk().await {
             Ok(Some(chunk)) if data.len() + chunk.len() <= max => data.extend_from_slice(&chunk),
             Ok(None) => break,
-            _ => return,
+            Ok(Some(_)) => return Err(format!("Webhook reply exceeded {max} bytes")),
+            Err(error) => return Err(format!("Webhook reply read failed: {error}")),
         }
-    }
-    let Ok(bot) = bot_user(&s, &key) else {
-        return;
-    };
-    if bot.id != bot_id {
-        return;
     }
     if text_reply && (kind == "text/plain" || kind == "text/html") {
-        if let Ok(text) = String::from_utf8(data) {
-            let _ = insert_message(&s, &bot, message.room_id, &text, None, None, true, None, true);
-        }
+        let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Webhook reply bot lookup failed: {status}"))?;
+        let text = String::from_utf8(data).map_err(|error| format!("Webhook text reply is invalid UTF-8: {error}"))?;
+        insert_message(&s, &bot, message.room_id, &text, None, None, true, None, true)
+            .map_err(|status| format!("Webhook text reply could not be saved: {status}"))?;
     } else if let Some(ext) = campfire_webhook_attachment_extension(&kind) {
-        let _ = insert_message(
+        let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Webhook reply bot lookup failed: {status}"))?;
+        insert_message(
             &s,
             &bot,
             message.room_id,
@@ -5370,8 +5362,9 @@ async fn deliver_webhook(
             false,
             None,
             false,
-        );
+        ).map_err(|status| format!("Webhook attachment reply could not be saved: {status}"))?;
     }
+    Ok(())
 }
 fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
     Some(match kind {
@@ -8226,7 +8219,7 @@ fn claim_webhook_job(s: &AppState) -> Result<Option<(i64, i64, i64)>, StatusCode
 fn webhook_job_payload(s: &AppState, bot_id: i64, message_id: i64) -> Result<Option<(String, String, String, Option<String>, Option<String>, ChatMessage)>, StatusCode> {
     let db = pool(s)?;
     let details = db.query_row(
-        "SELECT u.name,u.bot_token,w.url,m.room_id,r.name,m.body_source FROM users u JOIN webhooks w ON w.user_id=u.id JOIN messages m ON m.id=?2 JOIN rooms r ON r.id=m.room_id WHERE u.id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL",
+        "SELECT u.name,u.bot_token,w.url,m.room_id,r.name,m.body_source FROM users u JOIN webhooks w ON w.user_id=u.id JOIN messages m ON m.id=?2 JOIN rooms r ON r.id=m.room_id WHERE u.id=?1 AND u.role=2 AND u.bot_token IS NOT NULL",
         params![bot_id,message_id],
         |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, i64>(3)?,row.get::<_, Option<String>>(4)?,row.get::<_, Option<String>>(5)?)),
     ).optional().map_err(db_err)?;
@@ -8244,6 +8237,20 @@ fn webhook_job_payload(s: &AppState, bot_id: i64, message_id: i64) -> Result<Opt
     };
     Ok(Some((name,format!("{bot_id}-{token}"),url,room_name,source_html,message)))
 }
+fn complete_webhook_job(s: &AppState, job_id: i64, error: Option<&str>) -> Result<(), StatusCode> {
+    let mut db = pool(s)?;
+    let tx = db.transaction().map_err(db_err)?;
+    if let Some(error) = error {
+        let error = error.chars().take(2048).collect::<String>();
+        tx.execute(
+            "INSERT INTO failed_webhook_jobs(job_id,bot_id,message_id,error,created_at,failed_at) SELECT id,bot_id,message_id,?2,created_at,?3 FROM webhook_jobs WHERE id=?1",
+            params![job_id,error,now()],
+        ).map_err(db_err)?;
+    }
+    tx.execute("DELETE FROM webhook_jobs WHERE id=?1", [job_id]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
 async fn run_webhook_jobs(s: Arc<AppState>) {
     loop {
         let Ok(permit) = s.webhook_slots.clone().try_acquire_owned() else {
@@ -8259,11 +8266,11 @@ async fn run_webhook_jobs(s: Arc<AppState>) {
                     let _permit = permit;
                     let payload_state = state.clone();
                     let payload = tokio::task::spawn_blocking(move || webhook_job_payload(&payload_state, bot_id, message_id)).await;
-                    match payload {
+                    let outcome = match payload {
                         Ok(Ok(Some((name,key,url,room_name,source_html,message)))) => {
-                            deliver_webhook(state.clone(), bot_id, name, key, url, room_name, source_html, message).await;
+                            deliver_webhook(state.clone(), bot_id, name, key, url, room_name, source_html, message).await.err()
                         }
-                        Ok(Ok(None)) => {}
+                        Ok(Ok(None)) => Some("Webhook job target missing".to_string()),
                         Ok(Err(error)) => {
                             eprintln!("Webhook job payload failed: {error}");
                             return;
@@ -8272,11 +8279,12 @@ async fn run_webhook_jobs(s: Arc<AppState>) {
                             eprintln!("Webhook job worker failed: {error}");
                             return;
                         }
+                    };
+                    if let Some(error) = &outcome {
+                        eprintln!("Webhook delivery failed: {error}");
                     }
-                    if let Ok(db) = pool(&state) {
-                        if let Err(error) = db.execute("DELETE FROM webhook_jobs WHERE id=?1", [job_id]) {
-                            eprintln!("Webhook job completion failed: {error}");
-                        }
+                    if let Err(error) = complete_webhook_job(&state, job_id, outcome.as_deref()) {
+                        eprintln!("Webhook job completion failed: {error}");
                     }
                 });
             }
@@ -10034,6 +10042,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX IF NOT EXISTS idx_background_jobs_kind ON background_jobs(kind,id);
         CREATE TABLE IF NOT EXISTS webhook_jobs(id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,created_at TEXT NOT NULL,claimed_at INTEGER);
         CREATE INDEX IF NOT EXISTS idx_webhook_jobs_claim ON webhook_jobs(claimed_at,id);
+        CREATE TABLE IF NOT EXISTS failed_webhook_jobs(job_id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,error TEXT NOT NULL,created_at TEXT NOT NULL,failed_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS session_transfers(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY,name TEXT,type TEXT NOT NULL,creator_id INTEGER NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT NOT NULL DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));

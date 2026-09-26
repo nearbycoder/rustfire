@@ -32,12 +32,15 @@ Rustfire delivered about **2.2–3.0×** as many checked reads per second in the
 
 | Bots | Trial order | Campfire | Rustfire | Rustfire elapsed speedup | Deliveries |
 |---:|---|---:|---:|---:|---:|
-| 80 | Rustfire first | 4.423 s | 1.315 s | 3.36× | 80 / 80 |
-| 80 | Campfire first | 4.099 s | 1.430 s | 2.87× | 80 / 80 |
-| 320 | Rustfire first | 17.808 s | 1.864 s | 9.55× | 320 / 320 |
-| 320 | Campfire first | 15.161 s | 2.002 s | 7.57× | 320 / 320 |
+| 80 | Rustfire first | 4.005 s | 1.238 s | 3.24× | 80 / 80 |
+| 80 | Campfire first | 4.173 s | 1.997 s | 2.09× | 80 / 80 |
+| 80 | Campfire first, repeat | 3.906 s | 1.244 s | 3.14× | 80 / 80 |
+| 320 | Rustfire first | 15.731 s | 2.027 s | 7.76× | 320 / 320 |
+| 320 | Campfire first | 15.673 s | 2.002 s | 7.83× | 320 / 320 |
 
-Rustfire's completion time grew less from 80 to 320 bots under these worker settings. This does not identify either app's maximum supported bot count or establish sustained delivery, failure/retry parity, or whole-app scale. Reproduce with `python bench/paired_webhook_burst.py --bots 80 --campfire-workers 8` and `--bots 320 --campfire-workers 8`, repeating each with `--campfire-first`.
+Rustfire's completion time grew less from 80 to 320 bots under these worker settings. The first 80-bot reverse-order sample was slower for Rustfire than its repeat, so retain the individual trial times when comparing results. This does not identify either app's maximum supported bot count or establish sustained delivery, failure/retry parity, or whole-app scale. Reproduce with `python bench/paired_webhook_burst.py --bots 80 --campfire-workers 8` and `--bots 320 --campfire-workers 8`, repeating each with `--campfire-first`.
+
+`bench/paired_webhook_failures.py` separately checked two failure paths. A receiver that waited beyond seven seconds produced the same timeout bot reply and normalized message list in both apps. A refused local connection produced no bot reply in either app; Campfire retained one failed Resque job and Rustfire retained one failed SQLite job. This behavioral check was not timed and does not establish retry parity or cover other network failures.
 
 ## Turbo route format parity
 
