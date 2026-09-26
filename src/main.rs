@@ -1315,6 +1315,22 @@ fn image_representation_path(s: &AppState, attachment: &Attachment) -> Result<St
     let format = image_format(&attachment.content_type).ok_or(StatusCode::NOT_FOUND)?;
     representation_path(s, attachment, format)
 }
+fn pdf_representation_path(s: &AppState, attachment: &Attachment) -> Result<String, StatusCode> {
+    let key = s
+        .imported_blob_signing_key
+        .as_deref()
+        .unwrap_or(&s.blob_signing_key);
+    let blob = blob_path(key, attachment.id, &attachment.filename)?;
+    let (prefix, filename) = blob
+        .rsplit_once('/')
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(format!(
+        "{}/{}/{}",
+        prefix.replacen("/blobs/", "/representations/", 1),
+        inline_preview_variation_token(key, 1200, 800)?,
+        filename
+    ))
+}
 fn inline_image_representation_path(
     key: &[u8],
     id: i64,
@@ -3751,6 +3767,12 @@ fn attachment_presentation_html(s: &AppState, a: &Attachment) -> String {
             .unwrap_or_else(|_| format!("/attachments/{}/thumb", a.id));
         format!(
             "<div class='{container_class}'{style}><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img{dimensions} class='message__attachment' loading='lazy' src='{representation}'></a></div>"
+        )
+    } else if a.content_type == "application/pdf" {
+        let representation = pdf_representation_path(s, a)
+            .unwrap_or_else(|_| format!("/attachments/{}/thumb", a.id));
+        format!(
+            "<div class='max-inline-size center overflow-clip'><a class='flex' href='{blob_url}' data-lightbox-target='image' data-action='lightbox#open' data-lightbox-url-value='{download_url}'><img class='message__attachment' loading='lazy' src='{representation}'></a></div>"
         )
     } else if safe_inline_video(&a.content_type) {
         let (container_class, style) =
@@ -9408,8 +9430,9 @@ async fn signed_representation_get(
             (format, "thumb")
         }
     } else if content_type == "application/pdf" {
+        let thumb = inline_preview_variation_token(key, 1200, 800)?;
         let gallery = inline_preview_variation_token(key, 800, 600)?;
-        ("png", if matches(&gallery) { "inline-pdf-gallery" } else { "inline-pdf" })
+        ("png", if matches(&thumb) { "pdf-thumb" } else if matches(&gallery) { "inline-pdf-gallery" } else { "inline-pdf" })
     } else if safe_inline_video(&content_type) {
         let inline = inline_preview_variation_token(key, 1024, 768)?;
         let gallery = inline_preview_variation_token(key, 800, 600)?;
@@ -9424,8 +9447,8 @@ async fn signed_representation_get(
         return Err(StatusCode::NOT_FOUND);
     };
     let gallery = kind.ends_with("gallery");
-    let (width, height) = if gallery { (800, 600) } else { (1024, 768) };
-    let expected = if kind.starts_with("inline-pdf") || kind.starts_with("inline-video") {
+    let (width, height) = if kind == "pdf-thumb" { (1200, 800) } else if gallery { (800, 600) } else { (1024, 768) };
+    let expected = if kind == "pdf-thumb" || kind.starts_with("inline-pdf") || kind.starts_with("inline-video") {
         inline_preview_variation_token(key, width, height)?
     } else if kind.starts_with("inline") {
         image_variation_token_sized(key, format, width, height)?
@@ -9451,7 +9474,7 @@ async fn signed_representation_get(
                     analyze_video_and_poster(&input, &stored_copy)
                 })
                 .await;
-            } else if kind.starts_with("inline-pdf") {
+            } else if kind == "pdf-thumb" || kind.starts_with("inline-pdf") {
                 let output_copy = output.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     generate_inline_pdf_variant(&input, &output_copy, width, height)
@@ -9483,7 +9506,7 @@ async fn signed_representation_get(
     }
     let response_type = if content_type == "image/tiff" {
         "image/png"
-    } else if kind.starts_with("inline-pdf") {
+    } else if kind == "pdf-thumb" || kind.starts_with("inline-pdf") {
         "image/png"
     } else if kind.starts_with("inline-video") {
         "image/jpeg"

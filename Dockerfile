@@ -7,7 +7,7 @@ COPY static ./static
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libvips-tools ffmpeg && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libvips-tools ffmpeg poppler-utils && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /app rustfire \
     && mkdir -p /app /data/uploads \
     && chown -R rustfire:rustfire /app /data

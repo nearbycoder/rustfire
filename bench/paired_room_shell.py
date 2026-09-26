@@ -171,6 +171,24 @@ def post_file_message(port, cookie, csrf, filename, content_type, contents, clie
         connection.close()
 
 
+def minimal_pdf():
+    parts = [b"%PDF-1.4\n"]
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 4 0 R /Resources << >> >>",
+        b"<< /Length 0 >>\nstream\n\nendstream",
+    ]
+    offsets = []
+    for index, value in enumerate(objects, 1):
+        offsets.append(sum(map(len, parts)))
+        parts.append(f"{index} 0 obj\n".encode() + value + b"\nendobj\n")
+    xref = sum(map(len, parts))
+    parts.append(b"xref\n0 5\n0000000000 65535 f \n" + b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets))
+    parts.append(f"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return b"".join(parts)
+
+
 def post_account_logo(port, cookie, csrf, jpeg):
     payload, content_type = multipart(jpeg)
     status, location, body = request(port, "PATCH", "/account", cookie, csrf, payload, content_type)
@@ -253,6 +271,17 @@ def video_poster(page, port, cookie):
         body = response.read()
         assert response.status == 200 and response.headers.get_content_type() == "image/webp", (response.status, response.headers)
         assert body.startswith(b"RIFF") and body[8:12] == b"WEBP", body[:12]
+        return body
+
+
+def pdf_preview(page, port, cookie):
+    match = re.search(rb"/rails/active_storage/representations/redirect/[^'\" ]+/page\.pdf", page)
+    assert match, "Missing signed PDF preview"
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{match.group().decode()}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read()
+        assert response.status == 200 and response.headers.get_content_type() == "image/png", (response.status, response.headers)
+        assert body.startswith(b"\x89PNG\r\n\x1a\n"), body[:12]
         return body
 
 
@@ -352,6 +381,14 @@ def main():
                 assert source_poster == target_poster, (len(source_poster), len(target_poster))
                 print(f"WebP posters: {len(source_poster)} byte-identical bytes")
                 compare_message_page(5, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
+                for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    post_file_message(port, cookie, csrf, "page.pdf", "application/pdf", minimal_pdf(), "room-page-pdf")
+                source_pdf_page, target_pdf_page = compare_message_page(6, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                source_pdf_preview = pdf_preview(source_pdf_page, camp_port, camp_cookie)
+                target_pdf_preview = pdf_preview(target_pdf_page, rust_port, "session_token=benchmark-session")
+                assert source_pdf_preview == target_pdf_preview, (len(source_pdf_preview), len(target_pdf_preview))
+                print(f"PDF PNG previews: {len(source_pdf_preview)} byte-identical bytes")
+                compare_message_page(6, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)
