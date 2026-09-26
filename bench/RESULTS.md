@@ -846,3 +846,7 @@ Rustfire had higher checked read throughput and lower read and write p95 in all 
 ## Paired Action Cable presence
 
 `python bench/paired_presence.py` passed against pinned Campfire `91d294f` and the current Rustfire release build. One authenticated socket per app subscribed to the read channel and two distinct presence identifiers for the same room. Both apps saved connection counts **1 → 2 → 2 → 1 → 0**, sent two read events on the two subscriptions, ignored an unconfirmed identifier's `absent` message, preserved the same unread marker across `refresh` and unsubscribe, and emitted no read event for refresh. This verifies the sampled protocol and saved state; it does not measure throughput, sustained connections, reconnect timing, or every presence edge case.
+
+## Paired unread room events
+
+`python bench/paired_unread_events.py` passed against pinned Campfire `91d294f` and the current Rustfire release build. Three authenticated sockets subscribed to `UnreadRoomsChannel`: the author, one room member, and an outsider. For messages sent while the member was connected and visible, disconnected and invisible, and disconnected and visible, both apps sent one `{ "roomId": 1 }` event to each room member and none to the outsider. The member's saved unread marker was absent, absent, and present in those states, respectively. This verifies the broadcast audience and database state for three cases; it does not measure delivery latency, larger rooms, or other notification settings.

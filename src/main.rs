@@ -4862,13 +4862,7 @@ fn insert_message(
         }
     }
     let cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
-    let mut unread_stmt = db.prepare("UPDATE memberships SET unread_at=?1 WHERE room_id=?2 AND user_id!=?3 AND involvement!='invisible' AND (connected_at IS NULL OR connected_at<?4) RETURNING user_id").map_err(db_err)?;
-    let newly_unread = unread_stmt
-        .query_map(params![t, rid, u.id, cutoff], |r| r.get::<_, i64>(0))
-        .map_err(db_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    drop(unread_stmt);
+    db.execute("UPDATE memberships SET unread_at=?1 WHERE room_id=?2 AND user_id!=?3 AND involvement!='invisible' AND (connected_at IS NULL OR connected_at<?4)", params![t, rid, u.id, cutoff]).map_err(db_err)?;
     let attachment = if let Some(file) = upload {
         let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
         std::fs::create_dir_all(&dir).map_err(db_err)?;
@@ -4917,7 +4911,14 @@ fn insert_message(
         boosts: Vec::new(),
     };
     let _=s.events.send(Event{room_id:rid,payload:json!({"type":"message","room_id":rid,"room_kind":m.room_kind,"message":message_json(s,&m,None)?,"html":message_html(&s, &m, request_headers)}).to_string()});
-    for uid in newly_unread {
+    let mut members_stmt = db.prepare("SELECT user_id FROM memberships WHERE room_id=?1").map_err(db_err)?;
+    let members = members_stmt
+        .query_map([rid], |r| r.get::<_, i64>(0))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    drop(members_stmt);
+    for uid in members {
         s.unread_events.send(Event {
             room_id: uid,
             payload: json!({"roomId":rid}).to_string(),
