@@ -65,6 +65,11 @@ def session_count(database):
         return db.execute("SELECT count(*) FROM sessions WHERE user_id=1").fetchone()[0]
 
 
+def push_rows(database):
+    with sqlite3.connect(database) as db:
+        return db.execute("SELECT user_id,endpoint FROM push_subscriptions ORDER BY user_id,endpoint").fetchall()
+
+
 def check(port, database):
     opener = browser()
     starting_sessions = session_count(database)
@@ -85,9 +90,13 @@ def check(port, database):
     assert session_count(database) == starting_sessions + 1
     status, _, room = request(opener, port, "/rooms/1")
     assert status == 200
-    status, location, _ = request(opener, port, "/session", "DELETE", csrf=token(room))
+    status, location, _ = request(opener, port, "/session", "DELETE", {"push_subscription_endpoint": "https://fcm.googleapis.com/fcm/send/current-device"}, token(room))
     assert (status, location) == (302, "/"), (status, location)
     assert session_count(database) == starting_sessions
+    assert push_rows(database) == [
+        (1, "https://fcm.googleapis.com/fcm/send/other-device"),
+        (2, "https://fcm.googleapis.com/fcm/send/current-device"),
+    ], push_rows(database)
     assert request(opener, port, "/")[:2] == (302, "/session/new")
     assert request(opener, port, "/rooms/1")[:2] == (302, "/session/new")
     status, _, sign_in_page = request(opener, port, "/session/new")
@@ -113,6 +122,13 @@ def main():
         with sqlite3.connect(rust_db) as db:
             db.execute("UPDATE accounts SET name='Benchmark',updated_at=? WHERE id=1", [account_updated_at])
             db.execute("UPDATE users SET email_address='benchmark@example.invalid',password_digest=? WHERE id=1", [digest])
+        for database in (rust_db, camp_db):
+            with sqlite3.connect(database) as db:
+                db.executemany("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,created_at,updated_at) VALUES(?1,?2,'key','auth','2026-01-01 00:00:00','2026-01-01 00:00:00')", [
+                    (1, "https://fcm.googleapis.com/fcm/send/current-device"),
+                    (1, "https://fcm.googleapis.com/fcm/send/other-device"),
+                    (2, "https://fcm.googleapis.com/fcm/send/current-device"),
+                ])
         redis, redis_log = start_redis(temp, redis_port)
         try:
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
@@ -140,7 +156,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired sign-in form, rejection, session, sign-out, and return to a requested room")
+    print("PASS paired sign-in form, rejection, device push removal on sign-out, and return to a requested room")
 
 
 if __name__ == "__main__":
