@@ -35,11 +35,12 @@ class InputValues(HTMLParser):
                 self.values[label] = attributes.get("value", "")
 
 
-def request(port, method, path, cookie, csrf, body=b"", content_type=None):
+def request(port, method, path, cookie, csrf, body=b"", content_type=None, extra_headers=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     headers = {"Cookie": cookie, "X-CSRF-Token": csrf, "Accept": "text/html"}
     if content_type:
         headers["Content-Type"] = content_type
+    headers.update(extra_headers or {})
     try:
         connection.request(method, path, body, headers)
         response = connection.getresponse()
@@ -120,6 +121,18 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
         webhook = db.execute("SELECT url FROM webhooks WHERE user_id=?", [bot_id]).fetchone()[0]
     statuses["updated_record"] = (name, webhook)
 
+    status, location, _ = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf)
+    with sqlite3.connect(database) as db:
+        unchanged_token = db.execute("SELECT bot_token FROM users WHERE id=?", [bot_id]).fetchone()[0]
+    assert unchanged_token == token, (status, unchanged_token, token)
+    statuses["key_plain_post"] = (status, location)
+    for label, body in (("key_form_without_override", b""), ("key_wrong_override", b"_method=delete")):
+        status, location, _ = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf, body, "application/x-www-form-urlencoded")
+        with sqlite3.connect(database) as db:
+            unchanged_token = db.execute("SELECT bot_token FROM users WHERE id=?", [bot_id]).fetchone()[0]
+        assert unchanged_token == token, (label, status, unchanged_token, token)
+        statuses[label] = (status, location)
+
     status, location, payload = request(port, "PUT", f"/account/bots/{bot_id}/key", cookie, csrf)
     assert status in (302, 303), (status, payload[:300])
     with sqlite3.connect(database) as db:
@@ -128,6 +141,38 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     old_status, _, _ = request(port, "GET", f"/rooms/1/{bot_id}-{token}/messages", "", "")
     new_status, _, _ = request(port, "GET", f"/rooms/1/{bot_id}-{active_token}/messages", "", "")
     statuses["key_rotation"] = (status, urllib.parse.urlsplit(location).path, old_status, new_status)
+
+    form_body = b"_method=put"
+    status, location, payload = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf, form_body, "application/x-www-form-urlencoded")
+    assert status in (302, 303), (status, payload[:300])
+    with sqlite3.connect(database) as db:
+        form_token = db.execute("SELECT bot_token FROM users WHERE id=?", [bot_id]).fetchone()[0]
+    assert form_token != active_token and re.fullmatch(r"[A-Za-z0-9]{12}", form_token)
+    statuses["key_form_rotation"] = (status, urllib.parse.urlsplit(location).path)
+
+    status, location, payload = request(port, "PATCH", f"/account/bots/{bot_id}/key", cookie, csrf)
+    assert status in (302, 303), (status, payload[:300])
+    with sqlite3.connect(database) as db:
+        patched_token = db.execute("SELECT bot_token FROM users WHERE id=?", [bot_id]).fetchone()[0]
+    assert patched_token != form_token and re.fullmatch(r"[A-Za-z0-9]{12}", patched_token)
+    active_token = patched_token
+    statuses["key_patch_rotation"] = (status, urllib.parse.urlsplit(location).path)
+
+    status, location, payload = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf, b"_method=PUT", "application/x-www-form-urlencoded")
+    assert status in (302, 303), (status, payload[:300])
+    with sqlite3.connect(database) as db:
+        upper_token = db.execute("SELECT bot_token FROM users WHERE id=?", [bot_id]).fetchone()[0]
+    assert upper_token != active_token and re.fullmatch(r"[A-Za-z0-9]{12}", upper_token)
+    active_token = upper_token
+    statuses["key_uppercase_form_rotation"] = (status, urllib.parse.urlsplit(location).path)
+
+    status, location, payload = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf, extra_headers={"X-HTTP-Method-Override": "PATCH"})
+    assert status in (302, 303), (status, payload[:300])
+    with sqlite3.connect(database) as db:
+        header_token = db.execute("SELECT bot_token FROM users WHERE id=?", [bot_id]).fetchone()[0]
+    assert header_token != active_token and re.fullmatch(r"[A-Za-z0-9]{12}", header_token)
+    active_token = header_token
+    statuses["key_header_rotation"] = (status, urllib.parse.urlsplit(location).path)
 
     delete_body = b"_method=delete"
     status, location, payload = request(port, "POST", f"/account/bots/{bot_id}", cookie, csrf, delete_body, "application/x-www-form-urlencoded")
