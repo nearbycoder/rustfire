@@ -4,16 +4,20 @@
 
 `python bench/paired_qr.py` compared ten invitation-like URLs, alphanumeric strings, and numeric strings against pinned Campfire's `rqrcode` 3.2.0 renderer and running HTTP endpoint. The SVG bodies matched byte for byte, including source-selected masks, high error correction, and a numeric input that exactly fills a smaller QR version but causes Campfire to choose the next version. The actual routes returned matching content type, one-year public cache control, weak ETag, and Vary header; all ten conditional requests returned matching empty 304 responses. The parity probe does not check malformed IDs or every QR capacity transition.
 
-`python bench/paired_qr.py --benchmark --clients 32 --seconds 3 --campfire-workers 22 --report bench/results/qr-reads.json` then measured a warm **31,362-byte** invitation-shaped SVG in both server orders. One Rustfire release process and 22 Campfire Puma workers shared a 32-logical-CPU host with the load generator. Each of 32 keep-alive clients warmed its connection twice. Every measured 200 response matched the same SVG SHA-256 and ETag; every conditional 304 had an empty body and the same ETag. All trials had zero errors.
+`python bench/paired_qr.py --benchmark --clients 32 --seconds 3 --campfire-workers 22 --report bench/results/qr-reads.json` then measured a warm **31,362-byte** invitation-shaped SVG in both server orders after Rustfire added source-style gzip responses. One Rustfire release process and 22 Campfire Puma workers shared a 32-logical-CPU host with the load generator. Each of 32 keep-alive clients warmed its connection twice. Every measured 200 response was gzip decoded by the Go transport and matched the same SVG SHA-256 and ETag; every conditional 304 had an empty body and the same ETag. All trials had zero errors.
 
 | Rustfire first | Response | Rustfire reads/s / p95 | Campfire reads/s / p95 |
 | :---: | :---: | ---: | ---: |
-| Yes | 200 | 15,929 / 3.64 ms | 2,416 / 30.71 ms |
-| Yes | 304 | 33,224 / 2.04 ms | 2,958 / 17.88 ms |
-| No | 200 | 14,178 / 4.01 ms | 2,244 / 28.62 ms |
-| No | 304 | 32,457 / 2.13 ms | 2,866 / 19.74 ms |
+| Yes | 200 | 13,890 / 4.38 ms | 2,277 / 28.17 ms |
+| Yes | 304 | 32,336 / 2.16 ms | 2,818 / 18.75 ms |
+| No | 200 | 12,076 / 4.96 ms | 2,358 / 31.32 ms |
+| No | 304 | 31,776 / 2.19 ms | 2,905 / 18.29 ms |
 
-Rustfire served **6.32–6.59×** as many full QR reads and **11.23–11.33×** as many conditional reads in these three-second trials. The [raw report](results/qr-reads.json) contains counts and latencies. This is a single QR value, same-host, short read test; it does not measure multi-value QR traffic, page rendering, connection setup, resource use, maximum scale, or a whole-app advantage at full parity.
+Rustfire served **5.12–6.10×** as many full QR reads and **10.94–11.48×** as many conditional reads in these three-second trials. The [raw report](results/qr-reads.json) contains counts and latencies. This is a single QR value, same-host, short read test; it does not measure multi-value QR traffic, page rendering, connection setup, resource use, maximum scale, or a whole-app advantage at full parity.
+
+## Paired response version, Vary, and gzip behavior
+
+`python bench/paired_security_headers.py` compared 13 response-header fields on 15 sampled routes against pinned Campfire, covering successful HTML and JSON, redirects, 204, 403, 404, 406, PWA resources, health, and a static asset. The values matched, including Campfire's controller-only `X-Version` and `X-Rev`, `Vary: Accept-Encoding` on entity responses, `Vary: Accept,Accept-Encoding` on the sampled negotiated formats, and no Vary on the sampled empty responses. Explicit `APP_VERSION` and `GIT_REVISION` settings and the revision fallback also matched. Seven additional gzip requests made the same compression decisions; their response bodies decompressed successfully, and the static asset bytes matched. The probe does not compare every route, compressed byte streams, or performance of general gzip traffic.
 
 ## Paired message attachment MIME detection
 

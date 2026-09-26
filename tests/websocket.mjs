@@ -103,7 +103,7 @@ try{
   assert.equal(streamEdit.status,200);
   const editEvents=[await nextFrame(),await nextFrame()];
   assert(editEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="replace" target="presentation_message_${streamClientId}">`)&&frame.message.includes('signed stream edited')));
-  const streamBoost=await fetch(base+`/messages/${streamMessageId}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});
+  const streamBoost=await fetch(base+`/messages/${streamMessageId}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({'boost[content]':'🔥'}),redirect:'manual'});
   assert.equal(streamBoost.status,302);
   const boostEvents=[await nextFrame(),await nextFrame()];
   const streamBoostId=Number(execFileSync('python',['-c','import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute("select max(id) from boosts").fetchone()[0])',path.join(temp,'test.db')]).toString().trim());
@@ -187,7 +187,7 @@ try{
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no room event')),3000))]);if(frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='live test'){delivered=frame;break;}}
   assert(delivered,'live message delivered');
   const created=await post.json();
-  const boost=await fetch(base+`/messages/${created.id}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({content:'🔥'}),redirect:'manual'});assert.equal(boost.status,302);
+  const boost=await fetch(base+`/messages/${created.id}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({'boost[content]':'🔥'}),redirect:'manual'});assert.equal(boost.status,302);
   let boosted;
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no boost event')),3000))]);if(frame.identifier===identifier&&frame.message?.type==='boost'){boosted=frame;break;}}
   assert(boosted&&boosted.message.room_id===1&&boosted.message.message_id===created.id&&boosted.message.content==='🔥','room boost delivered');

@@ -50,6 +50,7 @@ func main() {
 	expectedETag := flag.String("expected-etag", "", "expected ETag response header")
 	expectedModified := flag.String("expected-last-modified", "", "expected Last-Modified response header")
 	expectedContentType := flag.String("expected-content-type", "", "expected response Content-Type media type")
+	expectedGzip := flag.Bool("expected-gzip", false, "require Go's transport to have decoded a gzip response")
 	expectedMessages := flag.Int("expected-message-count", 0, "expected number of rendered message IDs")
 	expectedCSRF := flag.Int("expected-csrf-count", 0, "expected number of hidden authenticity_token fields")
 	ifNoneMatch := flag.String("if-none-match", "", "conditional request ETag")
@@ -122,6 +123,9 @@ func main() {
 			return false, err
 		}
 		valid := response.StatusCode == *expectedStatus
+		if *expectedGzip {
+			valid = valid && response.Uncompressed
+		}
 		if expected != nil {
 			digest := sha256.Sum256(body)
 			valid = valid && bytes.Equal(digest[:], expected)

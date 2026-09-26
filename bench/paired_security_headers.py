@@ -1,6 +1,8 @@
-"""Compare dynamic-route security response headers with pinned Campfire."""
+"""Compare representative response headers and gzip decisions with pinned Campfire."""
 
+import gzip
 import http.client
+import json
 import pathlib
 import sqlite3
 import subprocess
@@ -18,9 +20,12 @@ HEADERS = (
     "permissions-policy",
     "referrer-policy",
     "strict-transport-security",
+    "vary",
     "x-content-type-options",
     "x-frame-options",
     "x-permitted-cross-domain-policies",
+    "x-rev",
+    "x-version",
     "x-xss-protection",
 )
 CASES = (
@@ -40,6 +45,7 @@ CASES = (
     ("static asset", "/assets/arrow-left-abe40556.svg", "anonymous", None),
     ("missing route", "/not-a-real-route", "anonymous", None),
 )
+GZIP_CASES = {"anonymous sign-in", "authenticated room", "autocomplete", "room messages", "manifest JSON", "manifest format error", "static asset"}
 
 
 def request(port, path, cookie, accept):
@@ -52,6 +58,26 @@ def request(port, path, cookie, accept):
         response = connection.getresponse()
         response.read()
         return response.status, {name: response.getheader(name) for name in HEADERS}
+    finally:
+        connection.close()
+
+
+def request_gzip(port, path, cookie, accept):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        headers = {"Accept-Encoding": "gzip"}
+        if cookie:
+            headers["Cookie"] = cookie
+        if accept:
+            headers["Accept"] = accept
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        body = response.read()
+        encoding = response.getheader("Content-Encoding")
+        if encoding == "gzip":
+            body = gzip.decompress(body)
+        assert encoding in (None, "gzip"), (path, encoding)
+        return response.status, encoding, response.getheader("Vary"), body
     finally:
         connection.close()
 
@@ -76,6 +102,8 @@ def main():
             try:
                 rust_cookies = {"anonymous": "", "admin": "session_token=benchmark-session", "member": "session_token=benchmark-member-session"}
                 rust_result = {label: request(rust_port, path, rust_cookies[role], accept) for label, path, role, accept in CASES}
+                rust_gzip = {label: request_gzip(rust_port, path, rust_cookies[role], accept)
+                             for label, path, role, accept in CASES if label in GZIP_CASES}
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as puma_log:
@@ -86,8 +114,37 @@ def main():
                     member_cookie, _ = login_campfire(camp_port, email="member@example.invalid")
                     camp_cookies = {"anonymous": "", "admin": cookie, "member": member_cookie}
                     camp_result = {label: request(camp_port, path, camp_cookies[role], accept) for label, path, role, accept in CASES}
+                    camp_gzip = {label: request_gzip(camp_port, path, camp_cookies[role], accept)
+                                 for label, path, role, accept in CASES if label in GZIP_CASES}
                 finally:
                     stop_server(camp)
+            for label, app_version, revision, expected_version in (
+                ("explicit version", "preview.7", "deadbee", "preview.7"),
+                ("revision fallback", None, "abcdef", "abcdef"),
+            ):
+                extra_env = {"GIT_REVISION": revision}
+                if app_version is not None:
+                    extra_env["APP_VERSION"] = app_version
+                rust = start_server(rust_db, rust_port, extra_env)
+                try:
+                    rust_status, rust_headers = request(rust_port, "/session/new", "", None)
+                finally:
+                    stop_server(rust)
+                configured_env = dict(camp_env, GIT_REVISION=revision)
+                if app_version is None:
+                    configured_env.pop("APP_VERSION", None)
+                else:
+                    configured_env["APP_VERSION"] = app_version
+                with open(temp / f"{label.replace(' ', '-')}.log", "w+") as log:
+                    camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=checkout, env=configured_env, stdout=log, stderr=log)
+                    try:
+                        wait_for_server(camp_port, camp)
+                        camp_status, camp_headers = request(camp_port, "/session/new", "", None)
+                    finally:
+                        stop_server(camp)
+                assert rust_status == camp_status == 200, (label, rust_status, camp_status)
+                for name, expected in (("x-version", expected_version), ("x-rev", revision)):
+                    assert rust_headers[name] == camp_headers[name] == expected, (label, name, rust_headers[name], camp_headers[name])
         finally:
             redis.terminate()
             redis.wait(timeout=10)
@@ -103,7 +160,18 @@ def main():
         for label, details in mismatches.items():
             print(f"{label}: {details}")
         raise AssertionError(f"{len(mismatches)} security-header cases differ")
-    print(f"PASS {len(CASES)} dynamic-route security-header cases match Campfire")
+    for label in GZIP_CASES:
+        rust_status, rust_encoding, rust_vary, rust_body = rust_gzip[label]
+        camp_status, camp_encoding, camp_vary, camp_body = camp_gzip[label]
+        assert (rust_status, rust_encoding, rust_vary) == (camp_status, camp_encoding, camp_vary), (label, rust_gzip[label][:3], camp_gzip[label][:3])
+        if label == "static asset":
+            assert rust_body == camp_body, label
+        elif rust_status == 200:
+            assert rust_body and camp_body, label
+            if label == "autocomplete":
+                json.loads(rust_body)
+                json.loads(camp_body)
+    print(f"PASS {len(CASES)} response-header cases, {len(GZIP_CASES)} gzip decisions, and configured version/revision headers match Campfire")
 
 
 if __name__ == "__main__":

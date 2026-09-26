@@ -3,6 +3,7 @@
 import base64
 import argparse
 import hashlib
+import gzip
 import http.client
 import json
 import os
@@ -43,11 +44,16 @@ def campfire_svg(urls):
     return [svg.encode() for svg in json.loads(output)]
 
 
-def qr_response(port, url, etag=None):
+def qr_response(port, url, etag=None, accept_encoding=None):
     encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
-        connection.request("GET", f"/qr_code/{encoded}", headers={"If-None-Match": etag} if etag else {})
+        headers = {}
+        if etag:
+            headers["If-None-Match"] = etag
+        if accept_encoding:
+            headers["Accept-Encoding"] = accept_encoding
+        connection.request("GET", f"/qr_code/{encoded}", headers=headers)
         response = connection.getresponse()
         body = response.read()
         return response.status, dict(response.getheaders()), body
@@ -96,7 +102,7 @@ def benchmark(temp, rust_port, camp_port, rust_db, env, clients, seconds, worker
                         if conditional:
                             command += ["--if-none-match", etag]
                         else:
-                            command += ["--expected-content-type", "image/svg+xml"]
+                            command += ["--expected-content-type", "image/svg+xml", "--expected-gzip"]
                         result = subprocess.run(command, capture_output=True, text=True)
                         assert result.returncode == 0, (command, result.stdout[-1000:], result.stderr[-2000:])
                         report = json.loads(result.stdout)
@@ -153,6 +159,14 @@ def main():
                             assert rust_304 == camp_304 == 304 and rust_cond_body == camp_cond_body == b"", url
                             for name in ("Content-Type", "Cache-Control", "ETag", "Vary"):
                                 assert header_value(rust_cond_headers, name) == header_value(camp_cond_headers, name), (url, name, rust_cond_headers, camp_cond_headers)
+                            if url == URLS[1]:
+                                rust_gzip_status, rust_gzip_headers, rust_gzip_body = qr_response(rust_port, url, accept_encoding="gzip")
+                                camp_gzip_status, camp_gzip_headers, camp_gzip_body = qr_response(camp_port, url, accept_encoding="gzip")
+                                assert rust_gzip_status == camp_gzip_status == 200, url
+                                assert header_value(rust_gzip_headers, "Content-Encoding") == header_value(camp_gzip_headers, "Content-Encoding") == "gzip", url
+                                for name in ("Content-Type", "Cache-Control", "ETag", "Vary"):
+                                    assert header_value(rust_gzip_headers, name) == header_value(camp_gzip_headers, name), (url, name, rust_gzip_headers, camp_gzip_headers)
+                                assert gzip.decompress(rust_gzip_body) == gzip.decompress(camp_gzip_body) == svg, url
                     except Exception:
                         log.flush()
                         log.seek(0)
@@ -172,7 +186,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print(f"PASS {len(URLS)} Campfire/Rustfire QR SVGs, HTTP cache headers, and conditional 304 responses")
+    print(f"PASS {len(URLS)} Campfire/Rustfire QR SVGs, cache headers, gzip, and conditional 304 responses")
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::io::ReaderStream;
-use tower_http::services::ServeDir;
+use tower_http::{compression::{CompressionLayer, predicate::{Predicate, SizeAbove}}, services::ServeDir};
 use uuid::Uuid;
 use web_push::{
     ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushMessageBuilder,
@@ -10364,9 +10364,26 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
 async fn health() -> impl IntoResponse {
     "ok"
 }
-async fn campfire_security_headers(req: Request, next: Next) -> Response {
-    let asset = req.uri().path().starts_with("/assets/") || req.uri().path().starts_with("/static/");
+async fn campfire_response_headers(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let asset = path.starts_with("/assets/") || path.starts_with("/static/");
+    let application_controller = !asset && path != "/up" && path != "/cable"
+        && !path.starts_with("/rails/active_storage/");
+    let format_negotiated = matches!(path,
+        "/autocompletable/users" | "/webmanifest" | "/webmanifest.json" |
+        "/service-worker" | "/service-worker.js");
     let mut response = next.run(req).await;
+    if !response.status().is_informational()
+        && !matches!(response.status(), StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED | StatusCode::NOT_ACCEPTABLE)
+        && !response.headers().contains_key(header::CONTENT_ENCODING)
+        && !response.headers().get(header::CACHE_CONTROL).is_some_and(|value| value.to_str().is_ok_and(|text| text.contains("no-transform"))) {
+        let vary = if format_negotiated && response.status().is_success() {
+            "Accept,Accept-Encoding"
+        } else {
+            "Accept-Encoding"
+        };
+        response.headers_mut().insert(header::VARY, HeaderValue::from_static(vary));
+    }
     if !asset && (response.status().is_success() || response.status().is_redirection() || response.status() == StatusCode::FORBIDDEN) {
         let headers = response.headers_mut();
         headers.insert("referrer-policy", HeaderValue::from_static("strict-origin-when-cross-origin"));
@@ -10374,6 +10391,19 @@ async fn campfire_security_headers(req: Request, next: Next) -> Response {
         headers.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
         headers.insert("x-permitted-cross-domain-policies", HeaderValue::from_static("none"));
         headers.insert("x-xss-protection", HeaderValue::from_static("0"));
+        if application_controller {
+            static VERSION_HEADERS: OnceLock<(HeaderValue, HeaderValue)> = OnceLock::new();
+            let (version, revision) = VERSION_HEADERS.get_or_init(|| {
+                let revision = env::var("GIT_REVISION").unwrap_or_default();
+                let version = env::var("APP_VERSION").ok().filter(|value| !value.trim().is_empty())
+                    .or_else(|| (!revision.trim().is_empty()).then(|| revision.clone()))
+                    .unwrap_or_else(|| "0".to_string());
+                (HeaderValue::from_str(&version).unwrap_or_else(|_| HeaderValue::from_static("0")),
+                 HeaderValue::from_str(&revision).unwrap_or_else(|_| HeaderValue::from_static("")))
+            });
+            headers.insert("x-version", version.clone());
+            headers.insert("x-rev", revision.clone());
+        }
     }
     response
 }
@@ -11170,7 +11200,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             reject_banned_ip,
         ))
-        .layer(axum::middleware::from_fn(campfire_security_headers))
+        .layer(axum::middleware::from_fn(campfire_response_headers))
+        .layer(CompressionLayer::new().compress_when(SizeAbove::new(0).and(
+            |status: StatusCode, _version: axum::http::Version, headers: &HeaderMap, _extensions: &axum::http::Extensions| {
+                !status.is_informational()
+                    && !matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED | StatusCode::NOT_ACCEPTABLE)
+                    && headers.get(header::CONTENT_LENGTH) != Some(&HeaderValue::from_static("0"))
+                    && !headers.get(header::CACHE_CONTROL).is_some_and(|value| value.to_str().is_ok_and(|text| text.contains("no-transform")))
+            }
+        )))
         .with_state(state);
     let addr: SocketAddr = env::var("RUSTFIRE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
