@@ -398,13 +398,12 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   }
   const typingIndicator=document.querySelector('[data-typing-notifications-target="indicator"]');
   const typingPeople=new Map();
-  const renderTyping=()=>{const names=[...typingPeople.values()].map(person=>person.name);typingIndicator.classList.toggle('typing-indicator--active',!!names.length);typingIndicator.querySelector('[data-typing-notifications-target="author"]').textContent=names.length===1?`${names[0]} is typing…`:names.length?`${names.join(', ')} are typing…`:'';};
+  const renderTyping=()=>{const names=[...typingPeople.keys()].sort();typingIndicator.classList.toggle('typing-indicator--active',!!names.length);typingIndicator.querySelector('[data-typing-notifications-target="author"]').textContent=names.join(', ');};
+  setInterval(()=>{const cutoff=Date.now()-5000;for(const [name,started] of typingPeople)if(started<=cutoff)typingPeople.delete(name);renderTyping();},1000);
   function typingFrame(data) {
     if(!data?.user || data.user.id===Number(currentUserId))return;
-    const prior=typingPeople.get(data.user.id);
-    if(prior)clearTimeout(prior.timer);
-    if(data.action==='start')typingPeople.set(data.user.id,{name:data.user.name,timer:setTimeout(()=>{typingPeople.delete(data.user.id);renderTyping();},6000)});
-    else typingPeople.delete(data.user.id);
+    if(data.action==='start')typingPeople.set(data.user.name,Date.now());
+    else typingPeople.delete(data.user.name);
     renderTyping();
   }
   const sendTyping=action=>{if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({command:'message',identifier:typingIdent,data:JSON.stringify({action})}));};
@@ -474,7 +473,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       try { const frame = JSON.parse(e.data); if (frame.type === 'confirm_subscription') { if(frame.identifier===heartbeatIdent)heartbeatConnected(); if(frame.identifier===presenceIdent){presenceConnected=true;startPresenceRefresh();markRoom(roomId,false)} if(frame.identifier===roomListIdent)refreshSidebar(); return; } const data = frame.message; if(frame.identifier===messageIdent){if(typeof data==='string')applyRoomStream(data);return;} if(sidebarStreamIdents.includes(frame.identifier)){if(typeof data==='string')applySidebarStream(data);return;} if(frame.identifier===typingIdent){typingFrame(data);return;} if(frame.identifier===unreadIdent){markRoom(data?.roomId,true);return;} if(frame.identifier===readIdent){markRoom(data?.room_id,false);return;} if(frame.identifier===roomListIdent){if(data?.type!=='direct_room_added'||!updateDirectRoom(data))refreshSidebar();return;}
       } catch {}
     });
-    connection.addEventListener('close', () => {clearInterval(monitor);if(socket!==connection)return;socket=null;presenceConnected=false;stopPresenceRefresh();for(const person of typingPeople.values())clearTimeout(person.timer);typingPeople.clear();renderTyping();scheduleOffline();reconnectTimer=setTimeout(connect,1500);});
+    connection.addEventListener('close', () => {clearInterval(monitor);if(socket!==connection)return;socket=null;presenceConnected=false;stopPresenceRefresh();scheduleOffline();reconnectTimer=setTimeout(connect,1500);});
   }
   refreshSidebar();
   connect();
@@ -548,10 +547,8 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     const mine=messages.querySelectorAll('.message--me');
     mine[mine.length-1]?.querySelector('.message__edit-btn')?.click();
   });
-  let typingTimer;
   let lastTypingSent=0;
-  typingInput.addEventListener('trix-change',()=>{clearTimeout(typingTimer);if(typingInput.editor?.getDocument().toString().trim()){if(Date.now()-lastTypingSent>750){sendTyping('start');lastTypingSent=Date.now();}typingTimer=setTimeout(()=>sendTyping('stop'),2500);}else sendTyping('stop');});
-  typingInput.addEventListener('blur',()=>{clearTimeout(typingTimer);sendTyping('stop');});
+  typingInput.addEventListener('trix-change',()=>{if(typingInput.value){if(Date.now()-lastTypingSent>=1000){sendTyping('start');lastTypingSent=Date.now();}}else sendTyping('stop');});
   const fileInput=composer.querySelector('input[type=file]');
   const fileList=composer.querySelector('[data-composer-target="fileList"]');
   const queuedFiles=[];
@@ -612,7 +609,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     if(sending||(!typingInput.editor?.getDocument().toString().trim()&&!queuedFiles.length))return;
     sending=true;
     const sendingFiles=queuedFiles.splice(0);renderQueuedFiles();
-    clearTimeout(typingTimer);sendTyping('stop');
+    sendTyping('stop');
     const fileTask=(async()=>{for(const entry of sendingFiles){
       const id=crypto.randomUUID();insertPending(id,pendingUpload(entry.file.name));
       try{await uploadPending(id,entry.file)}catch(error){failPending(id);throw error}
