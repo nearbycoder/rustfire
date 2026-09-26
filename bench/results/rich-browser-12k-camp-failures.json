@@ -1,0 +1,49 @@
+{
+  "scenario": {
+    "rooms": 4,
+    "users": 4,
+    "clients": 64,
+    "seconds": 30,
+    "write_rate_per_room": 3,
+    "sockets_per_room": 3000,
+    "socket_users_per_room": 4,
+    "browser_channels": true,
+    "rich_writes": true,
+    "campfire_workers": 22,
+    "rustfire_commit": "f9c0391",
+    "campfire_commit": "91d294f4a09f9bbe37f9548959bfcb43645678fb"
+  },
+  "mode": "single-app-failures",
+  "attempts": [
+    {
+      "order": "campfire-first in paired harness",
+      "reader": {
+        "clients": 64,
+        "seconds": 33.613663072,
+        "successes": 6110,
+        "errors": 17,
+        "rps": 181.77132277765932,
+        "median_ms": 105.718495,
+        "p95_ms": 938.647473,
+        "p99_ms": 2038.592121
+      },
+      "diagnostic": "not captured by earlier harness; run stopped before Rustfire"
+    },
+    {
+      "order": "campfire-only diagnostic rerun",
+      "reader": {
+        "clients": 64,
+        "seconds": 42.148671402,
+        "successes": 3059,
+        "errors": 17,
+        "rps": 72.57642763693015,
+        "median_ms": 238.692331,
+        "p95_ms": 1771.542092,
+        "p99_ms": 3281.808988
+      },
+      "reader_exit_code": 1,
+      "first_error": "REQUEST_ERROR path=\"/rooms/1/messages\" error=\"Get \\\"http://127.0.0.1:60425/rooms/1/messages\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\""
+    }
+  ],
+  "notes": "Both attempts completed socket setup. The harness stops on checked read errors before validating Campfire writer deadlines, socket delivery, or final pages."
+}

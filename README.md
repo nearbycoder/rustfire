@@ -118,6 +118,8 @@ A later 30-second, four-room rich-text workload with 4,000 sockets subscribed to
 
 At 8,000 sockets under the same workload, both apps delivered all 720,000 expected message appends and unread events per trial. Rustfire met the 30-second writer deadline in both server orders; Campfire's last writer finished 5.14–6.33 seconds late. Rustfire served 8.47–11.79× as many checked reads per second. This demonstrates more capacity for the tested rich-text browser-channel mix, while maximum scale, longer steady-state behavior, and complete feature parity remain open.
 
+At 12,000 sockets, Rustfire passed a separate run with all 1.08 million expected message appends and unread events, 360 writes within 30 seconds, and 70,741 checked reads without errors. Campfire completed socket setup twice but recorded 17 checked read errors in each attempt; the diagnostic rerun captured a 30-second timeout waiting for response headers. The harness stopped before validating Campfire's writes and socket deliveries at this point. These runs provide a higher sampled capacity point for this workload, not a maximum-scale or whole-app parity claim.
+
 A separate 30-second JPEG upload/read trial with 100 signed room sockets, 64 checked readers, and 60 real multipart image uploads per app passed in both orders. Rustfire served 1.96–2.00× as many checked reads per second, had lower upload p95 in those socket runs, and both apps delivered all 6,000 expected image appends. The paired probe checked the final parsed page and original stored bytes; this remains a sampled workload rather than a full-app speed or capacity claim.
 
 ## Checks

@@ -99,6 +99,7 @@ func main() {
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	var invalidOnce sync.Once
+	var requestErrorOnce sync.Once
 	get := func(item target) (bool, error) {
 		request, err := http.NewRequest("GET", *base+item.Path, nil)
 		if err != nil {
@@ -111,11 +112,13 @@ func main() {
 		}
 		response, err := client.Do(request)
 		if err != nil {
+			requestErrorOnce.Do(func() { fmt.Fprintf(os.Stderr, "REQUEST_ERROR path=%q error=%q\n", item.Path, err) })
 			return false, err
 		}
 		body, err := io.ReadAll(response.Body)
 		response.Body.Close()
 		if err != nil {
+			requestErrorOnce.Do(func() { fmt.Fprintf(os.Stderr, "REQUEST_ERROR path=%q error=%q\n", item.Path, err) })
 			return false, err
 		}
 		valid := response.StatusCode == *expectedStatus

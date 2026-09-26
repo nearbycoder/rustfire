@@ -167,7 +167,7 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
     targets = [{"path": f"/rooms/{rid}/messages", "cookie": identities[uid][0]} for rid in range(1, rooms + 1) for uid in range(1, users + 1)]
     targets_file = directory / f"{label}-targets.json"
     targets_file.write_text(json.dumps(targets))
-    command = [str(binary), "--base", f"http://127.0.0.1:{port}", "--targets-file", str(targets_file), "--expected-status", "200", "--expected-content-type", "text/html", "--expected-message-count", "40", "--accept", "text/html", "--clients", str(clients), "--seconds", str(seconds), "--signal-start"]
+    command = [str(binary), "--base", f"http://127.0.0.1:{port}", "--targets-file", str(targets_file), "--expected-status", "200", "--expected-content-type", "text/html", "--expected-message-count", "40", "--accept", "text/html", "--clients", str(clients), "--seconds", str(seconds), "--signal-start", "--invalid-sample", str(event_dir / f"{label}-invalid-read.html")]
     captures = []
     threads = []
     writes = []
@@ -227,6 +227,7 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
         assert all("error" not in item and item.get("writes") == count for item in writes), writes
         deadline_met = all(item["elapsed_s"] <= seconds for item in writes)
         report = json.loads(stdout.strip().splitlines()[-1])
+        (event_dir / f"{label}-reader.json").write_text(json.dumps({"report": report, "stderr": stderr, "reader_exit_code": reader.returncode}, indent=2))
         assert reader.returncode == 0 and report["errors"] == 0, (report, stderr)
         latencies = sorted(sample for item in writes for sample in item["latencies"])
         output = {"reads": report, "writes": {"count": len(latencies), "p95_ms": latencies[int(.95 * (len(latencies) - 1))], "max_elapsed_s": max(item["elapsed_s"] for item in writes), "deadline_met": deadline_met, "per_room": [{"room": item["room"], "user": item["user"], "count": item["writes"], "elapsed_s": round(item["elapsed_s"], 3)} for item in writes]}}
@@ -355,8 +356,12 @@ def main():
     parser.add_argument("--rich-writes", action="store_true", help="cycle formatted, linked, listed, and filtered message bodies in each room")
     parser.add_argument("--resources", action="store_true", help="sample server CPU time and peak PSS during measured reads and writes (requires psutil)")
     parser.add_argument("--rustfire-first", action="store_true")
+    parser.add_argument("--only-rustfire", action="store_true", help="run just Rustfire on the matched fixture to probe a load point")
+    parser.add_argument("--only-campfire", action="store_true", help="run just Campfire on the matched fixture to diagnose a load point")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="retain captured room append events from both apps")
     args = parser.parse_args()
+    if args.only_rustfire and args.only_campfire:
+        parser.error("choose at most one single-app mode")
     if not (2 <= args.rooms <= 10 and 2 <= args.users <= 10 and args.clients >= args.rooms * args.users and args.seconds >= 2 and args.write_rate > 0 and args.campfire_workers > 0 and args.sockets_per_room >= 0):
         parser.error("use 2–10 rooms/users, at least one reader per room/user pair, seconds >= 2, and positive write rate/workers")
     if args.browser_channels and not args.sockets_per_room:
@@ -396,6 +401,8 @@ def main():
                     identities = {uid: ("session_token=benchmark-session", "benchmark-csrf") if uid == 1 else (f"session_token=multi-session-{uid}", f"multi-csrf-{uid}") for uid in range(1, args.users + 1)}
                     pages = [fetch(rust_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
                     result = measure(binary, rust_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "rustfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid,) if args.resources else (), args.rich_writes)
+                    if args.sample_dir:
+                        (event_dir / "rustfire-result.json").write_text(json.dumps(result, indent=2))
                     check_final_pages(rust_port, identities[1][0], rust_db, args.rooms, False)
                     if args.sockets_per_room and result["sockets"]["complete"]:
                         check_socket_events(rust_db, event_dir, "rustfire", groups, count)
@@ -411,6 +418,8 @@ def main():
                         identities = {uid: campfire_login(camp_port, uid) for uid in range(1, args.users + 1)}
                         pages = [fetch(camp_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
                         result = measure(binary, camp_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, event_dir, "campfire", args.sockets_per_room, args.socket_users_per_room, args.browser_channels, (process.pid, redis.pid) if args.resources else (), args.rich_writes)
+                        if args.sample_dir:
+                            (event_dir / "campfire-result.json").write_text(json.dumps(result, indent=2))
                         check_final_pages(camp_port, identities[1][0], camp_db, args.rooms, True)
                         if args.sockets_per_room and result["sockets"]["complete"]:
                             check_socket_events(camp_db, event_dir, "campfire", groups, count)
@@ -423,7 +432,11 @@ def main():
                     finally:
                         stop_server(process)
 
-            if args.rustfire_first:
+            if args.only_rustfire:
+                rust_pages, rust_result = run_rustfire()
+            elif args.only_campfire:
+                camp_pages, camp_result = run_campfire()
+            elif args.rustfire_first:
                 (rust_pages, rust_result), (camp_pages, camp_result) = run_rustfire(), run_campfire()
             else:
                 (camp_pages, camp_result), (rust_pages, rust_result) = run_campfire(), run_rustfire()
@@ -431,6 +444,24 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
+        if args.only_rustfire:
+            check_saved(rust_db, args.rooms, args.users, count, False)
+            complete = not args.sockets_per_room or rust_result["sockets"]["complete"]
+            deadline = rust_result["writes"]["deadline_met"]
+            print("PASS Rustfire single-app load point" if complete and deadline else "FAIL Rustfire single-app load point")
+            print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "rustfire": rust_result}, sort_keys=True))
+            if not complete or not deadline:
+                raise SystemExit(1)
+            return
+        if args.only_campfire:
+            check_saved(camp_db, args.rooms, args.users, count, True)
+            complete = not args.sockets_per_room or camp_result["sockets"]["complete"]
+            deadline = camp_result["writes"]["deadline_met"]
+            print("PASS Campfire single-app load point" if complete and deadline else "FAIL Campfire single-app load point")
+            print(json.dumps({"rooms": args.rooms, "users": args.users, "clients": args.clients, "seconds": args.seconds, "write_rate_per_room": args.write_rate, "sockets_per_room": args.sockets_per_room, "socket_users_per_room": args.socket_users_per_room, "browser_channels": args.browser_channels, "rich_writes": args.rich_writes, "campfire": camp_result}, sort_keys=True))
+            if not complete or not deadline:
+                raise SystemExit(1)
+            return
         for camp_page, rust_page in zip(camp_pages, rust_pages):
             check_message_markup(camp_page, rust_page, 40)
         check_saved(rust_db, args.rooms, args.users, count, False)
