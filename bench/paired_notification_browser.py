@@ -38,13 +38,23 @@ def check_browser(session, port, scenario):
         getSubscription:async()=>{window.__pushEvents.push('getSubscription');return null},
         subscribe:async()=>{window.__pushEvents.push('subscribe');return subscription}
       }};
-      Object.defineProperty(window,'Notification',{configurable:true,value:{permission:scenario==='pwa-denied'?'denied':'granted'}});
+      const promptScenario=scenario.startsWith('prompt-');
+      Object.defineProperty(window,'Notification',{configurable:true,value:{
+        permission:scenario==='pwa-denied'?'denied':promptScenario?'default':'granted',
+        requestPermission:async()=>{
+          window.__pushEvents.push('requestPermission');
+          return scenario==='prompt-denied'?'denied':'granted';
+        }
+      }});
       if(scenario==='pwa-denied'){
         const originalMatchMedia=window.matchMedia.bind(window);
         window.matchMedia=query=>query==='(display-mode: standalone)'?{matches:true}:originalMatchMedia(query);
       }
       Object.defineProperty(navigator.serviceWorker,'getRegistration',{configurable:true,value:async()=>{
-        window.__pushEvents.push('getRegistration');return registration;
+        window.__pushEvents.push('getRegistration');return promptScenario?null:registration;
+      }});
+      Object.defineProperty(navigator.serviceWorker,'register',{configurable:true,value:async path=>{
+        window.__pushEvents.push(`register:${path}`);return registration;
       }});
       const originalFetch=window.fetch.bind(window);
       window.fetch=(input,options)=>{
@@ -58,10 +68,13 @@ def check_browser(session, port, scenario):
     browser(session, "click", '.button_to_change_notifying [data-notifications-target="bell"]')
     if scenario == "rejected":
         browser(session, "wait", "--fn", "window.__pushEvents.includes('unsubscribe')")
-    elif scenario == "success":
+    elif scenario in ("success", "prompt-granted"):
         browser(session, "wait", "--fn", "window.__pushEvents.includes('post') && !document.querySelector('.button_to_change_notifying [data-notifications-target=bell]')")
-    else:
+    elif scenario == "pwa-denied":
         browser(session, "wait", "--fn", "document.querySelector('[data-notifications-target=notAllowedNotice]').open")
+    else:
+        browser(session, "wait", "--fn", "window.__pushEvents.includes('requestPermission') && document.cookie.includes('notifications-first-run-seen=true')")
+        browser(session, "wait", "100")
     result = json.loads(browser(session, "eval", """(() => ({
       events:window.__pushEvents,
       dialogOpen:document.querySelector('[data-notifications-target="notAllowedNotice"]')?.open,
@@ -77,7 +90,8 @@ def check_browser(session, port, scenario):
 def main():
     assert shutil.which("agent-browser"), "agent-browser CLI is required"
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
-    sessions = [f"notification-{scenario}-{app}-{uuid.uuid4().hex[:8]}" for scenario in ("rejected", "success", "pwa-denied") for app in ("rust", "camp")]
+    scenarios = ("rejected", "success", "pwa-denied", "prompt-granted", "prompt-denied")
+    sessions = [f"notification-{scenario}-{app}-{uuid.uuid4().hex[:8]}" for scenario in scenarios for app in ("rust", "camp")]
     with tempfile.TemporaryDirectory(prefix="paired-notification-browser-") as scratch:
         temp = pathlib.Path(scratch)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
@@ -97,7 +111,7 @@ def main():
                     camp = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=REPOSITORY, env=environment, stdout=log, stderr=log)
                     try:
                         wait_for_server(camp_port, camp)
-                        for index, scenario in enumerate(("rejected", "success", "pwa-denied")):
+                        for index, scenario in enumerate(scenarios):
                             rust_result = check_browser(sessions[2 * index], rust_port, scenario)
                             camp_result = check_browser(sessions[2 * index + 1], camp_port, scenario)
                             print(json.dumps({"scenario": scenario, "rust": rust_result, "camp": camp_result}, indent=2))
@@ -117,7 +131,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS browser push failure, success, and standalone denial match Campfire")
+    print("PASS browser push failure, success, standalone denial, and permission prompts match Campfire")
 
 
 if __name__ == "__main__":

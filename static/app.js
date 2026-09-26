@@ -912,7 +912,7 @@ if(notificationsControl){
     const registration=await navigator.serviceWorker.getRegistration(window.location.origin)||await navigator.serviceWorker.register('/service-worker.js');
     if(Notification.permission==='denied')return false;
     const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
-    if(permission!=='granted')return false;
+    if(permission!=='granted')return null;
     const key=document.querySelector('meta[name="vapid-public-key"]')?.content||'';
     const padded=(key+'='.repeat((4-key.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/');
     const subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(atob(padded),char=>char.charCodeAt(0))});
@@ -926,8 +926,9 @@ if(notificationsControl){
     roomBell.disabled=true;
     markSeen();
     try{
-      if(await subscribe())await loadFrame();
-      else showHelp();
+      const subscribed=await subscribe();
+      if(subscribed)await loadFrame();
+      else if(subscribed===false)showHelp();
     }catch(error){showHelp()}
     finally{roomBell.disabled=false}
   });
