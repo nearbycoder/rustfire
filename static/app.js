@@ -905,25 +905,24 @@ if(notificationsControl){
   hasSubscription().then(enabled=>enabled?loadFrame():showAlert()).catch(showAlert);
   const subscribe=async()=>{
     if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))return false;
+    const registration=await navigator.serviceWorker.getRegistration(window.location.origin)||await navigator.serviceWorker.register('/service-worker.js');
+    if(Notification.permission==='denied')return false;
     const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
     if(permission!=='granted')return false;
-    const registration=await navigator.serviceWorker.getRegistration()||await navigator.serviceWorker.register('/service-worker');
-    let subscription=await registration.pushManager.getSubscription();
-    if(!subscription){
-      const key=document.querySelector('meta[name="vapid-public-key"]')?.content||'';
-      const padded=(key+'='.repeat((4-key.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/');
-      subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(atob(padded),char=>char.charCodeAt(0))});
-    }
+    const key=document.querySelector('meta[name="vapid-public-key"]')?.content||'';
+    const padded=(key+'='.repeat((4-key.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/');
+    const subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(atob(padded),char=>char.charCodeAt(0))});
     const {endpoint,keys:{p256dh,auth}}=subscription.toJSON();
-    const response=await fetch('/users/me/push_subscriptions',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({push_subscription:{endpoint,p256dh_key:p256dh,auth_key:auth}})});
-    if(!response.ok)throw Error(`Subscription failed (${response.status})`);
+    fetch('/users/me/push_subscriptions',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({push_subscription:{endpoint,p256dh_key:p256dh,auth_key:auth}})}).then(response=>{
+      if(!response.ok)subscription.unsubscribe();
+    }).catch(()=>subscription.unsubscribe());
     return true;
   };
   roomBell?.addEventListener('click',async()=>{
     roomBell.disabled=true;
     markSeen();
     try{
-      if((await hasSubscription())||await subscribe())await loadFrame();
+      if(await subscribe())await loadFrame();
       else showHelp();
     }catch(error){showHelp()}
     finally{roomBell.disabled=false}

@@ -1174,3 +1174,7 @@ Rustfire served **14.22–18.34×** as many successful checked reads per second 
 ## Room-area file drop
 
 `python bench/paired_composer_browser.py` now also passes a drop on the composer and a drop on the message area against pinned Campfire `91d294f` in Chromium. A controlled `DataTransfer` file produced matching queued preview cards on both targets. Removing the composer drop emptied the queue; sending the message-area drop saved one text attachment with byte-identical contents in both apps. Before the fix, Rustfire accepted only drops on the composer, so a room-area drop was not prevented and queued nothing. The existing 47 MB PNG plus JPEG picker workflow still passes. This tests two DOM drop targets and one saved small file, not OS-level dragging, all browsers, or upload throughput.
+
+## Browser push opt-in failure
+
+`python bench/paired_notification_browser.py` passed against pinned Campfire `91d294f` in Chromium. Each app's bell was clicked with a mocked granted notification permission, service-worker registration, push subscription, and HTTP 500 from subscription sync. Both called `getRegistration`, `subscribe`, POST, and `unsubscribe` in that order, marked the first run seen, and left the not-allowed dialog closed. Rustfire previously checked for an existing subscription before opting in, left the browser subscription active after a failed POST, and opened the permission-help dialog. This checks one controlled failure path; real browser permissions, service-worker lifecycle, and push delivery remain open.
