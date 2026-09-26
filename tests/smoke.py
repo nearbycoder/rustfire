@@ -51,7 +51,11 @@ def request(opener, base, path, data=None, method=None, headers=None):
                 CSRF[opener] = html.unescape(token.group(1))
             return res.status, res.geturl(), body
     except urllib.error.HTTPError as error:
-        return error.code, error.geturl(), error.read().decode()
+        body = error.read().decode()
+        token = re.search(r"<meta name='csrf-token' content='([^']+)'", body)
+        if token:
+            CSRF[opener] = html.unescape(token.group(1))
+        return error.code, error.geturl(), body
 
 
 def bot_key_from_page(page):
@@ -249,7 +253,7 @@ def main():
             assert request(duplicate, base, f"/join/{join}")[0] == 200
             code, duplicate_url, duplicate_page = request(duplicate, base, f"/join/{join}", {"user[name]": "Existing", "user[email_address]": "admin@example.com", "user[password]": "password123"})
             assert code == 200 and "/session/new?email_address=admin%40example.com" in duplicate_url
-            assert "value='admin@example.com'" in duplicate_page
+            assert 'value="admin@example.com"' in duplicate_page
             signup_boundary = "rustfire-signup-test"
             avatar_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==")
             signup_parts = []
@@ -980,7 +984,7 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM push_subscriptions WHERE user_id=1 AND endpoint=?", (push_keys["endpoint"],)).fetchone()[0] == 1
             signout = request(admin, base, "/session", {"push_subscription_endpoint": push_keys["endpoint"]}, method="DELETE")
-            assert signout[0] == 303, signout
+            assert signout[0] == 302, signout
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM push_subscriptions WHERE user_id=1 AND endpoint=?", (push_keys["endpoint"],)).fetchone()[0] == 0
             assert request(admin, base, "/rooms/1")[0] == 401

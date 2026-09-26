@@ -1816,7 +1816,7 @@ fn incompatible_browser_page() -> Response {
     .into_response()
 }
 fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
-    let signup_stylesheet = if body.contains("class=\"nametag u-relative\"") {
+    let signup_stylesheet = if body.contains("class=\"nametag u-relative\"") || body.contains("class=\"sign-in txt-align-center\"") {
         "<link rel='stylesheet' href='/static/signup.css'>"
     } else {
         ""
@@ -1856,14 +1856,6 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
         csrf_forms(&html, token)
     })
     .into_response()
-}
-fn form_field(label: &str, name: &str, ty: &str) -> String {
-    format!(
-        "<label>{}<input name='{}' type='{}' required></label>",
-        esc(label),
-        name,
-        ty
-    )
 }
 fn public_url(headers: &HeaderMap, path: &str) -> String {
     if let Ok(base) = env::var("RUSTFIRE_PUBLIC_URL") {
@@ -2841,6 +2833,51 @@ async fn first_run_post(
     let Some(uid) = created? else { return Ok(found_redirect("/")) };
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
+fn login_page(s: &AppState, email_address: &str, rejection: Option<StatusCode>) -> AppResult {
+    let db = pool(s)?;
+    let (account_name, updated_at): (String, String) = db.query_row(
+        "SELECT name,updated_at FROM accounts ORDER BY id LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(db_err)?;
+    let owner: Option<(String, String)> = db.query_row(
+        "SELECT name,email_address FROM users WHERE role=1 AND email_address IS NOT NULL ORDER BY id LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(db_err)?;
+    let logo_version: String = updated_at.chars().filter(char::is_ascii_digit).take(14).collect();
+    let email_translation = profile_translation_button("Enter your email address", [
+        "Introduce tu correo electrónico", "Entrez votre adresse courriel",
+        "अपना ईमेल पता दर्ज करें", "Geben Sie Ihre E-Mail-Adresse ein",
+        "Insira seu endereço de email", "メールアドレスを入力してください",
+    ]);
+    let password_translation = profile_translation_button("Enter your password", [
+        "Introduce tu contraseña", "Saisissez votre mot de passe",
+        "अपना पासवर्ड दर्ज करें", "Geben Sie Ihr Passwort ein",
+        "Insira sua senha", "パスワードを入力してください",
+    ]);
+    let help_contact = owner.map(|(name, email)| {
+        let address = format!("mailto:\"{name}\" <{email}>");
+        format!("<div class=\"signup-help txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
+    }).unwrap_or_default();
+    let flash = if rejection.is_some() {
+        "<div class=\"flash\" role=\"alert\">Too many requests or unauthorized.</div>"
+    } else { "" };
+    let shake = if rejection.is_some() { " shake" } else { "" };
+    let body = format!(r#"{flash}<section class="sign-in txt-align-center"><div class="panel{shake}"><figure class="account-logo avatar center margin-block-end txt-xx-large"><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure>
+<form class="flex flex-column gap" action="/session" accept-charset="UTF-8" method="post"><fieldset class="flex flex-column gap center-block upad"><legend class="txt-large txt-align-center"><strong>{account_name}</strong></legend>
+<div class="flex align-center gap">{email_translation}<label class="flex align-center gap input input--actor txt-large"><input required="required" class="input" autofocus="autofocus" autocomplete="username" placeholder="Enter your email address" value="{email_address}" type="email" name="email_address" id="email_address"><img aria-hidden="true" class="colorize--black" src="/assets/email-6c595bc5.svg" width="24" height="24"></label></div>
+<div class="flex align-center gap">{password_translation}<label class="flex align-center gap input input--actor txt-large"><input required="required" class="input" autocomplete="current-password" placeholder="Enter your password" maxlength="72" size="72" type="password" name="password" id="password"><img aria-hidden="true" class="colorize--black" src="/assets/password-0896da4e.svg" width="24" height="24"></label></div>
+<button class="btn btn--reversed center txt-large" type="submit" name="log_in"><img aria-hidden="true" src="/assets/arrow-right-8f3eb40d.svg"><span class="for-screen-reader">Go</span></button></fieldset></form></div>{help_contact}</section>"#,
+        account_name = esc(&account_name),
+        email_address = esc(email_address),
+    );
+    let mut response = render_unauth("Sign in", &body);
+    if let Some(status) = rejection {
+        *response.status_mut() = status;
+    }
+    Ok(response)
+}
 async fn login_get(
     State(s): State<Arc<AppState>>,
     Query(query): Query<HashMap<String, String>>,
@@ -2848,14 +2885,7 @@ async fn login_get(
     if first_run_needed(&s)? {
         return Ok(found_redirect("/first_run"));
     }
-    Ok(render_unauth(
-        "Sign in",
-        &format!(
-            "<section class='auth-card'><img class='hero-icon' src='/account/logo' alt=''><h1>Sign in</h1><form method='post' action='/session'>{}{}<button class='button'>Sign in</button></form></section>",
-            format!("<label>Email address<input name='email_address' type='email' value='{}' autocomplete='username' required></label>", esc(query.get("email_address").map(String::as_str).unwrap_or(""))),
-            form_field("Password", "password", "password")
-        ),
-    ))
+    login_page(&s, query.get("email_address").map(String::as_str).unwrap_or(""), None)
 }
 #[derive(Deserialize)]
 struct Login {
@@ -2888,12 +2918,12 @@ async fn login_post(
             times.pop_front();
         }
         if times.len() >= 10 {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
+            return login_page(&s, &f.email_address, Some(StatusCode::TOO_MANY_REQUESTS));
         }
         times.push_back(moment);
     }
     let db = pool(&s)?;
-    let row: Option<(i64, String)> = db
+    let row: Option<(i64, Option<String>)> = db
         .query_row(
             "SELECT id,password_digest FROM users WHERE email_address=?1 AND status=0",
             [f.email_address.to_lowercase()],
@@ -2901,7 +2931,7 @@ async fn login_post(
         )
         .optional()
         .map_err(db_err)?;
-    if let Some((id, pw)) = row {
+    if let Some((id, Some(pw))) = row {
         if verify(&f.password, &pw).unwrap_or(false) {
             let destination = cookie(&headers, "return_to")
                 .and_then(|encoded| safe_return_path(&encoded))
@@ -2919,11 +2949,7 @@ async fn login_post(
             return Ok(response);
         }
     }
-    Ok((
-        StatusCode::UNAUTHORIZED,
-        Html("<p>Incorrect email or password. <a href='/session/new'>Try again</a>.</p>"),
-    )
-        .into_response())
+    login_page(&s, &f.email_address, Some(StatusCode::UNAUTHORIZED))
 }
 async fn session_post(
     State(s): State<Arc<AppState>>,
@@ -2996,7 +3022,7 @@ async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes)
             let _ = s.revoked_users.send(uid);
         }
     }
-    let mut r = Redirect::to("/").into_response();
+    let mut r = found_redirect("/");
     r.headers_mut().insert(
         header::SET_COOKIE,
         format!(

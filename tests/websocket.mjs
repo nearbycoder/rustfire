@@ -272,7 +272,7 @@ try{
   for(let i=0;i<80&&pingCount===0;i++)await new Promise(r=>setTimeout(r,50));
   assert(pingCount>0,'ActionCable heartbeat delivered');
   const closed=new Promise(resolve=>socket.once('close',resolve));
-  const signout=await fetch(base+'/session',{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf},redirect:'manual'});assert.equal(signout.status,303);
+  const signout=await fetch(base+'/session',{method:'DELETE',headers:{Cookie:cookie,'X-CSRF-Token':csrf},redirect:'manual'});assert.equal(signout.status,302);
   await Promise.race([closed,new Promise((_,reject)=>setTimeout(()=>reject(new Error('socket remained open after sign out')),3000))]);
   for(let i=0;i<30&&connections()!==0;i++)await new Promise(r=>setTimeout(r,20));
   assert.equal(connections(),0);
