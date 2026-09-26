@@ -713,10 +713,10 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
         return "\n".to_string();
     }
     let children: String = node.children().map(action_text_plain_node).collect();
-    let children = trim_plain_newlines(&children);
+    let trimmed = trim_plain_newlines(&children);
     match name {
-        "div" => format!("{children}\n"),
-        "p" | "h1" => format!("{children}\n\n"),
+        "div" => format!("{trimmed}\n"),
+        "p" | "h1" => format!("{trimmed}\n\n"),
         "ul" | "ol" => {
             let nested = node.ancestors().any(|ancestor| {
                 ancestor
@@ -724,7 +724,7 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
                     .as_element()
                     .is_some_and(|parent| matches!(parent.name(), "ul" | "ol"))
             });
-            format!("{}{children}\n\n", if nested { "\n" } else { "" })
+            format!("{}{trimmed}\n\n", if nested { "\n" } else { "" })
         }
         "li" => {
             let lists = node
@@ -737,10 +737,10 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
             } else {
                 "•".to_string()
             };
-            format!("{}{} {children}\n", "  ".repeat(lists.len().saturating_sub(1)), bullet)
+            format!("{}{} {trimmed}\n", "  ".repeat(lists.len().saturating_sub(1)), bullet)
         }
         "blockquote" => {
-            let mut value = format!("{children}\n\n");
+            let mut value = format!("{trimmed}\n\n");
             if let (Some(first), Some(last)) = (
                 value.char_indices().find(|(_, c)| !c.is_whitespace()).map(|(i, _)| i),
                 value.char_indices().rfind(|(_, c)| !c.is_whitespace()).map(|(i, c)| i + c.len_utf8()),
@@ -752,8 +752,8 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
             }
             value
         }
-        "figcaption" => format!("[{children}]"),
-        _ => children.to_string(),
+        "figcaption" => format!("[{trimmed}]"),
+        _ => children,
     }
 }
 fn action_text_plain(input: &str) -> String {
@@ -4943,6 +4943,16 @@ fn insert_message(
         if plain_source != trusted {
             plain = rich_body_trusted(&plain_source, request_host).0;
         }
+        if cleaned.is_some() {
+            let (_, original_plain) = replace_mention_attachments(
+                body,
+                &db,
+                &s.mention_signing_key,
+                s.imported_mention_signing_key.as_deref(),
+                s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
+            )?;
+            plain = action_text_plain(&original_plain).trim().to_string();
+        }
         (plain, Some(html))
     } else {
         (body.trim().to_string(), None)
@@ -5649,6 +5659,16 @@ async fn message_update(
         if plain_source != trusted {
             plain = rich_body_trusted(&plain_source, request_host).0;
         }
+        if cleaned.is_some() {
+            let (_, original_plain) = replace_mention_attachments(
+                &normalized,
+                &db,
+                &s.mention_signing_key,
+                s.imported_mention_signing_key.as_deref(),
+                s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
+            )?;
+            plain = action_text_plain(&original_plain).trim().to_string();
+        }
         (plain, Some(html), Some(normalized), used)
     } else {
         (body.to_string(), None, None, Vec::new())
@@ -5712,7 +5732,7 @@ async fn message_update(
     {
         message_show(State(s), headers, Path((rid, mid))).await
     } else {
-        Ok(Redirect::to(&format!("/rooms/{rid}/messages/{mid}")).into_response())
+        Ok(found_redirect(&format!("/rooms/{rid}/messages/{mid}")))
     }
 }
 async fn message_post_override(
@@ -10357,6 +10377,11 @@ fn render_imported_rich_text(
             if plain_source != trusted {
                 plain = rich_body_trusted(&plain_source, None).0;
             }
+            if *missing_search && cleaned.is_some() {
+                let (_, original_plain) = replace_mention_attachments(source, &tx, signing_key, imported_key, avatar_key)
+                    .map_err(|status| format!("reading imported message {id}: {status}"))?;
+                plain = action_text_plain(&original_plain).trim().to_string();
+            }
             if *missing_search {
                 tx.execute("UPDATE messages SET body=?1,body_html=?2 WHERE id=?3", params![plain, html, id])?;
             } else {
@@ -10820,6 +10845,7 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(super::rich_body(input, None).0, expected, "{input}");
         }
+        assert_eq!(super::action_text_plain("<div>Before<section><p>Nested <em>text</em></p></section>After</div>"), "BeforeNested text\n\nAfter");
     }
     #[test]
     fn rich_text_removes_disallowed_tags() {

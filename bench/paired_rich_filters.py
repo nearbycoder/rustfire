@@ -18,6 +18,12 @@ CASES = [
     ("unattached-image", "<div>Hello <img src='https://evil.example/image.svg'>World</div>"),
     ("table", "<div>Before<table><tr><td>Cell</td></tr></table>After</div>"),
     ("section", "<div>Before<section><strong>Hidden</strong></section>After</div>"),
+    ("nested-section", "<div>Before<section><p>Nested <em>text</em></p></section>After</div>"),
+    ("script-text", "<div>Before<script>alert(1)</script>After</div>"),
+    ("style-text", "<div>Before<style>.x{color:red}</style>After</div>"),
+    ("iframe-text", "<div>Before<iframe src='https://example.com'>Fallback</iframe>After</div>"),
+    ("svg-text", "<div>Before<svg><text>Vector</text></svg>After</div>"),
+    ("image-alt", "<div>Before<img src='https://example.com/x.png' alt='Alternative'>After</div>"),
     ("address", "<div>Before<address>Location</address>After</div>"),
     ("big", "<div>Before<big>Large</big>After</div>"),
     ("class", "<div><p class='para'>P</p><a class='link' href='/x'>X</a><code class='code'>C</code><strong class='bold'>B</strong></div>"),
@@ -105,6 +111,39 @@ def post(port, cookie, csrf, case):
         connection.close()
 
 
+def indexed_texts(database, cases):
+    with sqlite3.connect(database) as db:
+        return {
+            name: db.execute(
+                "SELECT s.body FROM message_search_index s JOIN messages m ON m.id=s.rowid WHERE m.client_message_id=?1",
+                (f"paired-rich-filter-{name}",),
+            ).fetchone()
+            for name, _ in cases
+        }
+
+
+def edit_table(port, cookie, csrf, database):
+    with sqlite3.connect(database) as db:
+        message_id = db.execute("SELECT id FROM messages WHERE client_message_id='paired-rich-filter-table'").fetchone()[0]
+    fields = urllib.parse.urlencode({
+        "_method": "patch",
+        "message[body]": "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>",
+        "authenticity_token": csrf,
+    })
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("POST", f"/rooms/1/messages/{message_id}", fields, {
+            "Cookie": cookie,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/html",
+        })
+        response = connection.getresponse()
+        response.read()
+        return response.status, urllib.parse.urlsplit(response.getheader("Location") or "").path, indexed_texts(database, [("table", "")])["table"]
+    finally:
+        connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep", action="store_true", help="include allowed-tag, attribute, and URL-scheme matrices")
@@ -128,6 +167,8 @@ def main():
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
             try:
                 rust_results = [post(rust_port, "session_token=benchmark-session", "benchmark-csrf", case) for case in cases]
+                rust_plain = indexed_texts(rust_db, cases)
+                rust_edit = edit_table(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db)
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -136,6 +177,8 @@ def main():
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
                     camp_results = [post(camp_port, cookie, csrf, case) for case in cases]
+                    camp_plain = indexed_texts(camp_db, cases)
+                    camp_edit = edit_table(camp_port, cookie, csrf, camp_db)
                 finally:
                     stop_server(camp)
         finally:
@@ -148,7 +191,10 @@ def main():
         if rust_result != camp_result
     ]
     assert not mismatches, mismatches
-    print(f"PASS {len(cases)} paired rich-text sanitizer presentations")
+    plain_mismatches = {name: (rust_plain[name], camp_plain[name]) for name, _ in cases if rust_plain[name] != camp_plain[name]}
+    assert not plain_mismatches, plain_mismatches
+    assert rust_edit == camp_edit == (302, "/rooms/1/messages/2", ("EditedCellEnd",)), (rust_edit, camp_edit)
+    print(f"PASS {len(cases)} paired rich-text presentations and search-index bodies, plus edited table text")
 
 
 if __name__ == "__main__":

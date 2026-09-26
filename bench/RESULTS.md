@@ -916,3 +916,7 @@ After Rustfire switched to a single-statement, monotonic message ID allocator, `
 | Yes | 1,381 / 49.21 ms | 3,495 / 13.81 ms | 98.89 ms | 7.32 ms |
 
 Rustfire served about **2.26–2.53×** as many checked reads per second in these two short runs, with lower read and write p95. The single writer ran at five scheduled posts per second; the trial does not measure peak write throughput, multiple simultaneous writers, sockets, resource use, sustained capacity, or full feature parity.
+
+## Rich-text presentation and search text
+
+`python bench/paired_rich_filters.py --sweep` passed 129 paired create cases against the pinned Campfire build. The probe compares each message's parsed presentation and saved FTS search text. It also edits a message containing a disallowed table and checks the 302 redirect and updated search text. Campfire retains text inside some disallowed presentation tags in its searchable body; Rustfire now does the same. A separate importer regression confirms that a missing search row is rebuilt from the original rich text while its displayed HTML remains sanitized. This is a sampled behavior check, not a performance or complete ActionText parity claim.

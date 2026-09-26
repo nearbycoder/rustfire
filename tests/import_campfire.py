@@ -64,7 +64,7 @@ def main():
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
-            for mid in range(1, 11):
+            for mid in range(1, 12):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
             fixture.execute("UPDATE sqlite_sequence SET seq=20 WHERE name='messages'")
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
@@ -113,6 +113,8 @@ def main():
                 body = f'<div>{label} <action-text-attachment sgid="{signed}" content-type="{content_type}" filename="{filename}"></action-text-attachment></div>'
                 fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(?,'Message',?,'body',?,?,?)", (rich_id, message_id, body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
                 fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(?,?)", (message_id, f"{label} [{filename}]"))
+            filtered_body = "<div>Before<section><p>Nested <em>text</em></p></section>After</div>"
+            fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(10,'Message',11,'body',?,?,?)", (filtered_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO boosts(id,message_id,booster_id,content,created_at,updated_at) VALUES(1,1,2,'Great','2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("""INSERT INTO searches(id,user_id,query,created_at,updated_at)
                 VALUES(1,1,'One','2025-01-01 00:00:00','2026-01-02 00:00:00')""")
@@ -213,8 +215,8 @@ def main():
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
         completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
         result = json.loads(completed.stdout)
-        assert result["messages"] == 10 and result["attachments"] == 1 and result["inline_embeds"] == 9, result
-        assert result["reindexed_messages"] == 2, result
+        assert result["messages"] == 11 and result["attachments"] == 1 and result["inline_embeds"] == 9, result
+        assert result["reindexed_messages"] == 3, result
         assert result["push_subscriptions"] == 1
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -227,6 +229,10 @@ def main():
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=1").fetchone() == ("Hello\n• One\n• Two",)
             assert imported.execute("SELECT body FROM messages WHERE id=2").fetchone() == ("",)
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=2").fetchone() == ("imported.txt",)
+            filtered_plain, filtered_source, filtered_html = imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=11").fetchone()
+            assert filtered_plain == "BeforeNested text\n\nAfter" and filtered_source == filtered_body, (filtered_plain, filtered_source)
+            assert "Nested" not in filtered_html and "BeforeAfter" in filtered_html, filtered_html
+            assert imported.execute("SELECT body FROM message_search_index WHERE rowid=11").fetchone() == (filtered_plain,)
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
             mention_plain, mention_html = imported.execute("SELECT body,body_html FROM messages WHERE id=3").fetchone()
             assert mention_plain == "@Rustfire Compare hello"
