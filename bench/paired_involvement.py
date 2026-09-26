@@ -140,6 +140,17 @@ def workflow(port, cookie, csrf, database):
             action = f"{path}?involvement={following}"
             assert ("start", "form", (("action", action), ("class", "button_to"), ("method", "post"))) in events
             assert any(event[:2] == ("start", "turbo-frame") and ("id", frame_id) in event[2] for event in events)
+            if room_id == 1 and current == "mentions":
+                rejected = []
+                for label, method in (("plain-post", None), ("delete-override", "delete")):
+                    fields = {"authenticity_token": csrf}
+                    if method:
+                        fields["_method"] = method
+                    invalid_body = urllib.parse.urlencode(fields).encode()
+                    invalid_status, _, _ = request(port, "POST", action, cookie, csrf, body=invalid_body)
+                    rejected.append((label, invalid_status, room_state(database, room_id)))
+                assert rejected == [("plain-post", 404, current), ("delete-override", 404, current)], rejected
+                observations.append(("rejected", rejected))
             body = urllib.parse.urlencode({"_method": "put", "authenticity_token": csrf}).encode()
             status, location, _ = request(port, "POST", action, cookie, csrf, body=body)
             assert status == 302 and urllib.parse.urlsplit(location).path == path, (status, location)

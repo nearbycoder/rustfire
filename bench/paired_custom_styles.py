@@ -95,9 +95,21 @@ def workflow(port, cookie, csrf, database, campfire):
     assert initial["heading"] and initial["warning"] and initial["save"] and initial["back"] == "/account/edit"
     assert initial["translations"] == 7
     before = saved_styles(database)
+    rejected = []
+    for label, method in (("plain-post", None), ("delete-override", "delete")):
+        values = {"account[custom_styles]": "rejected"}
+        if method:
+            values["_method"] = method
+        body = urllib.parse.urlencode(values).encode()
+        status, _, _ = request(port, "POST", UPDATE, cookie, csrf, body, "application/x-www-form-urlencoded")
+        rejected.append((label, status, saved_styles(database) == before))
+    assert rejected == [("plain-post", 404, True), ("delete-override", 404, True)], rejected
     results = []
-    for method, css in (("PATCH", FIRST), ("PUT", SECOND)):
-        body = urllib.parse.urlencode({"account[custom_styles]": css}).encode()
+    for method, css, override in (("PATCH", FIRST, None), ("PUT", SECOND, None), ("POST", FIRST, "patch"), ("POST", SECOND, "put")):
+        values = {"account[custom_styles]": css}
+        if override:
+            values["_method"] = override
+        body = urllib.parse.urlencode(values).encode()
         status, location, response = request(port, method, UPDATE, cookie, csrf, body, "application/x-www-form-urlencoded")
         assert status == 302, ("update", method, status, response[:200])
         assert urllib.parse.urlsplit(location).path == EDIT
@@ -106,7 +118,7 @@ def workflow(port, cookie, csrf, database, campfire):
         if not campfire:
             with sqlite3.connect(database) as db:
                 assert db.execute("SELECT css FROM account_custom_styles WHERE id=1").fetchone() == (css,)
-        results.append((method, status, urllib.parse.urlsplit(location).path))
+        results.append((method, override, status, urllib.parse.urlsplit(location).path))
     assert saved_styles(database)[1] != before[1], "Account update timestamp was not touched"
     status, _, page = request(port, "GET", EDIT, cookie, csrf)
     assert status == 200
@@ -126,7 +138,7 @@ def workflow(port, cookie, csrf, database, campfire):
                      "application/x-www-form-urlencoded")
     assert denied[0] == 403
     assert saved_styles(database)[0] == SECOND
-    return initial, final, results, icon
+    return initial, final, rejected, results, icon
 
 
 def main():
@@ -162,7 +174,7 @@ def main():
             stop_server(camp)
             log.close()
         assert rust_result == camp_result, (rust_result[:3], camp_result[:3])
-        print("PASS custom CSS form, translated warning, icon bytes, PATCH/PUT persistence, inline styles on authenticated and sign-in pages, account touch, and member authorization")
+        print("PASS custom CSS form, rejected POST methods, PATCH/PUT and browser-form persistence, inline styles, account touch, and member authorization")
 
 
 if __name__ == "__main__":

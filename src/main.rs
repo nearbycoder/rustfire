@@ -4883,6 +4883,31 @@ async fn involvement_post(
         &format!("/rooms/{rid}/involvement"),
     )))
 }
+async fn involvement_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(rid): Path<i64>,
+    Query(query): Query<HashMap<String, String>>,
+    RawForm(raw): RawForm,
+) -> AppResult {
+    let form_method = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("application/x-www-form-urlencoded"))
+        .and_then(|_| fields(&raw).0.remove("_method"));
+    let method = form_method.or_else(|| {
+        headers
+            .get("x-http-method-override")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    });
+    match method.as_deref().map(str::to_ascii_uppercase).as_deref() {
+        Some("PATCH" | "PUT") => {
+            involvement_post(State(s), headers, Path(rid), Query(query), RawForm(raw)).await
+        }
+        _ => Err(StatusCode::NOT_FOUND),
+    }
+}
 #[derive(Deserialize)]
 struct Paging {
     before: Option<i64>,
@@ -7321,6 +7346,27 @@ async fn custom_styles_update(
         *styles.write().unwrap() = Some(css.clone());
     }
     Ok(found_redirect(&public_url(&headers, "/account/custom_styles/edit")))
+}
+async fn custom_styles_post_override(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    raw: Bytes,
+) -> AppResult {
+    let form_method = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("application/x-www-form-urlencoded"))
+        .and_then(|_| fields(&raw).0.remove("_method"));
+    let method = form_method.or_else(|| {
+        headers
+            .get("x-http-method-override")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    });
+    match method.as_deref().map(str::to_ascii_uppercase).as_deref() {
+        Some("PATCH" | "PUT") => custom_styles_update(State(s), headers, Form(fields(&raw).0)).await,
+        _ => Err(StatusCode::NOT_FOUND),
+    }
 }
 async fn logo_get(
     State(s): State<Arc<AppState>>,
@@ -11056,7 +11102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/rooms/{id}/involvement",
             get(involvement_get)
-                .post(involvement_post)
+                .post(involvement_post_override)
                 .patch(involvement_post)
                 .put(involvement_post),
         )
@@ -11113,7 +11159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/custom_styles/edit", get(custom_styles_get))
         .route(
             "/account/custom_styles",
-            post(custom_styles_update).put(custom_styles_update).patch(custom_styles_update),
+            post(custom_styles_post_override).put(custom_styles_update).patch(custom_styles_update),
         )
         .route(
             "/account/logo",
