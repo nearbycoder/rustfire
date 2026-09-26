@@ -476,6 +476,7 @@ fn replace_mention_attachments(
     db: &rusqlite::Connection,
     signing_key: &[u8],
     imported_key: Option<&[u8]>,
+    avatar_key: &[u8],
 ) -> Result<String, StatusCode> {
     if !input.contains("application/vnd.campfire.mention")
         && !input.contains("application/vnd.rustfire.mention")
@@ -526,18 +527,16 @@ fn replace_mention_attachments(
                         legacy_id.filter(|id| *id > 0)
                     };
                     if let Some(id) = id {
-                        let name: Option<String> = db
-                            .query_row("SELECT name FROM users WHERE id=?1", [id], |row| row.get(0))
+                        let user: Option<(String, String, String)> = db
+                            .query_row("SELECT name,COALESCE(bio,''),updated_at FROM users WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                             .optional()
                             .map_err(db_err)?;
-                        if let Some(name) = name {
-                            let sgid_attribute = sgid
-                                .as_deref()
-                                .map(|sgid| format!(" sgid='{}'", esc(sgid)))
-                                .unwrap_or_default();
+                        if let Some((name, bio, updated_at)) = user {
+                            let title = if bio.trim().is_empty() { name.clone() } else { format!("{name} – {bio}") };
+                            let avatar = avatar_path(avatar_key, id, &updated_at)?;
                             format!(
-                                "<span class='mention'{sgid_attribute}><img class='avatar' src='/users/{id}/avatar' alt=''>@{}</span>",
-                                esc(&name)
+                                "<div class='mention'><a href='/users/{id}' title='{}' class='btn avatar' data-turbo-frame='_top'><img aria-hidden='true' src='{}' width='48' height='48'></a>{}</div>",
+                                esc(&title), esc(&avatar), esc(&name)
                             )
                         } else {
                             "☒".to_string()
@@ -4818,6 +4817,7 @@ fn insert_message(
             &db,
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
+            s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
         )?;
         let (plain, html) = rich_body_trusted(&trusted, request_host);
         (plain, Some(html))
@@ -5546,6 +5546,7 @@ async fn message_update(
             &db,
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
+            s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
         )?;
         let (plain, html) = rich_body_trusted(
             &trusted,
@@ -10100,6 +10101,7 @@ fn render_imported_rich_text(
     signing_key: &[u8],
     imported_key: Option<&[u8]>,
     blob_key: &[u8],
+    avatar_key: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = db.get()?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS import_missing_search(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE)")?;
@@ -10119,7 +10121,7 @@ fn render_imported_rich_text(
             let cleaned = strip_disallowed_rich_tags(source);
             let (inline, _) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
-            let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
+            let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key, avatar_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
             let (plain, html) = rich_body_trusted(&trusted, None);
             if *missing_search {
@@ -10195,7 +10197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     let imported_cookie_signing_key = campfire_secret.as_deref().map(rails_cookie_key).transpose()?;
     if command.as_deref() == Some("--render-imported-rich-text") {
-        render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref(), imported_blob_signing_key.as_deref().unwrap_or(&blob_signing_key))?;
+        render_imported_rich_text(&db, &mention_signing_key, imported_mention_signing_key.as_deref(), imported_blob_signing_key.as_deref().unwrap_or(&blob_signing_key), imported_avatar_signing_key.as_deref().unwrap_or(&avatar_signing_key))?;
         return Ok(());
     }
     let custom_styles: Option<String> = db
