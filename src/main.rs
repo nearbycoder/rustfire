@@ -2562,6 +2562,7 @@ fn public_network_ip(ip: IpAddr) -> bool {
             let [a, b, c, _] = value.octets();
             !(a == 0
                 || (a == 100 && (64..=127).contains(&b))
+                || value == Ipv4Addr::new(168, 63, 129, 16)
                 || (a == 192 && b == 0 && c == 0)
                 || (a == 192 && b == 0 && c == 2)
                 || (a == 192 && b == 88 && c == 99)
@@ -2572,9 +2573,68 @@ fn public_network_ip(ip: IpAddr) -> bool {
         }
         IpAddr::V6(value) => {
             let seg = value.segments();
-            (seg[0] & 0xe000) == 0x2000 && !(seg[0] == 0x2001 && seg[1] == 0x0db8)
+            // Follow the pinned Campfire Surfguard default policy. IPv4 mapped and
+            // compatible forms are refused even if the embedded address is public.
+            if value.to_ipv4_mapped().is_some() || seg[..6].iter().all(|part| *part == 0) {
+                return false;
+            }
+            if seg[0] == 0x64 && seg[1] == 0xff9b && seg[2] == 1 {
+                return false; // local-use NAT64 /48
+            }
+            if (seg[0] == 0x64 && seg[1] == 0xff9b && seg[2..6].iter().all(|part| *part == 0))
+                || (seg[..4].iter().all(|part| *part == 0) && seg[4] == 0xffff && seg[5] == 0)
+            {
+                let embedded = Ipv4Addr::new(
+                    (seg[6] >> 8) as u8,
+                    seg[6] as u8,
+                    (seg[7] >> 8) as u8,
+                    seg[7] as u8,
+                );
+                return public_network_ip(IpAddr::V4(embedded));
+            }
+            if (seg[0] == 0x2001 && seg[1] == 3)
+                || (seg[0] == 0x2001 && seg[1] == 4 && seg[2] == 0x112)
+            {
+                return true; // globally reachable IETF assignments
+            }
+            if (seg[0] == 0x2001 && seg[1] < 0x200)
+                || seg[0] == 0x2002
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || (seg[0] == 0x100 && (seg[1..4].iter().all(|part| *part == 0)
+                    || (seg[1] == 0 && seg[2] == 0 && seg[3] == 1)))
+                || (seg[0] == 0x3fff && seg[1] >> 12 == 0)
+                || seg[0] == 0x5f00
+                || (seg[0] & 0xffc0) == 0xfec0
+            {
+                return false;
+            }
+            allocated_ipv6_unicast(value)
         }
     }
+}
+fn allocated_ipv6_unicast(address: Ipv6Addr) -> bool {
+    // The pinned Surfguard IANA allocated-unicast snapshot, parsed once. Keep
+    // this allowlist in sync when updating the Campfire compatibility target.
+    const CIDRS: &[&str] = &[
+        "2001::/23", "2001:200::/23", "2001:400::/23", "2001:600::/23", "2001:800::/22",
+        "2001:c00::/23", "2001:e00::/23", "2001:1200::/23", "2001:1400::/22", "2001:1800::/23",
+        "2001:1a00::/23", "2001:1c00::/22", "2001:2000::/19", "2001:4000::/23",
+        "2001:4200::/23", "2001:4400::/23", "2001:4600::/23", "2001:4800::/23",
+        "2001:4a00::/23", "2001:4c00::/23", "2001:5000::/20", "2001:8000::/19",
+        "2001:a000::/20", "2001:b000::/20", "2002::/16", "2003::/18", "2400::/12",
+        "2410::/12", "2600::/12", "2610::/23", "2620::/23", "2630::/12", "2800::/12",
+        "2a00::/12", "2a10::/12", "2c00::/12",
+    ];
+    static RANGES: OnceLock<Vec<(u128, u8)>> = OnceLock::new();
+    let ranges = RANGES.get_or_init(|| {
+        CIDRS.iter().map(|cidr| {
+            let (network, bits) = cidr.split_once('/').expect("IPv6 CIDR");
+            (u128::from(network.parse::<Ipv6Addr>().expect("IPv6 address")),
+                bits.parse::<u8>().expect("IPv6 prefix length"))
+        }).collect()
+    });
+    let address = u128::from(address);
+    ranges.iter().any(|(network, bits)| address >> (128 - bits) == network >> (128 - bits))
 }
 fn client_ip(trusted_proxies: &HashSet<IpAddr>, headers: &HeaderMap, peer: IpAddr) -> IpAddr {
     let mut ip = peer;
@@ -11367,6 +11427,26 @@ mod tests {
         }
         for address in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
             assert!(public_ip(address.parse::<IpAddr>().unwrap()), "{address}");
+        }
+    }
+    #[test]
+    fn outbound_address_policy_matches_pinned_campfire_transition_ranges() {
+        for address in [
+            "168.63.129.16", "100.64.0.1", "192.0.2.1", "198.18.0.1",
+            "::ffff:93.184.216.34", "::93.184.216.34",
+            "::ffff:0:169.254.169.254", "::ffff:0:127.0.0.1",
+            "64:ff9b::a9fe:a9fe", "64:ff9b::a00:5",
+            "64:ff9b:1::808:808", "2002:a9fe:a9fe::", "2001::1",
+            "2001:2::1", "2001:db8::1", "3fff::1", "5f00::1",
+            "fec0::1", "ff02::1",
+        ] {
+            assert!(!super::public_network_ip(address.parse().unwrap()), "{address}");
+        }
+        for address in [
+            "93.184.216.34", "8.8.8.8", "64:ff9b::808:808",
+            "2606:4700:4700::1111", "2001:3::1", "2001:4:112::1",
+        ] {
+            assert!(super::public_network_ip(address.parse().unwrap()), "{address}");
         }
     }
     #[test]
