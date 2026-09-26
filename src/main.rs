@@ -7896,23 +7896,28 @@ async fn avatar_get(
     headers: HeaderMap,
     Path(token): Path<String>,
 ) -> AppResult {
-    let _viewer = user(&s, &headers)?;
-    let id = token
-        .parse::<i64>()
-        .ok()
-        .filter(|id| *id > 0)
+    avatar_response(s, headers, token).await
+}
+async fn avatar_get_me(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+    avatar_response(s, headers, "me".to_owned()).await
+}
+async fn avatar_response(s: Arc<AppState>, headers: HeaderMap, token: String) -> AppResult {
+    match user(&s, &headers) {
+        Ok(_) => {}
+        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(error) => return Err(error),
+    }
+    let id = avatar_id_from_token(&s.avatar_signing_key, &token)
         .or_else(|| {
-            avatar_id_from_token(&s.avatar_signing_key, &token).or_else(|| {
-                s.imported_avatar_signing_key
-                    .as_deref()
-                    .and_then(|key| avatar_id_from_token(key, &token))
-            })
+            s.imported_avatar_signing_key
+                .as_deref()
+                .and_then(|key| avatar_id_from_token(key, &token))
         })
         .ok_or(StatusCode::NOT_FOUND)?;
     let db = pool(&s)?;
     let account: Option<(String, i64)> = db
         .query_row(
-            "SELECT name,role FROM users WHERE id=?1 AND status=0",
+            "SELECT name,role FROM users WHERE id=?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -8770,12 +8775,14 @@ async fn bot_edit(
         return Err(StatusCode::FORBIDDEN);
     }
     let db = pool(&s)?;
-    let bot: Option<(String, String, String)> = db.query_row(
-        "SELECT u.name,u.bot_token,COALESCE(w.url,'') FROM users u LEFT JOIN webhooks w ON w.user_id=u.id WHERE u.id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL",
+    let bot: Option<(String, String, String, String)> = db.query_row(
+        "SELECT u.name,u.bot_token,COALESCE(w.url,''),u.updated_at FROM users u LEFT JOIN webhooks w ON w.user_id=u.id WHERE u.id=?1 AND u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL",
         [id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).optional().map_err(db_err)?;
-    let (name, _token, webhook_url) = bot.ok_or(StatusCode::NOT_FOUND)?;
+    let (name, _token, webhook_url, updated_at) = bot.ok_or(StatusCode::NOT_FOUND)?;
+    let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+    let avatar = avatar_path(avatar_key, id, &updated_at)?;
     Ok(render(
         "Edit bot",
         &format!(
@@ -8784,7 +8791,7 @@ async fn bot_edit(
                 &format!("/account/bots/{id}"),
                 &name,
                 &webhook_url,
-                &format!("/users/{id}/avatar"),
+                &avatar,
                 true
             ),
         ),
@@ -10787,7 +10794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .patch(profile_post)
                 .put(profile_post),
         )
-        .route("/users/me/avatar", post(avatar_post).delete(avatar_delete))
+        .route("/users/me/avatar", get(avatar_get_me).post(avatar_post).delete(avatar_delete))
         .route(
             "/users/me/push_subscriptions",
             get(push_subscriptions_get).post(push_subscriptions_post),

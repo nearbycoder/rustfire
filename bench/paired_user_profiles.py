@@ -65,6 +65,24 @@ class ProfilePanel(HTMLParser):
             self.tokens.append(("text", " ".join(data.split())))
 
 
+class ProfileAvatar(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.path = None
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "img" and values.get("alt") == "Profile avatar":
+            self.path = values.get("src")
+
+
+def avatar_path(page):
+    parser = ProfileAvatar()
+    parser.feed(page.decode())
+    assert parser.path and parser.path.startswith("/users/") and "/avatar" in parser.path
+    return parser.path
+
+
 def seed_profile(database):
     with sqlite3.connect(database) as db:
         db.execute(
@@ -136,6 +154,13 @@ def main():
         try:
             wait_for_server(camp_port, camp_process)
             camp_cookie, camp_csrf = login_campfire(camp_port)
+            for path in ("/users/me/avatar", "/users/1/avatar", "/users/not-a-valid-token/avatar"):
+                for rust_cookie, source_cookie in (("session_token=benchmark-session", camp_cookie), ("", "")):
+                    actual_status, actual_location, _ = request(rust_port, "GET", path, rust_cookie, "")
+                    expected_status, expected_location, _ = request(camp_port, "GET", path, source_cookie, "")
+                    actual = (actual_status, urllib.parse.urlsplit(actual_location).path if actual_location else None)
+                    expected = (expected_status, urllib.parse.urlsplit(expected_location).path if expected_location else None)
+                    assert actual == expected, (path, bool(rust_cookie), actual, expected)
             rust = profile(rust_port, "session_token=benchmark-session", "benchmark-csrf", 1)
             camp = profile(camp_port, camp_cookie, camp_csrf, 1)
             compare_profile("administrator's own profile", rust, camp)
@@ -151,6 +176,12 @@ def main():
                 rust = profile(rust_port, "session_token=benchmark-session", "benchmark-csrf")
                 camp = profile(camp_port, camp_cookie, camp_csrf)
                 compare_profile(label, rust, camp)
+                for port, cookie, csrf, page in (
+                    (rust_port, "session_token=benchmark-session", "benchmark-csrf", rust[0]),
+                    (camp_port, camp_cookie, camp_csrf, camp[0]),
+                ):
+                    avatar_status, _, _ = request(port, "GET", avatar_path(page), cookie, csrf)
+                    assert avatar_status == 200, (label, port, avatar_status)
             set_state(rust_db, 0, 2)
             set_state(camp_db, 0, 2)
             data = urllib.parse.urlencode({"_method": "delete"}).encode()
@@ -179,7 +210,7 @@ def main():
                     profile(rust_port, "session_token=member-session", "member-csrf", user_id),
                     profile(camp_port, member_cookie, member_csrf, user_id),
                 )
-            print("PASS paired profile panels and form-based unban")
+            print("PASS paired avatar routes, profile panels, and form-based unban")
         except Exception:
             log.flush()
             log.seek(0)

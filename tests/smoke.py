@@ -62,6 +62,14 @@ def bot_key_from_page(page):
     return re.search(r"/rooms/1/([0-9]+-[A-Za-z0-9]+)/messages", html.unescape(page)).group(1)
 
 
+def signed_avatar_url(user_id):
+    key = hashlib.pbkdf2_hmac("sha256", b"test-secret-key-base", b"active_record/signed_id", 1000, 64)
+    payload = json.dumps({"_rails": {"data": user_id, "pur": "user/avatar"}}, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.new(key, encoded, hashlib.sha256).hexdigest()
+    return f"/users/{encoded.decode()}--{signature}/avatar"
+
+
 def main():
     port = free_port()
     base = f"http://127.0.0.1:{port}"
@@ -286,10 +294,15 @@ def main():
             assert subscription(push_keys)[0] == 200
             code,_,subscriptions=request(member,base,"/users/me/push_subscriptions")
             assert code==200 and push_keys["endpoint"] in html.unescape(subscriptions)
-            subscription_id=int(re.search(r"push_subscriptions/(\d+)/test_notifications",subscriptions).group(1))
+            subscription_ids={int(value) for value in re.findall(r"push_subscriptions/(\d+)/test_notifications",subscriptions)}
+            assert len(subscription_ids) == 2
+            subscription_id=min(subscription_ids)
             assert request(admin,base,f"/users/me/push_subscriptions/{subscription_id}/test_notifications",{},method="POST")[0]==404
             assert request(member,base,f"/users/me/push_subscriptions/{subscription_id}/test_notifications",{},method="POST")[0]==200
             assert request(member,base,f"/users/me/push_subscriptions/{subscription_id}/delete",{},method="POST")[0]==200
+            assert push_keys["endpoint"] in html.unescape(request(member,base,"/users/me/push_subscriptions")[2])
+            remaining_subscription_id=(subscription_ids-{subscription_id}).pop()
+            assert request(member,base,f"/users/me/push_subscriptions/{remaining_subscription_id}/delete",{},method="POST")[0]==200
             assert push_keys["endpoint"] not in html.unescape(request(member,base,"/users/me/push_subscriptions")[2])
             png=base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=")
             image_body=(b"--image-test\r\nContent-Disposition: form-data; name=\"message[attachment]\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--image-test--\r\n")
@@ -335,7 +348,7 @@ def main():
             avatar_body=(b"--avatar-test\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"+png+b"\r\n--avatar-test--\r\n")
             code, _, _ = request(member, base, "/users/me/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200
-            with member.open(base+"/users/2/avatar") as res:
+            with member.open(base+signed_avatar_url(2)) as res:
                 image = res.read()
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF" and image[8:12]==b"WEBP"
             stored_avatar = sqlite3.connect(f"{tmp}/test.db").execute("SELECT stored_name FROM avatars WHERE user_id=2").fetchone()[0]
@@ -595,7 +608,7 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as db:
                 picture_bot_id, picture_webhook = db.execute("SELECT u.id,w.url FROM users u JOIN webhooks w ON w.user_id=u.id WHERE u.name='Picture Bot'").fetchone()
             assert picture_webhook == "https://example.com/hook"
-            with admin.open(base+f"/users/{picture_bot_id}/avatar") as res:
+            with admin.open(base+signed_avatar_url(picture_bot_id)) as res:
                 image = res.read()
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF"
             invalid_bot_body=bot_create_body.replace(b"Content-Type: image/png", b"Content-Type: text/plain").replace(b"Picture Bot", b"Invalid Bot")
@@ -606,7 +619,7 @@ def main():
             assert code == 200 and "Robot" in page and "name='user[avatar]'" in page
             code, _, _ = request(admin, base, "/account/bots/3/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200
-            with admin.open(base+"/users/3/avatar") as res:
+            with admin.open(base+signed_avatar_url(3)) as res:
                 image = res.read()
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF" and image[8:12]==b"WEBP"
             code, _, _ = request(admin, base, "/account/bots/3/avatar/delete", {})
@@ -615,7 +628,7 @@ def main():
                              +bot_create_body.replace(b"Picture Bot", b"Updated Robot"))
             code, _, page = request(admin, base, "/account/bots/3", data=bot_update_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=bot-create"})
             assert code == 200 and "Updated Robot" in page
-            with admin.open(base+"/users/3/avatar") as res:
+            with admin.open(base+signed_avatar_url(3)) as res:
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and res.read()[:4]==b"RIFF"
             code, _, _ = request(client(), base, "/account/bots/3/key", {})
             assert code == 401
