@@ -788,7 +788,20 @@ Rustfire completed roughly twice as many checked reads and had lower sampled rea
 
 ## Main room page shell
 
-After replacing Rustfire's custom room shell with Campfire's page structure, `python bench/paired_room_shell.py` passed against pinned Campfire `91d294f` on a disposable original-room fixture. The parsed navigation (180 tokens), composer footer (55), initial sidebar Turbo frame (4), rendered message area (129), and parsed optimistic-message template (39) matched after normalizing session CSRF values, the two server origins including the QR URL, and the product name. The matched original room includes the invitation panel; the probe uses an administrator and one Chrome user-agent profile. The browser check showed the desktop and mobile layouts, a working mobile sidebar, visible messages, and a submitted message appearing live without page errors. Raw full-document bytes, source JavaScript/Turbo behavior, other room states, and sustained room-page speed and scale remain unverified.
+After replacing Rustfire's custom room shell with Campfire's page structure, `python bench/paired_room_shell.py` passed against pinned Campfire `91d294f` on disposable fixtures. It compared original, direct, and private rooms; the original room after posting the same message; and that room after uploading the same account logo. The largest message area had **304 matching parsed tokens**. The original room's parsed navigation (180 tokens without a logo, 183 with one), composer footer (55), initial sidebar Turbo frame (4), and optimistic-message template (39) also matched. The comparison normalizes independent CSRF tokens, server origins including the encoded QR URL, generated post times, logo version, and product name. A browser check showed the desktop and mobile layouts, a working mobile sidebar, visible messages, and successful text and file sends without page errors.
+
+The checked read mode used the original room after one message and logo upload, 22 Campfire Puma workers, one Rustfire process, and the Go keep-alive client. Every timed response had HTTP 200, HTML content type, and one message root; no errors occurred. Five-second runs at 32 clients and ten-second runs at 128 and 256 clients gave:
+
+| Clients | Rustfire first | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| ---: | :---: | ---: | ---: |
+| 32 | No | 3,487.5 / 11.33 ms | 1,308.7 / 50.95 ms |
+| 32 | Yes | 3,373.7 / 11.49 ms | 1,268.5 / 49.78 ms |
+| 128 | No | 3,399.3 / 60.11 ms | 1,367.8 / 153.29 ms |
+| 128 | Yes | 3,256.6 / 63.38 ms | 1,356.2 / 156.96 ms |
+| 256 | No | 3,679.0 / 120.17 ms | 1,368.8 / 301.67 ms |
+| 256 | Yes | 3,622.9 / 121.80 ms | 1,350.1 / 304.38 ms |
+
+At a provisional 250 ms p95 read target, Rustfire passed at all three sampled concurrency levels; Campfire exceeded it at 256. These serial, same-host bursts show a room-page advantage under this checked fixture. Both servers remained running during each trial, although only one received load. The client shared the host, every timed body was checked for status/type/message count rather than full parsed equality, raw full-document bytes and source JavaScript/Turbo behavior differ, and neither app was tested to a sustained failure limit. This does not establish a whole-app speed or maximum-scale advantage at full parity.
 
 ## Mixed rich-text reads, writes, and room fanout
 
