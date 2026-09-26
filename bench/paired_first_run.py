@@ -64,6 +64,13 @@ def form_structure(page):
     return parser.tags, parser.attribute_keys
 
 
+def page_shell(page):
+    styles = re.findall(r'<link[^>]+rel=[\'\"]stylesheet[\'\"][^>]+href=[\'\"]([^\'\"]+)', page)
+    body = re.search(r'<body[^>]+class=[\'\"]([^\'\"]*)', page)
+    landmarks = tuple(bool(re.search(rf'<[^>]+id=[\'\"]{name}[\'\"]', page)) for name in ("nav", "main-content", "footer", "sidebar", "app-logo"))
+    return styles, body.group(1) if body else None, landmarks
+
+
 def check(port, database, campfire, image):
     opener = browser()
     assert fetch(opener, port, "/")[:2] == (302, "/session/new")
@@ -96,7 +103,7 @@ def check(port, database, campfire, image):
     assert status == 200 and "All Talk" in room_page
     assert fetch(opener, port, "/first_run")[:2] == (302, "/")
     assert fetch(browser(), port, "/")[:2] == (302, "/session/new")
-    return (account, [(name, email, role)], [(room_name, kind)], avatar_count), form_structure(page)
+    return (account, [(name, email, role)], [(room_name, kind)], avatar_count), form_structure(page), page_shell(page)
 
 
 def main():
@@ -137,6 +144,7 @@ def main():
             for rust_part, source_part in zip(rust_result[1], source_result[1]):
                 mismatches = [(index, rust_item, source_item) for index, (rust_item, source_item) in enumerate(zip(rust_part, source_part)) if rust_item != source_item]
                 assert not mismatches and len(rust_part) == len(source_part), (len(rust_part), len(source_part), mismatches[:12])
+            assert rust_result[2] == source_result[2], (rust_result[2], source_result[2])
         finally:
             redis.terminate()
             redis.wait(timeout=10)

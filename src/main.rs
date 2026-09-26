@@ -1723,8 +1723,31 @@ fn render(title: &str, body: &str, current: Option<&User>) -> Response {
     )
 }
 fn render_unauth(title: &str, body: &str) -> Response {
+    render_unauth_with_nav(title, body, "")
+}
+fn render_unauth_with_nav(title: &str, body: &str, nav: &str) -> Response {
     let token = Uuid::new_v4().to_string();
-    let mut response = render_with_csrf(title, body, None, &token);
+    const CAMPFIRE_STYLES: &[&str] = &[
+        "_reset-9c3efd7b.css", "actiontext-2aab36c6.css", "animation-bcdb4bab.css",
+        "autocomplete-cdf3d8bd.css", "avatars-279376ab.css", "base-637a0ec8.css",
+        "boosts-da4032a8.css", "buttons-c7d39fd4.css", "code-333ae548.css",
+        "colorize-eb391ca0.css", "colors-aee62523.css", "composer-f81b1e02.css",
+        "embeds-c2564969.css", "filters-8a4d63ed.css", "flash-a561c1e5.css",
+        "inputs-9e58a07c.css", "layout-ff6ddfc6.css", "lightbox-af496d39.css",
+        "messages-49d96172.css", "nav-05e7183a.css", "panels-af44ec6d.css",
+        "separators-172b3ab8.css", "sidebar-0be58db9.css", "signup-6e02d591.css",
+        "spinner-5a118f25.css", "trix-65afdb1d.css", "utilities-e2f32466.css",
+    ];
+    let styles = CAMPFIRE_STYLES.iter()
+        .map(|file| format!("<link rel=\"stylesheet\" href=\"/assets/{file}\" data-turbo-track=\"reload\">"))
+        .collect::<String>();
+    let body_class = if matches!(title, "Set up Rustfire" | "Sign up") { "signup" } else { "" };
+    let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name='csrf-token' content='{token}'><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="/account/logo" type="image/png"><link rel="apple-touch-icon" href="/account/logo">{styles}{custom_styles}<script defer src="/static/app.js"></script></head>
+<body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav><main id="main-content">{body}<footer id="footer"></footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open"></aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
+        title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
+    );
+    let mut response = Html(csrf_forms(&html, &token)).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
@@ -1816,11 +1839,6 @@ fn incompatible_browser_page() -> Response {
     .into_response()
 }
 fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
-    let signup_stylesheet = if body.contains("class=\"nametag u-relative\"") || body.contains("class=\"sign-in txt-align-center\"") {
-        "<link rel='stylesheet' href='/static/signup.css'>"
-    } else {
-        ""
-    };
     let account_stylesheet = if body.contains("class='panel account-settings") || body.contains("custom-styles-panel") {
         "<link rel='stylesheet' href='/static/account.css'>"
     } else {
@@ -1842,7 +1860,7 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
     let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
     let custom_styles = custom_styles_tag();
     let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{signup_stylesheet}{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
         esc(token),
         VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
         esc(title),
@@ -2858,13 +2876,13 @@ fn login_page(s: &AppState, email_address: &str, rejection: Option<StatusCode>) 
     ]);
     let help_contact = owner.map(|(name, email)| {
         let address = format!("mailto:\"{name}\" <{email}>");
-        format!("<div class=\"signup-help txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
+        format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
     }).unwrap_or_default();
     let flash = if rejection.is_some() {
         "<div class=\"flash\" role=\"alert\">Too many requests or unauthorized.</div>"
     } else { "" };
     let shake = if rejection.is_some() { " shake" } else { "" };
-    let body = format!(r#"{flash}<section class="sign-in txt-align-center"><div class="panel{shake}"><figure class="account-logo avatar center margin-block-end txt-xx-large"><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure>
+    let body = format!(r#"{flash}<section class="txt-align-center"><div class="panel{shake}"><figure class="account-logo avatar center margin-block-end txt-xx-large"><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure>
 <form class="flex flex-column gap" action="/session" accept-charset="UTF-8" method="post"><fieldset class="flex flex-column gap center-block upad"><legend class="txt-large txt-align-center"><strong>{account_name}</strong></legend>
 <div class="flex align-center gap">{email_translation}<label class="flex align-center gap input input--actor txt-large"><input required="required" class="input" autofocus="autofocus" autocomplete="username" placeholder="Enter your email address" value="{email_address}" type="email" name="email_address" id="email_address"><img aria-hidden="true" class="colorize--black" src="/assets/email-6c595bc5.svg" width="24" height="24"></label></div>
 <div class="flex align-center gap">{password_translation}<label class="flex align-center gap input input--actor txt-large"><input required="required" class="input" autocomplete="current-password" placeholder="Enter your password" maxlength="72" size="72" type="password" name="password" id="password"><img aria-hidden="true" class="colorize--black" src="/assets/password-0896da4e.svg" width="24" height="24"></label></div>
@@ -7020,7 +7038,7 @@ async fn join_get(
         .map_err(db_err)?;
     let help_contact = owner.map(|(name, email)| {
         let address = format!("mailto:\"{name}\" <{email}>");
-        format!("<div class=\"signup-help txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
+        format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
     }).unwrap_or_default();
     let logo_version: String = updated_at.chars().filter(char::is_ascii_digit).take(14).collect();
     let name_translation = profile_translation_button("Enter your name", [
@@ -7038,8 +7056,7 @@ async fn join_get(
         "Insira sua senha", "パスワードを入力してください",
     ]);
     let body = format!(
-        r#"<nav class="signup-nav"><a href="/session/new" class="btn"><img aria-hidden="true" src="/assets/login-keys-df926967.svg"><span class="for-screen-reader">Sign in</span></a></nav>
-<form class="center" enctype="multipart/form-data" action="/join/{code}" accept-charset="UTF-8" method="post">
+        r#"<form class="center" enctype="multipart/form-data" action="/join/{code}" accept-charset="UTF-8" method="post">
 <section class="nametag u-relative"><div class="flex justify-center align-center pad-block"><img class="nametag__lanyard" aria-hidden="true" src="/assets/lanyard-945079e9.svg"></div>
 <div class="nametag__inner flex flex-column gap"><fieldset class="flex flex-column center-block"><legend class="txt-align-center flex gap"><figure class="account-logo avatar "><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure><strong class="txt-large">{account_name}</strong></legend>
 <label class="align-center center avatar__form gap" data-controller="upload-preview"><div class="btn input--file"><img aria-hidden="true" src="/assets/camera-927323b8.svg"><input class="input" accept="image/*" data-upload-preview-target="input" data-action="upload-preview#previewImage" type="file" name="user[avatar]" id="user_avatar"><span class="for-screen-reader">Upload avatar</span></div><div class="btn avatar input--file txt-xx-large"><img aria-hidden="true" data-upload-preview-target="image" src="/assets/default-avatar-1ee67b00.svg"><span class="for-screen-reader">Avatar</span></div></label></fieldset>
@@ -7050,9 +7067,10 @@ async fn join_get(
         code = esc(&code),
         account_name = esc(&account_name),
     );
-    Ok(render_unauth(
+    Ok(render_unauth_with_nav(
         "Sign up",
         &body,
+        "<div class=\"flex-item-justify-end\"><a href=\"/session/new\" class=\"btn flex-item-justify-end\"><img aria-hidden=\"true\" src=\"/assets/login-keys-df926967.svg\"><span class=\"for-screen-reader\">Sign in</span></a></div>",
     ))
 }
 async fn join_post(

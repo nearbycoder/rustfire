@@ -13,6 +13,7 @@ import urllib.request
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_turbo_fanout import MessageTagSequence
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -56,6 +57,14 @@ def csrf_token(page):
     return match.group(1)
 
 
+def navigation_shape(page):
+    nav = re.search(r'<nav id="nav">.*?</nav>', page, re.S)
+    assert nav, "signup navigation missing"
+    parser = MessageTagSequence()
+    parser.feed(nav.group())
+    return parser.tags, parser.attribute_keys, parser.text
+
+
 def check(port, database, signed_cookie):
     opener = browser()
     status, _, page, _ = fetch(opener, port, "/join/benchmark")
@@ -65,6 +74,7 @@ def check(port, database, signed_cookie):
     assert 'enctype="multipart/form-data"' in page
     assert re.search(r'name=[\'\"]authenticity_token[\'\"] value=[\'\"][^\'\"]+', page)
     assert "Benchmark" in page and "Sign up" in page
+    navigation = navigation_shape(page)
     assert fetch(opener, port, "/join/wrong")[0] == 404
     assert fetch(browser(), port, "/join/benchmark", cookie=signed_cookie)[0:2] == (302, "/")
     status, _, page, _ = fetch(opener, port, "/join/benchmark")
@@ -90,7 +100,7 @@ def check(port, database, signed_cookie):
         memberships = db.execute("SELECT room_id FROM memberships WHERE user_id=? ORDER BY room_id", [uid]).fetchall()
         open_rooms = db.execute("SELECT id FROM rooms WHERE type='Rooms::Open' ORDER BY id").fetchall()
     assert (name, email, memberships) == ("New Member", "new-member@example.invalid", open_rooms)
-    return (status, path, len(memberships))
+    return (status, path, len(memberships)), navigation
 
 
 def main():

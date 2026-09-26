@@ -246,7 +246,7 @@ def main():
             assert request(client(), base, "/qr_code/not-base64!")[0] == 400
             member = client()
             code, _, join_page = request(member, base, f"/join/{join}")
-            assert code == 200 and '/static/signup.css' in join_page
+            assert code == 200 and '/assets/signup-6e02d591.css' in join_page
             assert 'enctype="multipart/form-data"' in join_page and 'name="user[avatar]"' in join_page
             assert all(f'name="user[{field}]"' in join_page for field in ('name', 'email_address', 'password'))
             duplicate = client()
