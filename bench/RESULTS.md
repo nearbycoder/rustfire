@@ -751,4 +751,15 @@ Rustfire was faster on this checked preview-rich read route in both short runs. 
 
 ## Rich-text sanitization parity
 
-`python bench/paired_rich_filters.py` compared the complete parsed message presentation after posting ten identical rich bodies to disposable Campfire and Rustfire instances. Both apps removed standalone remote images, tables, and sections; stripped event-handler attributes and a data-URL link destination; and retained permitted address/big tags, class and time attributes, a normal link, bold/code text, and a list. Rustfire filters submitted tags before rendering verified mentions and imported inline attachments, so their generated avatars and previews remain visible. The full HTTP smoke and Campfire importer tests passed after this ordering change. This checks ten sampled cases, not every ActionText tag or attachment path, and adds no new performance result.
+`python bench/paired_rich_filters.py` compared the complete parsed message presentation after posting seventeen identical rich bodies to disposable Campfire and Rustfire instances. Both apps removed standalone remote images, tables, and sections; stripped event-handler attributes and unsafe links; and retained permitted address/big tags, safe attributes, ordinary links, bold/code text, and a list. Rustfire filters submitted tags before rendering verified mentions and imported inline attachments, so their generated avatars and previews remain visible. The repeatable `--sweep` passed all **123** paired presentations, including 23 permitted-tag, 25 attribute, 43 URL-scheme, seven data-URL, and eight obfuscated-URL cases. These are sampled presentation checks, not every ActionText or attachment path; the sanitizer probe itself does not measure throughput.
+
+## Mixed message rerun after rich-text sanitizer alignment
+
+After the sanitizer changes, `python bench/paired_message_mix.py --clients 32 --seconds 10 --write-rate 10 --campfire-workers 22` passed in both trial orders, adding `--rustfire-first` for the reverse order. Each disposable app started with 40 matched messages and completed 100 browser-style message posts during ten seconds of 32 checked page readers. The harness compared the initial parsed message markup, final message IDs and saved bodies, and required HTTP 200, HTML responses with 40 message roots on every measured read. Write responses had the expected Turbo type and target. There were zero checked read errors; socket capture was disabled.
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| :---: | ---: | ---: | ---: | ---: |
+| Yes | 3,308 / 14.20 ms | 8.17 ms | 1,540 / 40.28 ms | 60.06 ms |
+| No | 3,242 / 14.57 ms | 7.29 ms | 1,616 / 35.89 ms | 91.60 ms |
+
+Rustfire completed roughly twice as many checked reads and had lower sampled read and write latency under this local plain-message workload. The ten-second trials shared one host with the load generator and ran the apps serially; Campfire used 22 Puma workers and Rustfire one process. These checks do not compare each write's full Turbo event, rich-text sanitizer cases under load, long-lived sockets, or maximum sustainable capacity, and they do not establish a whole-app advantage at full parity.

@@ -615,14 +615,58 @@ fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
     let input = cleaned.as_deref().unwrap_or(input);
     rich_body_trusted(input, request_host)
 }
+fn campfire_safe_data_url(value: &str) -> bool {
+    let Some(rest) = value.get(..5).filter(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        .and_then(|_| value.get(5..)) else {
+        return true;
+    };
+    let Some((metadata, _)) = rest.split_once(',') else {
+        return false;
+    };
+    let normalized = metadata.chars()
+        .filter(|character| !matches!(*character as u32, 0..=0x20 | 0x7f..=0x101))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let media_type = normalized.split(';').next().unwrap_or("");
+    let token = |part: &str| !part.is_empty() && part.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte,
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
+            b'^' | b'_' | b'`' | b'|' | b'~')
+    });
+    let media_type = if media_type.split_once('/').is_some_and(|(kind, subtype)| token(kind) && token(subtype)) {
+        media_type
+    } else {
+        "text/plain"
+    };
+    matches!(media_type, "image/gif" | "image/jpeg" | "image/png" | "text/css" | "text/plain")
+}
 fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String) {
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
         .link_rel(None)
         .add_tags(&["action-text-attachment", "figure", "figcaption", "address", "big"])
-        .add_tag_attributes("action-text-attachment", &["sgid", "content-type", "filename", "filesize", "caption", "width", "height", "previewable"])
-        .add_tag_attributes("time", &["datetime"])
-        .add_generic_attributes(&["class"])
+        .tag_attributes(HashMap::new())
+        .generic_attributes([
+            "abbr", "alt", "cite", "class", "datetime", "height", "href", "lang",
+            "name", "src", "title", "width", "xml:lang",
+        ].into_iter().collect())
+        .add_tag_attributes("action-text-attachment", &[
+            "sgid", "content-type", "url", "filename", "filesize", "previewable",
+            "presentation", "caption", "content",
+        ])
+        .url_schemes([
+            "afs", "aim", "callto", "data", "ed2k", "fax", "ftp", "gopher", "http",
+            "https", "irc", "line", "mailto", "modem", "news", "nntp", "rsync",
+            "rtsp", "sftp", "sms", "ssh", "tag", "tel", "telnet", "urn", "webcal",
+            "xmpp",
+        ].into_iter().collect())
+        .attribute_filter(|_, attribute, value| {
+            if matches!(attribute, "href" | "src") && !campfire_safe_data_url(value) {
+                None
+            } else {
+                Some(value.into())
+            }
+        })
         .clean(&display_input)
         .to_string();
     let plain_input =
