@@ -23,6 +23,15 @@ from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redi
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_message_cache import fetch, seed_additional_messages, set_distinct_creation_times
 from paired_room_refresh import seed_messages
+from paired_turbo_fanout import MessageTagSequence, check_message_times, stable_message_attributes
+
+
+class StreamWithoutCsrfInputs(MessageTagSequence):
+    def handle_starttag(self, tag, attrs):
+        if tag == "input" and ("name", "authenticity_token") in attrs:
+            assert any(key == "value" and value for key, value in attrs), "Empty stream CSRF input"
+            return
+        super().handle_starttag(tag, attrs)
 
 
 def writer(port, cookie, csrf, count, seconds, result):
@@ -59,14 +68,19 @@ def writer(port, cookie, csrf, count, seconds, result):
         connection.close()
 
 
-def measure(binary, port, cookie, csrf, clients, seconds, count, sockets=0, invalid_sample=None):
+def measure(binary, port, cookie, csrf, clients, seconds, count, sockets=0, invalid_sample=None, stream_sample=None, stream_events=None):
     capture = None
     if sockets:
-        capture = subprocess.Popen([
+        capture_command = [
             "node", "bench/capture_message_appends.mjs", "--base", f"http://127.0.0.1:{port}",
             "--cookie", cookie, "--sockets", str(sockets), "--messages", str(count),
             "--timeout", str(round((seconds + 30) * 1000)),
-        ], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ]
+        if stream_sample:
+            capture_command.extend(("--sample-file", str(stream_sample)))
+        if stream_events:
+            capture_command.extend(("--events-file", str(stream_events)))
+        capture = subprocess.Popen(capture_command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         ready, _, _ = select.select([capture.stdout], [], [], 60)
         marker = capture.stdout.readline().strip() if ready else ""
         if marker != "READY":
@@ -134,6 +148,37 @@ def check_final_page(body, count):
     assert ids == expected, (ids, expected)
 
 
+def check_stream_events(camp_file, rust_file, count):
+    camp_events = json.loads(camp_file.read_text())
+    rust_events = json.loads(rust_file.read_text())
+    assert len(camp_events) == len(rust_events) == count
+    for index, (camp_html, rust_html) in enumerate(zip(camp_events, rust_events), 1):
+        assert isinstance(camp_html, str) and isinstance(rust_html, str), index
+        camp, rust = StreamWithoutCsrfInputs(), StreamWithoutCsrfInputs()
+        camp.feed(camp_html)
+        rust.feed(rust_html)
+        check_message_times(camp.attributes, f"{camp_file} event {index}")
+        check_message_times(rust.attributes, f"{rust_file} event {index}")
+        assert rust.tags == camp.tags, f"Message append {index} tag structure differs"
+        assert rust.attribute_keys == camp.attribute_keys, f"Message append {index} attribute keys differ"
+        assert stable_stream_values(rust.attributes) == stable_stream_values(camp.attributes), f"Message append {index} static attributes differ"
+        assert rust.text == camp.text, f"Message append {index} text differs"
+
+
+def stable_stream_values(attributes):
+    values = []
+    for tag, attrs in stable_message_attributes(attributes):
+        normalized = []
+        for key, value in attrs:
+            if key == "data-copy-to-clipboard-content-value":
+                url = urllib.parse.urlsplit(value)
+                assert url.scheme in {"http", "https"} and url.netloc and url.path.startswith("/rooms/1/@"), value
+                value = url.path
+            normalized.append((key, value))
+        values.append((tag, tuple(normalized)))
+    return values
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clients", type=int, default=32)
@@ -182,7 +227,7 @@ def main():
                     first = fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")
                     if args.sample_dir:
                         (args.sample_dir / "rustfire-initial.html").write_bytes(first[2])
-                    result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", args.clients, args.seconds, count, args.sockets, args.sample_dir / "rustfire-invalid.html" if args.sample_dir else None)
+                    result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", args.clients, args.seconds, count, args.sockets, args.sample_dir / "rustfire-invalid.html" if args.sample_dir else None, (args.sample_dir or temp) / "rustfire-stream.html" if args.sockets else None, (args.sample_dir or temp) / "rustfire-events.json" if args.sockets else None)
                     check_final_page(fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")[2], count)
                     return first[2], result
                 finally:
@@ -197,7 +242,7 @@ def main():
                         first = fetch(camp_port, cookie, "/rooms/1/messages")
                         if args.sample_dir:
                             (args.sample_dir / "campfire-initial.html").write_bytes(first[2])
-                        result = measure(binary, camp_port, cookie, csrf, args.clients, args.seconds, count, args.sockets, args.sample_dir / "campfire-invalid.html" if args.sample_dir else None)
+                        result = measure(binary, camp_port, cookie, csrf, args.clients, args.seconds, count, args.sockets, args.sample_dir / "campfire-invalid.html" if args.sample_dir else None, (args.sample_dir or temp) / "campfire-stream.html" if args.sockets else None, (args.sample_dir or temp) / "campfire-events.json" if args.sockets else None)
                         check_final_page(fetch(camp_port, cookie, "/rooms/1/messages")[2], count)
                         return first[2], result
                     finally:
@@ -212,6 +257,8 @@ def main():
             redis.wait(timeout=10)
             redis_log.close()
         check_message_markup(camp_body, rust_body, 40)
+        if args.sockets:
+            check_stream_events((args.sample_dir or temp) / "campfire-events.json", (args.sample_dir or temp) / "rustfire-events.json", count)
         saved_messages(rust_db, count, False)
         saved_messages(camp_db, count, True)
         print("PASS paired mixed message reads and writes, response checks, and saved rows")

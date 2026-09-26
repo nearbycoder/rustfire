@@ -632,3 +632,14 @@ The same 32-reader, 100-write, ten-second workload was repeated with 100, 500, a
 | 1,000 | Yes | 100,000 | 3,132 / 15.20 ms | 7.82 ms | 1,158 / 56.37 ms | 96.63 ms |
 
 These are short serial runs on one host with one account, one room, and one writer. The socket checker verifies event identity and delivery count, not complete event bytes or per-event latency. The runs do not establish maximum connections, sustained multi-user capacity, or full application parity.
+
+The mixed probe now captures every append on one subscriber and compares each paired event's parsed tag order, attribute names, stable values, and text. The comparison excludes generated timestamps and the server origin in the copy link. It also excludes nonempty hidden CSRF inputs: Campfire's fragment cache emitted eight such inputs in two of 100 new-message events in one run and none in the other, while Rustfire's broadcasts omitted them. The initial and final HTTP pages retain their separate markup and persistence checks. Two fresh ten-second, 100-socket runs in opposite trial orders each matched all 100 paired append structures and delivered **10,000/10,000** events per app, without read, write, or socket errors:
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| :---: | ---: | ---: | ---: | ---: |
+| No | 3,223 / 14.62 ms | 7.69 ms | 1,483 / 44.35 ms | 82.12 ms |
+| Yes | 3,272 / 14.20 ms | 7.82 ms | 1,490 / 41.21 ms | 66.08 ms |
+
+This strengthens message-stream content evidence for the tested plain-text workload. It does not establish byte-identical serialization, the behavior of other message types, per-event delivery latency, or sustained capacity.
+
+The same all-event comparison also passed at **1,000 subscribers** in both trial orders. Each app delivered **100,000/100,000** expected events, with no read, write, or socket errors. Rustfire served **3,108 / 3,094 reads/s** at **14.89 / 15.34 ms p95**, versus Campfire's **1,262 / 1,186 reads/s** at **54.36 / 60.12 ms p95**. Rustfire's write p95 was **8.63 / 7.97 ms**, versus Campfire's **144.10 / 115.72 ms**. Campfire emitted CSRF inputs in none of the first run's 100 appends and seven of the reverse run's 100; these were normalized as described above. This remains a short same-host, one-account fixture rather than a sustained or maximum-capacity result.

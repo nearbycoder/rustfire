@@ -1,6 +1,7 @@
 // Capture every signed RoomMessagesChannel append during a mixed read/write trial.
 import net from 'node:net';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => {
   if (index % 2 === 0) pairs.push([value.slice(2), all[index + 1]]);
@@ -24,9 +25,11 @@ if (!signedName) throw new Error('Signed room stream is missing');
 const identifier = JSON.stringify({ channel: 'RoomMessagesChannel', signed_stream_name: signedName });
 const sockets = [];
 const seen = Array.from({ length: socketCount }, () => new Set());
+const events = args['events-file'] ? Array(messageCount).fill(null) : null;
 let received = 0;
 let unexpected = 0;
 let closedEarly = 0;
+let sampled = false;
 
 function frame(value) {
   const data = Buffer.from(value);
@@ -98,6 +101,11 @@ function connect(index) {
           } else {
             seen[index].add(number);
             received++;
+            if (index === 0 && number === 1 && args['sample-file'] && !sampled) {
+              fs.writeFileSync(args['sample-file'], html);
+              sampled = true;
+            }
+            if (index === 0 && events) events[number - 1] = html;
           }
         }
       }
@@ -113,8 +121,9 @@ try {
   const started = Date.now();
   const expected = socketCount * messageCount;
   while (received < expected && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
-  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, unexpected, closed_early: closedEarly, elapsed_ms: Date.now() - started }));
-  if (received !== expected || unexpected || closedEarly) process.exitCode = 1;
+  if (events) fs.writeFileSync(args['events-file'], JSON.stringify(events));
+  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, unexpected, closed_early: closedEarly, sampled, elapsed_ms: Date.now() - started }));
+  if (received !== expected || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;
 } finally {
   for (const socket of sockets) socket.destroy();
 }
