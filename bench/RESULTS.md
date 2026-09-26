@@ -595,3 +595,14 @@ The same disposable 40-message fixture was then used for full HTTP 200 response 
 | 128 | Yes | 3,334 / 59.70 ms | 1,564 / 127.03 ms |
 
 At a provisional 20 ms p95 target, Rustfire passed at 32 tested clients in both orders, and Campfire passed at 8; 16 clients were not tested. This adds feature-matched rendered-page evidence beyond the 304 path. It remains a short single-room, single-account read workload with different raw response sizes and no CPU, RSS, write, or socket measurement. It does not establish sustained multi-user capacity or whole-app superiority at complete parity.
+
+The same paired full-200 fixture was run again for ten seconds per client count with `--resources` and both trial orders. Sampled peak PSS includes Puma's 22 workers and parent plus isolated Redis for Campfire; Rustfire had one server process. CPU seconds cover the Go client's two warmups per connection as well as the timed interval, while request rate and p95 cover only the timed interval. The client process is excluded from server resource totals.
+
+| Clients | Rustfire first | Rustfire pages/s / p95 | Rustfire CPU s / peak PSS MiB | Campfire pages/s / p95 | Campfire CPU s / peak PSS MiB |
+| ---: | :---: | ---: | ---: | ---: | ---: |
+| 32 | No | 3,337 / 14.36 ms | 209.54 / 29.95 | 1,780 / 31.80 ms | 202.43 / 2,679.37 |
+| 32 | Yes | 3,449 / 13.37 ms | 218.23 / 30.31 | 1,704 / 27.63 ms | 204.86 / 2,743.26 |
+| 64 | No | 3,338 / 27.44 ms | 263.55 / 31.23 | 1,778 / 52.87 ms | 216.80 / 2,766.21 |
+| 64 | Yes | 3,292 / 27.56 ms | 262.12 / 31.84 | 1,783 / 62.39 ms | 219.28 / 2,825.38 |
+
+All measured responses passed status, validator, message-root, and CSRF-field checks with zero errors. This fixture shows more rendered-page throughput and a much smaller sampled server process footprint for Rustfire under the tested 22-worker Campfire configuration. It still does not measure a separate load-generator host, many simultaneous users and rooms, write or socket activity, or hours of steady load; the source and Rustfire also send different raw byte counts per page.

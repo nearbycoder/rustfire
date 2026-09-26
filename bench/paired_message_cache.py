@@ -13,6 +13,8 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 
 from direct_lookup import ROOT, free_port, start_server, stop_server
 from message_markup import check_message_markup
@@ -159,7 +161,28 @@ def measure_cached_read(binary, port, cookie, etag, modified, clients, seconds):
     return report
 
 
-def measure_full_read(binary, port, cookie, etag, modified, clients, seconds, messages):
+def resource_snapshot(root_pids):
+    import psutil
+
+    processes = []
+    for pid in root_pids:
+        parent = psutil.Process(pid)
+        processes.extend((parent, *parent.children(recursive=True)))
+    pss = cpu = 0
+    count = 0
+    for process in {process.pid: process for process in processes}.values():
+        try:
+            memory = process.memory_full_info()
+            usage = process.cpu_times()
+        except psutil.Error:
+            continue
+        pss += getattr(memory, "pss", memory.rss)
+        cpu += usage.user + usage.system
+        count += 1
+    return pss, cpu, count
+
+
+def measure_full_read(binary, port, cookie, etag, modified, clients, seconds, messages, resource_pids=()):
     command = [
         str(binary), "--base", f"http://127.0.0.1:{port}", "--path", "/rooms/1/messages",
         "--cookie", cookie, "--expected-status", "200", "--expected-etag", etag,
@@ -167,11 +190,39 @@ def measure_full_read(binary, port, cookie, etag, modified, clients, seconds, me
         "--expected-csrf-count", str(messages * 8), "--accept", "text/html",
         "--clients", str(clients), "--seconds", str(seconds),
     ]
-    process = subprocess.run(command, text=True, capture_output=True, timeout=max(90, seconds + 60))
+    baseline = resource_snapshot(resource_pids) if resource_pids else None
+    stop = threading.Event()
+    observed = [baseline] if baseline else []
+
+    def sample_resources():
+        while not stop.wait(0.5):
+            observed.append(resource_snapshot(resource_pids))
+
+    started = time.monotonic()
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sampler = threading.Thread(target=sample_resources, daemon=True) if resource_pids else None
+    if sampler:
+        sampler.start()
+    try:
+        stdout, stderr = process.communicate(timeout=max(90, seconds + 60))
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise AssertionError("Full message read client timed out")
+    finally:
+        if sampler:
+            stop.set()
+            sampler.join()
+            observed.append(resource_snapshot(resource_pids))
     if process.returncode:
-        raise AssertionError(f"Full message read failed: {process.stdout}\n{process.stderr}")
-    report = json.loads(process.stdout.strip().splitlines()[-1])
+        raise AssertionError(f"Full message read failed: {stdout}\n{stderr}")
+    report = json.loads(stdout.strip().splitlines()[-1])
     assert report["errors"] == 0 and report["successes"] > 0, report
+    if observed:
+        report["server_cpu_seconds_including_warmup"] = round(observed[-1][1] - observed[0][1], 3)
+        report["server_peak_pss_mib"] = round(max(item[0] for item in observed) / 1048576, 2)
+        report["server_processes_peak"] = max(item[2] for item in observed)
+        report["resource_window_seconds"] = round(time.monotonic() - started, 3)
     return report
 
 
@@ -180,6 +231,7 @@ def main():
     parser.add_argument("--messages", type=int, default=40, help="messages on the cached latest page, 3–40")
     parser.add_argument("--clients", type=int, nargs="*", default=[], help="optional conditional-304 concurrency sweep")
     parser.add_argument("--full-clients", type=int, nargs="*", default=[], help="optional full-200 HTML concurrency sweep")
+    parser.add_argument("--resources", action="store_true", help="sample server CPU time and peak PSS during full-200 trials (requires psutil)")
     parser.add_argument("--seconds", type=float, default=15)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--rustfire-first", action="store_true", help="reverse the serial trial order")
@@ -187,6 +239,11 @@ def main():
     args = parser.parse_args()
     if any(client < 1 for client in args.clients + args.full_clients) or args.seconds <= 0 or args.campfire_workers < 1 or not (3 <= args.messages <= 40):
         parser.error("client counts, seconds, and Campfire workers must be positive; messages must be 3–40")
+    if args.resources:
+        try:
+            import psutil  # noqa: F401
+        except ImportError:
+            parser.error("--resources requires the psutil Python package")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     if args.sample_dir:
         args.sample_dir.mkdir(parents=True, exist_ok=True)
@@ -216,7 +273,7 @@ def main():
                         cookie, _ = login_campfire(camp_port)
                         result, etag, modified, body = check(camp_port, cookie, camp_db, True, args.sample_dir / "campfire-messages.html" if args.sample_dir else None)
                         performance = {clients: measure_cached_read(binary, camp_port, cookie, etag, modified, clients, args.seconds) for clients in args.clients}
-                        full_performance = {clients: measure_full_read(binary, camp_port, cookie, etag, modified, clients, args.seconds, args.messages) for clients in args.full_clients}
+                        full_performance = {clients: measure_full_read(binary, camp_port, cookie, etag, modified, clients, args.seconds, args.messages, (camp.pid, redis.pid) if args.resources else ()) for clients in args.full_clients}
                         return result, performance, full_performance, body
                     finally:
                         stop_server(camp)
@@ -226,7 +283,7 @@ def main():
                 try:
                     result, etag, modified, body = check(rust_port, "session_token=benchmark-session", rust_db, False, args.sample_dir / "rustfire-messages.html" if args.sample_dir else None)
                     performance = {clients: measure_cached_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds) for clients in args.clients}
-                    full_performance = {clients: measure_full_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds, args.messages) for clients in args.full_clients}
+                    full_performance = {clients: measure_full_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds, args.messages, (rust.pid,) if args.resources else ()) for clients in args.full_clients}
                     return result, performance, full_performance, body
                 finally:
                     stop_server(rust)

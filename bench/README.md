@@ -15,6 +15,8 @@ For matched conditional message-list reads, run `cargo build --release` and `pyt
 
 For rendered message-list reads on the same fixture, use `--full-clients 8 32 64 128 --seconds 5 --campfire-workers 22` and repeat with `--rustfire-first`. Every measured 200 response must retain its ETag and Last-Modified and contain all 40 message roots and 320 CSRF fields. The initial page also passes the parsed markup comparison before timing. This is one account repeatedly reading one 40-message room; the source and Rustfire bodies differ in raw size, and the same-host client shares CPU and network resources with the server. Record a separate-host, sustained, mixed-user trial before drawing an overall capacity conclusion.
 
+Add `--resources` for sampled peak proportional set size (PSS), process count, and server CPU seconds during full-200 trials; it requires Python `psutil`. The sampler includes Puma's parent and children plus the isolated Redis process for Campfire, and Rustfire's server process. It samples PSS every 500 ms. CPU seconds cover the Go client's warmups and measured requests, while throughput and latency cover only the measured interval. The client process is excluded from both apps' resource figures.
+
 The source Campfire repository includes `test/performance/chatter.js` for WebSocket fanout. For equivalent HTTP trials, start each app separately on the same hardware and run:
 
 ```sh
