@@ -4575,6 +4575,21 @@ async fn push_subscriptions_delete_post(
     }
     push_subscriptions_delete(state, headers, path).await
 }
+async fn push_subscriptions_delete_scoped(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_, id)): Path<(String, i64)>,
+) -> AppResult {
+    push_subscriptions_delete(state, headers, Path(id)).await
+}
+async fn push_subscriptions_delete_post_scoped(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_, id)): Path<(String, i64)>,
+    raw: RawForm,
+) -> AppResult {
+    push_subscriptions_delete_post(state, headers, Path(id), raw).await
+}
 async fn push_test_notification(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4601,6 +4616,13 @@ async fn push_test_notification(
             })?;
     }
     Ok(found_redirect("/users/me/push_subscriptions"))
+}
+async fn push_test_notification_scoped(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_, id)): Path<(String, i64)>,
+) -> AppResult {
+    push_test_notification(state, headers, Path(id)).await
 }
 async fn involvement_post(
     State(s): State<Arc<AppState>>,
@@ -10741,6 +10763,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .delete(avatar_delete),
         )
         .route("/users/me/sidebar", get(sidebar_get))
+        .route("/users/{user_id}/sidebar", get(sidebar_get))
+        .route(
+            "/users/{user_id}/profile",
+            get(profile)
+                .post(profile_post)
+                .patch(profile_post)
+                .put(profile_post),
+        )
+        .route(
+            "/users/{user_id}/push_subscriptions",
+            get(push_subscriptions_get).post(push_subscriptions_post),
+        )
+        .route(
+            "/users/{user_id}/push_subscriptions/{id}",
+            post(push_subscriptions_delete_post_scoped).delete(push_subscriptions_delete_scoped),
+        )
+        .route(
+            "/users/{user_id}/push_subscriptions/{id}/test_notifications",
+            post(push_test_notification_scoped),
+        )
         .route("/users/{id}", get(user_show))
         .route("/users/{id}/ban", post(user_ban_post_override).delete(user_unban))
         .route("/users/{id}/ban/delete", post(user_unban))

@@ -13,6 +13,7 @@ import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_bot_admin import request
 from paired_room_shell import get_room, section
 
 
@@ -32,9 +33,9 @@ AGENTS = [
 ]
 
 
-def compare(camp_port, camp_cookie, rust_port, label):
-    source = get_room(camp_port, camp_cookie, PATH)
-    target = get_room(rust_port, "session_token=benchmark-session", PATH)
+def compare(camp_port, camp_cookie, rust_port, label, path=PATH):
+    source = get_room(camp_port, camp_cookie, path)
+    target = get_room(rust_port, "session_token=benchmark-session", path)
     for part in ("nav", "push_subscriptions", "footer", "sidebar"):
         expected = section(source, part)
         actual = section(target, part)
@@ -45,11 +46,11 @@ def compare(camp_port, camp_cookie, rust_port, label):
     assert 'class="admin"' in target.decode()
 
 
-def delete(port, cookie, token):
+def delete(port, cookie, token, path=PATH):
     body = urllib.parse.urlencode({"_method": "delete", "authenticity_token": token})
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     try:
-        connection.request("POST", f"{PATH}/1", body, {
+        connection.request("POST", f"{path}/1", body, {
             "Cookie": cookie,
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "text/html",
@@ -77,16 +78,37 @@ def main():
                 wait_for_server(camp_port, camp)
                 camp_cookie, camp_token = login_campfire(camp_port)
                 compare(camp_port, camp_cookie, rust_port, "empty")
+                for user_id in ("2", "999"):
+                    compare(camp_port, camp_cookie, rust_port, f"empty explicit user {user_id}", f"/users/{user_id}/push_subscriptions")
+                    for port, cookie in ((camp_port, camp_cookie), (rust_port, "session_token=benchmark-session")):
+                        canonical = get_room(port, cookie, "/users/me/sidebar")
+                        alias = get_room(port, cookie, f"/users/{user_id}/sidebar")
+                        assert section(canonical, "user_sidebar", normalize_times=True) == section(alias, "user_sidebar", normalize_times=True)
+                invalid_body = urllib.parse.urlencode({
+                    "push_subscription[endpoint]": "https://attacker.example.invalid/steal",
+                    "push_subscription[p256dh_key]": "key",
+                    "push_subscription[auth_key]": "auth",
+                }).encode()
+                for port, cookie, token in ((camp_port, camp_cookie, camp_token), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    status, _, _ = request(port, "POST", "/users/2/push_subscriptions", cookie, token, invalid_body, "application/x-www-form-urlencoded")
+                    assert status == 422, status
                 for database in (rust_db, camp_db):
                     with sqlite3.connect(database) as db:
                         assert db.execute("SELECT count(*) FROM push_subscriptions").fetchone() == (0,)
                         db.executemany("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(?1,1,?2,'key','auth',?3,'2026-01-01 00:00:00','2026-01-01 00:00:00')", ((index, f"https://push.example.test/sub/{index}", agent or None) for index, agent in enumerate(AGENTS, 1)))
                 compare(camp_port, camp_cookie, rust_port, "seven subscriptions")
-                delete(camp_port, camp_cookie, camp_token)
-                delete(rust_port, "session_token=benchmark-session", "benchmark-csrf")
+                compare(camp_port, camp_cookie, rust_port, "seven explicit user 2 subscriptions", "/users/2/push_subscriptions")
+                for port, cookie, token in ((camp_port, camp_cookie, camp_token), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    status, _, _ = request(port, "POST", "/users/2/push_subscriptions/999/test_notifications", cookie, token)
+                    assert status == 404, status
+                delete(camp_port, camp_cookie, camp_token, "/users/2/push_subscriptions")
+                delete(rust_port, "session_token=benchmark-session", "benchmark-csrf", "/users/2/push_subscriptions")
+                for port, cookie, token in ((camp_port, camp_cookie, camp_token), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    status, location, _ = request(port, "DELETE", "/users/999/push_subscriptions/2", cookie, token)
+                    assert status == 302 and urllib.parse.urlsplit(location).path == PATH, (status, location)
                 for database in (rust_db, camp_db):
                     with sqlite3.connect(database) as db:
-                        assert db.execute("SELECT count(*) FROM push_subscriptions WHERE id=1").fetchone() == (0,)
+                        assert db.execute("SELECT count(*) FROM push_subscriptions WHERE id IN (1,2)").fetchone() == (0,)
                 compare(camp_port, camp_cookie, rust_port, "after delete")
             except Exception:
                 log.flush()

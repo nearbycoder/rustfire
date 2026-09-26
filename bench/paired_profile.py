@@ -291,6 +291,12 @@ def main():
             print(f"parsed profile nav: {compare_profile_panel(camp_page, rust_page, 'nav')} matching tokens")
             matched_profile_tokens = compare_profile_panel(camp_page, rust_page)
             print(f"parsed profile panel: {matched_profile_tokens} matching tokens")
+            for user_id in ("2", "999"):
+                camp_status, _, camp_alias = request(camp_port, "GET", f"/users/{user_id}/profile", camp_cookie, camp_csrf)
+                rust_status, _, rust_alias = request(rust_port, "GET", f"/users/{user_id}/profile", rust_cookie, rust_csrf)
+                assert (camp_status, rust_status) == (200, 200)
+                assert compare_profile_panel(camp_alias, rust_alias, "nav") == compare_profile_panel(camp_page, rust_page, "nav")
+                assert compare_profile_panel(camp_alias, rust_alias) == matched_profile_tokens
             upload_avatar(camp_port, camp_cookie, camp_csrf, camp_db, True)
             upload_avatar(rust_port, rust_cookie, rust_csrf, rust_db, False)
             camp_status, _, camp_page = request(camp_port, "GET", "/users/me/profile", camp_cookie, camp_csrf)
@@ -321,6 +327,14 @@ def main():
             rust_status, _, rust_page = request(rust_port, "GET", "/users/me/profile", rust_cookie, rust_csrf)
             assert (camp_status, rust_status) == (200, 200)
             print(f"profile after avatar deletion: {compare_profile_panel(camp_page, rust_page)} matching tokens")
+            alias_body = urllib.parse.urlencode({"_method": "patch", "user[name]": "Alias Admin"}).encode()
+            for port, cookie, csrf, database in ((camp_port, camp_cookie, camp_csrf, camp_db), (rust_port, rust_cookie, rust_csrf, rust_db)):
+                status, location, payload = request(port, "POST", "/users/999/profile", cookie, csrf, alias_body, "application/x-www-form-urlencoded")
+                assert status == 302 and urllib.parse.urlsplit(location).path == "/users/me/profile", (status, location, payload[:200])
+                with sqlite3.connect(database) as db:
+                    assert db.execute("SELECT name FROM users WHERE id=1").fetchone() == ("Alias Admin",)
+                    assert db.execute("SELECT name FROM users WHERE id=2").fetchone() == ("User 2",)
+            print("explicit user profile aliases: paired GET and PATCH passed")
         except Exception:
             log.flush()
             log.seek(0)
