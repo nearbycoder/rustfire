@@ -26,6 +26,19 @@ The pinned Campfire build and Rustfire each received 40 signed-mention messages 
 
 Rustfire delivered about **2.2–3.0×** as many checked reads per second in these trials. With an illustrative 250 ms p95 objective, Rustfire met it at all three tested client counts; Campfire met it at 32 clients. This establishes an advantage for this matched read path at the sampled concurrency levels. It does not establish a maximum user count, long-running capacity, or a speed advantage at complete application parity. The client, Redis, SQLite, and servers shared one host; repeat on separate hosts for deployment-scale claims. Reproduce with `python bench/paired_mention_reads.py --clients 32 128 256 --seconds 10 --campfire-workers 22 --slo-ms 250` and `--campfire-first`.
 
+## Paired bot webhook bursts
+
+`bench/paired_webhook_burst.py` posted one rich-text message in a direct room with 80 or 320 webhook bots in each app. A local receiver held each request for 100 ms before responding 204. The bot IDs, tokens, memberships, URLs, message, and every outgoing JSON payload matched. Each elapsed time starts before the browser POST and ends when the receiver has responded to every bot; all deliveries completed. Campfire used one Puma process, eight registered Resque workers, isolated Redis with a 250 ms polling interval, and SQLite. Rustfire used one release process, SQLite, and 64 concurrent webhook delivery slots. The apps and receiver ran serially on the same 32-logical-CPU host.
+
+| Bots | Trial order | Campfire | Rustfire | Rustfire elapsed speedup | Deliveries |
+|---:|---|---:|---:|---:|---:|
+| 80 | Rustfire first | 4.423 s | 1.315 s | 3.36× | 80 / 80 |
+| 80 | Campfire first | 4.099 s | 1.430 s | 2.87× | 80 / 80 |
+| 320 | Rustfire first | 17.808 s | 1.864 s | 9.55× | 320 / 320 |
+| 320 | Campfire first | 15.161 s | 2.002 s | 7.57× | 320 / 320 |
+
+Rustfire's completion time grew less from 80 to 320 bots under these worker settings. This does not identify either app's maximum supported bot count or establish sustained delivery, failure/retry parity, or whole-app scale. Reproduce with `python bench/paired_webhook_burst.py --bots 80 --campfire-workers 8` and `--bots 320 --campfire-workers 8`, repeating each with `--campfire-first`.
+
 ## Turbo route format parity
 
 `python bench/paired_turbo_formats.py` passed on disposable instances of the pinned source and Rustfire. The room refresh and account user pagination routes now agree on HTTP status and media type for absent, HTML, JSON, wildcard, and Turbo Stream Accept headers, and for explicit `.turbo_stream` paths. Both return the same JSON 406 body when the refresh route is requested as JSON, and treat a nonnumeric `since` value as zero. Empty room refresh responses contain a newline as in the source. Rustfire's browser applies Turbo refresh responses for edits and uses a separate JSON `refresh_state` route for backlog pagination. This is a route behavior check, not a timing result.
