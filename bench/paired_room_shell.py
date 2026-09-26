@@ -195,11 +195,11 @@ def post_account_logo(port, cookie, csrf, jpeg):
     assert status in {302, 303} and location, (status, body[:200])
 
 
-def measure_room_page(binary, port, cookie, clients, seconds):
+def measure_room_page(binary, port, cookie, clients, seconds, messages=1):
     result = subprocess.run([
         str(binary), "--base", f"http://127.0.0.1:{port}", "--path", "/rooms/1",
         "--cookie", cookie, "--accept", "text/html", "--expected-status", "200",
-        "--expected-content-type", "text/html", "--expected-message-count", "1",
+        "--expected-content-type", "text/html", "--expected-message-count", str(messages),
         "--clients", str(clients), "--seconds", str(seconds),
     ], capture_output=True, text=True, check=True)
     report = json.loads(result.stdout)
@@ -214,7 +214,7 @@ def assert_equal(label, expected, actual):
     print(f"{label}: {len(actual)} matching parsed tokens")
 
 
-def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sample_dir, normalize_times=False):
+def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sample_dir, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False):
     source = get_room(camp_port, camp_cookie, path)
     target = get_room(rust_port, rust_cookie, path)
     if sample_dir:
@@ -223,7 +223,7 @@ def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sa
         (sample_dir / f"campfire-{stem}.html").write_bytes(source)
         (sample_dir / f"rustfire-{stem}.html").write_bytes(target)
     for part in ("nav", "footer", "sidebar", "message-area"):
-        assert_equal(f"{label} {part}", section(source, part, normalize_times), section(target, part, normalize_times))
+        assert_equal(f"{label} {part}", section(source, part, normalize_times, ignore_csrf_inputs, normalize_blob_paths), section(target, part, normalize_times, ignore_csrf_inputs, normalize_blob_paths))
     assert_equal(f"{label} message template", message_template(source), message_template(target))
     assert f'name="current-room-id" content="{path.rsplit("/", 1)[-1]}"' in target.decode()
     return source, target
@@ -292,11 +292,12 @@ def main():
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
     parser.add_argument("--sample-dir", type=pathlib.Path)
     parser.add_argument("--read-clients", type=int, nargs="*", default=[])
+    parser.add_argument("--read-media-clients", type=int, nargs="*", default=[])
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--rustfire-first", action="store_true")
     args = parser.parse_args()
-    if any(value < 1 for value in args.read_clients) or args.seconds <= 0 or args.campfire_workers < 1:
+    if any(value < 1 for value in args.read_clients + args.read_media_clients) or args.seconds <= 0 or args.campfire_workers < 1:
         parser.error("positive client counts, seconds, and worker count are required")
     repository = args.campfire_repo.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
@@ -307,7 +308,7 @@ def main():
         rust_port, camp_port = free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [[2]])
         env = seed_campfire(repository, args.ruby, args.bundle_path, repository / "storage/db/production.sqlite3", camp_db, [[2]], camp_port, temp)
-        env["WEB_CONCURRENCY"] = str(args.campfire_workers if args.read_clients else 1)
+        env["WEB_CONCURRENCY"] = str(args.campfire_workers if args.read_clients or args.read_media_clients else 1)
         with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
             account = camp.execute("SELECT name,join_code,updated_at FROM accounts WHERE id=1").fetchone()
             room = camp.execute("SELECT name,created_at,updated_at FROM rooms WHERE id=1").fetchone()
@@ -343,16 +344,17 @@ def main():
                 logo_source, logo_page = compare_room("original with logo", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True)
                 for page in (logo_source, logo_page):
                     assert 'class="sidebar admin account-has-logo"' in page.decode()
-                if args.read_clients:
+                if args.read_clients or args.read_media_clients:
                     binary = temp / "checked_get"
                     subprocess.run(["go", "build", "-o", str(binary), "bench/checked_get.go"], check=True)
                     applications = [("Rustfire", rust_port, "session_token=benchmark-session"), ("Campfire", camp_port, camp_cookie)]
                     if not args.rustfire_first:
                         applications.reverse()
+                if args.read_clients:
                     for clients in args.read_clients:
                         for name, port, cookie in applications:
                             report = measure_room_page(binary, port, cookie, clients, args.seconds)
-                            print(f"{name} {clients} clients: {report['rps']:.1f} rps, p95 {report['p95_ms']:.2f} ms, {report['errors']} errors")
+                            print(f"{name} one-message room {clients} clients: {report['rps']:.1f} rps, p95 {report['p95_ms']:.2f} ms, {report['errors']} errors")
                 rich_body = "<div>Hi <strong>bold</strong><br>next</div>"
                 post_message(camp_port, camp_cookie, camp_csrf, rich_body, "room-page-rich")
                 post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rich_body, "room-page-rich")
@@ -389,6 +391,12 @@ def main():
                 assert source_pdf_preview == target_pdf_preview, (len(source_pdf_preview), len(target_pdf_preview))
                 print(f"PDF PNG previews: {len(source_pdf_preview)} byte-identical bytes")
                 compare_message_page(6, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
+                compare_room("original with six mixed messages", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                if args.read_media_clients:
+                    for clients in args.read_media_clients:
+                        for name, port, cookie in applications:
+                            report = measure_room_page(binary, port, cookie, clients, args.seconds, messages=6)
+                            print(f"{name} mixed-media room {clients} clients: {report['rps']:.1f} rps, p95 {report['p95_ms']:.2f} ms, {report['errors']} errors")
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)

@@ -838,6 +838,21 @@ After replacing Rustfire's custom room shell with Campfire's page structure, `py
 
 The paired probe also compares standalone plain, rich, text-file, JPEG-image, MP4-video, and PDF message show and edit pages. Their parsed navigation, footer, and sidebar match Campfire's empty sections; the show pages match in main content at 179, 186, 197, 184, 183, and 184 tokens, and the edit pages match at 78, 78, 76, 63, 62, and 63 tokens. Campfire's JPEG variation uses `jpg` in its signed URL; Rustfire now matches it, and both apps returned the same byte-identical 13,036-byte thumbnail. A reconstructed older Rustfire `jpeg` variation URL also returned those bytes. The sampled video poster was byte-identical at 280 bytes, and the sampled PDF preview was byte-identical at 404 bytes. The probe normalizes independent blob IDs and signatures, intermittent source CSRF inputs on attachment quick-boost forms, CSRF token values, times, and local origins. It does not verify raw full-document HTML, every message format, or other attachment variants.
 
+The full room with those six messages also matched the pinned source after the same normalization: 183 parsed navigation tokens, 54 footer tokens, four sidebar tokens, 1,217 message-area tokens, and 39 optimistic-template tokens. A checked read sweep used this fixture, 22 Campfire Puma workers, one Rustfire process, and a local Go keep-alive client. Both apps stayed running; one received load at a time. Each five-second trial checked every response for HTTP 200, HTML content type, and six message roots. All trials had zero errors:
+
+| Clients | First server | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| ---: | --- | ---: | ---: |
+| 32 | Campfire | 3,521.6 / 11.22 ms | 891.9 / 75.86 ms |
+| 32 | Rustfire | 3,507.7 / 11.41 ms | 879.4 / 82.25 ms |
+| 128 | Campfire | 3,340.5 / 60.70 ms | 991.7 / 252.92 ms |
+| 128 | Rustfire | 3,421.7 / 59.88 ms | 1,073.2 / 203.64 ms |
+| 256 | Campfire | 3,482.3 / 126.07 ms | 690.7 / 904.42 ms |
+| 256 | Rustfire | 3,481.8 / 127.98 ms | 881.1 / 604.08 ms |
+| 512 | Campfire | 3,428.7 / 296.72 ms | 828.7 / 818.87 ms |
+| 512 | Rustfire | 3,506.0 / 285.98 ms | 1,005.7 / 644.54 ms |
+
+These short bursts show about 3.2–5.0× more checked room reads/s for Rustfire on this mixed-media fixture. At a provisional 250 ms p95 target, Rustfire passed at 256 clients in both orders and exceeded it at 512; Campfire exceeded it at 256 and 512. The 128-client Campfire result straddled that target across orders. The client shared the server host, timed bodies were checked for status, type, and message count rather than parsed equality, media bytes were fetched before load rather than with each room read, and neither app was driven to a sustained failure limit. This supports a scoped speed and sampled-concurrency advantage, not whole-app speed or maximum-scale parity.
+
 The checked read mode used the original room after one message and logo upload, 22 Campfire Puma workers, one Rustfire process, and the Go keep-alive client. Every timed response had HTTP 200, HTML content type, and one message root; no errors occurred. Five-second runs at 32 clients and ten-second runs at 128 and 256 clients gave:
 
 | Clients | Rustfire first | Rustfire reads/s / p95 | Campfire reads/s / p95 |
