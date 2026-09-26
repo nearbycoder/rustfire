@@ -26,6 +26,19 @@ The pinned Campfire build and Rustfire each received 40 signed-mention messages 
 
 Rustfire delivered about **2.2–3.0×** as many checked reads per second in these trials. With an illustrative 250 ms p95 objective, Rustfire met it at all three tested client counts; Campfire met it at 32 clients. This establishes an advantage for this matched read path at the sampled concurrency levels. It does not establish a maximum user count, long-running capacity, or a speed advantage at complete application parity. The client, Redis, SQLite, and servers shared one host; repeat on separate hosts for deployment-scale claims. Reproduce with `python bench/paired_mention_reads.py --clients 32 128 256 --seconds 10 --campfire-workers 22 --slo-ms 250` and `--campfire-first`.
 
+After Rustfire added the five Rails default security headers, the same paired probe ran for five seconds per client count in both trial orders. Every timed response matched its own warmed SHA-256, both response bodies were 53,003 bytes, all 40 normalized messages matched, and neither app returned an error.
+
+| Clients | Order | Campfire reads/s | Rustfire reads/s | Campfire p95 | Rustfire p95 |
+|---:|---|---:|---:|---:|---:|
+| 32 | Rustfire first | 1,445 | 3,315 | 44.4 ms | 13.0 ms |
+| 32 | Campfire first | 1,424 | 2,802 | 45.4 ms | 16.6 ms |
+| 128 | Rustfire first | 1,336 | 3,025 | 221.5 ms | 66.7 ms |
+| 128 | Campfire first | 1,358 | 2,692 | 143.5 ms | 74.8 ms |
+| 256 | Rustfire first | 1,079 | 3,069 | 345.4 ms | 140.9 ms |
+| 256 | Campfire first | 1,018 | 2,664 | 375.0 ms | 166.1 ms |
+
+Rustfire served **1.97–2.84×** as many checked reads per second in these shorter trials. The five-second duration and same-host setup limit comparison with the earlier ten-second rows; they verify that this added response behavior did not erase the sampled read advantage. Reproduce with `python bench/paired_mention_reads.py --clients 32 128 256 --seconds 5 --campfire-workers 22 --slo-ms 250` and `--campfire-first`.
+
 ## Paired bot webhook bursts
 
 `bench/paired_webhook_burst.py` posted one rich-text message in a direct room with 80 or 320 webhook bots in each app. A local receiver held each request for 100 ms before responding 204. The bot IDs, tokens, memberships, URLs, message, and every outgoing JSON payload matched. Each elapsed time starts before the browser POST and ends when the receiver has responded to every bot; all deliveries completed. Campfire used one Puma process, eight registered Resque workers, isolated Redis with a 250 ms polling interval, and SQLite. Rustfire used one release process, SQLite, and 64 concurrent webhook delivery slots. The apps and receiver ran serially on the same 32-logical-CPU host.

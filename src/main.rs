@@ -6,7 +6,7 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, patch, post},
@@ -9962,6 +9962,19 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
 async fn health() -> impl IntoResponse {
     "ok"
 }
+async fn campfire_security_headers(req: Request, next: Next) -> Response {
+    let asset = req.uri().path().starts_with("/assets/") || req.uri().path().starts_with("/static/");
+    let mut response = next.run(req).await;
+    if !asset && (response.status().is_success() || response.status().is_redirection() || response.status() == StatusCode::FORBIDDEN) {
+        let headers = response.headers_mut();
+        headers.insert("referrer-policy", HeaderValue::from_static("strict-origin-when-cross-origin"));
+        headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+        headers.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+        headers.insert("x-permitted-cross-domain-policies", HeaderValue::from_static("none"));
+        headers.insert("x-xss-protection", HeaderValue::from_static("0"));
+    }
+    response
+}
 async fn webmanifest(State(s): State<Arc<AppState>>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
     let explicit_json = uri.path().ends_with(".json")
         || uri.query().is_some_and(|query| query.split('&').any(|part| part == "format=json"));
@@ -10714,6 +10727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             reject_banned_ip,
         ))
+        .layer(axum::middleware::from_fn(campfire_security_headers))
         .with_state(state);
     let addr: SocketAddr = env::var("RUSTFIRE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
