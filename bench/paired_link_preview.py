@@ -12,6 +12,7 @@ import tempfile
 import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
+from message_markup import MessageMarkup
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_message_cache import fetch
@@ -53,6 +54,17 @@ class Presentation(html.parser.HTMLParser):
     def handle_data(self, data):
         if self.depth and data.strip():
             self.structure.append(data.strip())
+
+
+class PreviewPageMarkup(MessageMarkup):
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "input" and values.get("name") == "authenticity_token":
+            self.csrf_values.append(values.get("value"))
+            return
+        dynamic_times = {"datetime", "data-message-timestamp", "data-message-updated-at", "data-sort-value"}
+        normalized = [(key, "<time>" if key in dynamic_times else value) for key, value in attrs]
+        super().handle_starttag(tag, normalized)
 
 
 def post(port, cookie, csrf, case):
@@ -100,6 +112,7 @@ def main():
     parser.add_argument("--seconds", type=float, default=10)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--campfire-first", action="store_true", help="reverse the benchmark trial order")
+    parser.add_argument("--sample-dir", type=pathlib.Path, help="retain the two latest-40 HTML pages")
     args = parser.parse_args()
     if args.read_clients < 0 or args.campfire_workers < 1 or (args.read_clients and args.seconds <= 0):
         parser.error("read clients and seconds must be positive")
@@ -116,6 +129,7 @@ def main():
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         camp_env["WEB_CONCURRENCY"] = str(args.campfire_workers if args.read_clients else 1)
         with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
+            camp.execute("DELETE FROM sqlite_sequence WHERE name='messages'")
             rust.executemany("UPDATE users SET name=?2,updated_at=?3 WHERE id=?1", camp.execute("SELECT id,name,updated_at FROM users WHERE id IN(1,2)").fetchall())
             rust.execute("UPDATE rooms SET name=? WHERE id=1", [camp.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]])
         redis, redis_log = start_redis(temp, redis_port)
@@ -166,13 +180,27 @@ def main():
         assert rust_preview == camp_preview, (case[0], rust_preview, camp_preview)
     print("PASS parsed preview messages, preview-only attachment, solo URLs, tweet URLs, and Twitter avatar layout match pinned Campfire")
     if args.read_clients:
+        if args.sample_dir:
+            args.sample_dir.mkdir(parents=True, exist_ok=True)
+            (args.sample_dir / "rustfire-preview-page.html").write_bytes(rust_page)
+            (args.sample_dir / "campfire-preview-page.html").write_bytes(camp_page)
         for index in range(40):
             client_id = f"paired-link-preview-bench-{index}"
             rust, camp = Presentation(client_id), Presentation(client_id)
             rust.feed(rust_page.decode())
             camp.feed(camp_page.decode())
             assert rust.structure and rust.structure == camp.structure, (index, rust.structure, camp.structure)
+        rust_markup, camp_markup = PreviewPageMarkup(), PreviewPageMarkup()
+        rust_markup.feed(rust_page.decode())
+        camp_markup.feed(camp_page.decode())
+        assert len(rust_markup.csrf_values) == 40 * 8
+        assert all(rust_markup.csrf_values) and all(camp_markup.csrf_values)
+        assert rust_markup.events == camp_markup.events, next(
+            ((index, left, right) for index, (left, right) in enumerate(zip(rust_markup.events, camp_markup.events)) if left != right),
+            (len(rust_markup.events), len(camp_markup.events)),
+        )
         print(json.dumps({"clients": args.read_clients, "seconds": args.seconds, "campfire_workers": args.campfire_workers, "campfire_first": args.campfire_first,
+                          "parsed_page_events": len(rust_markup.events), "campfire_cached_csrf_inputs": len(camp_markup.csrf_values),
                           "rustfire": {"reads": rust_report, "page_bytes": len(rust_page)},
                           "campfire": {"reads": camp_report, "page_bytes": len(camp_page)}}, sort_keys=True))
 
