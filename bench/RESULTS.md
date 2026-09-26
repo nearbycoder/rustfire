@@ -619,3 +619,16 @@ All measured responses passed status, validator, message-root, and CSRF-field ch
 | Yes | 3,414 / 13.68 ms | 7.60 ms | 1,531 / 41.83 ms | 84.62 ms |
 
 Read and write error counts were zero in both trials. Campfire's fragment cache sometimes omitted the eight hidden CSRF fields for a newly created message, so the changing-page read check requires 40 message roots but does not require a fixed CSRF-field count; the initial pages passed the full parsed-markup comparison. This is one writer and one account in one room on a shared host, with no socket fanout or resource sample during the mix. It does not prove sustained multi-user capacity or complete feature parity.
+
+The same 32-reader, 100-write, ten-second workload was repeated with 100, 500, and 1,000 signed `RoomMessagesChannel` subscribers. Socket setup and subscription confirmation were outside the measured HTTP interval. Every socket received each expected message append exactly once, with the expected client and numeric message IDs. All writes persisted, all measured reads passed the 40-root check, and no socket missed an event, received an unexpected event, or closed early in either trial order.
+
+| Sockets | Rustfire first | Expected deliveries per app | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| ---: | :---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | No | 10,000 | 3,250 / 14.61 ms | 8.62 ms | 1,530 / 39.04 ms | 95.71 ms |
+| 100 | Yes | 10,000 | 2,875 / 18.28 ms | 9.47 ms | 1,238 / 61.09 ms | 123.08 ms |
+| 500 | No | 50,000 | 3,136 / 14.81 ms | 7.66 ms | 1,288 / 47.14 ms | 85.68 ms |
+| 500 | Yes | 50,000 | 2,946 / 16.08 ms | 9.28 ms | 948 / 85.96 ms | 130.46 ms |
+| 1,000 | No | 100,000 | 3,029 / 15.81 ms | 7.51 ms | 1,243 / 56.14 ms | 84.67 ms |
+| 1,000 | Yes | 100,000 | 3,132 / 15.20 ms | 7.82 ms | 1,158 / 56.37 ms | 96.63 ms |
+
+These are short serial runs on one host with one account, one room, and one writer. The socket checker verifies event identity and delivery count, not complete event bytes or per-event latency. The runs do not establish maximum connections, sustained multi-user capacity, or full application parity.

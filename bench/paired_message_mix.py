@@ -59,7 +59,20 @@ def writer(port, cookie, csrf, count, seconds, result):
         connection.close()
 
 
-def measure(binary, port, cookie, csrf, clients, seconds, count, invalid_sample=None):
+def measure(binary, port, cookie, csrf, clients, seconds, count, sockets=0, invalid_sample=None):
+    capture = None
+    if sockets:
+        capture = subprocess.Popen([
+            "node", "bench/capture_message_appends.mjs", "--base", f"http://127.0.0.1:{port}",
+            "--cookie", cookie, "--sockets", str(sockets), "--messages", str(count),
+            "--timeout", str(round((seconds + 30) * 1000)),
+        ], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ready, _, _ = select.select([capture.stdout], [], [], 60)
+        marker = capture.stdout.readline().strip() if ready else ""
+        if marker != "READY":
+            capture.kill()
+            stdout, stderr = capture.communicate()
+            raise AssertionError(f"Socket capture did not start: {marker}\n{stdout}\n{stderr}")
     command = [
         str(binary), "--base", f"http://127.0.0.1:{port}", "--path", "/rooms/1/messages",
         "--cookie", cookie, "--expected-status", "200", "--expected-content-type", "text/html",
@@ -87,11 +100,20 @@ def measure(binary, port, cookie, csrf, clients, seconds, count, invalid_sample=
         report = json.loads(stdout.strip().splitlines()[-1])
         assert reader.returncode == 0 and report["errors"] == 0, (report, stderr)
         assert writes["writes"] == count, writes
-        return {"reads": report, "writes": writes}
+        result = {"reads": report, "writes": writes}
+        if capture:
+            stdout, stderr = capture.communicate(timeout=max(60, seconds + 45))
+            delivery = json.loads(stdout.strip().splitlines()[-1])
+            assert capture.returncode == 0 and delivery["missed"] == delivery["unexpected"] == delivery["closed_early"] == 0, (delivery, stderr)
+            result["sockets"] = delivery
+        return result
     finally:
         if reader.poll() is None:
             reader.kill()
             reader.communicate()
+        if capture and capture.poll() is None:
+            capture.kill()
+            capture.communicate()
 
 
 def saved_messages(database, count, rails):
@@ -118,10 +140,11 @@ def main():
     parser.add_argument("--seconds", type=float, default=10)
     parser.add_argument("--write-rate", type=float, default=10, help="target message POSTs per second")
     parser.add_argument("--campfire-workers", type=int, default=22)
+    parser.add_argument("--sockets", type=int, default=0, help="signed room-stream subscribers; zero disables socket capture")
     parser.add_argument("--rustfire-first", action="store_true")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="save initial and first invalid read responses")
     args = parser.parse_args()
-    if args.clients < 1 or args.seconds < 2 or args.write_rate <= 0 or args.campfire_workers < 1:
+    if args.clients < 1 or args.seconds < 2 or args.write_rate <= 0 or args.campfire_workers < 1 or args.sockets < 0:
         parser.error("clients, seconds, write rate, and Campfire workers must be positive; seconds must be at least 2")
     count = round(args.seconds * args.write_rate)
     if count < 1 or count > 1000:
@@ -159,7 +182,7 @@ def main():
                     first = fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")
                     if args.sample_dir:
                         (args.sample_dir / "rustfire-initial.html").write_bytes(first[2])
-                    result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", args.clients, args.seconds, count, args.sample_dir / "rustfire-invalid.html" if args.sample_dir else None)
+                    result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", args.clients, args.seconds, count, args.sockets, args.sample_dir / "rustfire-invalid.html" if args.sample_dir else None)
                     check_final_page(fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")[2], count)
                     return first[2], result
                 finally:
@@ -174,7 +197,7 @@ def main():
                         first = fetch(camp_port, cookie, "/rooms/1/messages")
                         if args.sample_dir:
                             (args.sample_dir / "campfire-initial.html").write_bytes(first[2])
-                        result = measure(binary, camp_port, cookie, csrf, args.clients, args.seconds, count, args.sample_dir / "campfire-invalid.html" if args.sample_dir else None)
+                        result = measure(binary, camp_port, cookie, csrf, args.clients, args.seconds, count, args.sockets, args.sample_dir / "campfire-invalid.html" if args.sample_dir else None)
                         check_final_page(fetch(camp_port, cookie, "/rooms/1/messages")[2], count)
                         return first[2], result
                     finally:
@@ -192,7 +215,7 @@ def main():
         saved_messages(rust_db, count, False)
         saved_messages(camp_db, count, True)
         print("PASS paired mixed message reads and writes, response checks, and saved rows")
-        print(json.dumps({"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
+        print(json.dumps({"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate, "sockets": args.sockets, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
 
 
 if __name__ == "__main__":
