@@ -224,10 +224,20 @@ body:has(.app-shell)>header { display: none; }
 .mention-suggestions button.selected,.mention-suggestions button:hover { background: var(--chat-bubble); }
 .message [id^='presentation_message_'] .mention { font-weight: 700; color: var(--chat-text); }
 .message [id^='presentation_message_'] figure { margin: 10px 0 0; }
-.message [id^='presentation_message_'] .og-embed { display: grid; gap: 5px; max-width: 500px; padding: 14px; border: 1px solid var(--chat-border); border-radius: 10px; background: var(--chat-bg); font-size: 14px; }
-.message [id^='presentation_message_'] .og-embed a { font-weight: 700; font-size: 16px; text-decoration: none; }
-.message [id^='presentation_message_'] .og-embed p { margin: 0; color: var(--chat-muted); }
-.message [id^='presentation_message_'] .og-embed img { max-width: 100%; max-height: 250px; object-fit: contain; }
+.message [id^='presentation_message_'] .og-embed { display: flex; flex-direction: column; gap: 8px; max-width: 500px; margin: 10px 0 5px; padding: 14px; overflow: clip; border: 1px solid var(--chat-border); border-radius: 8px; background: var(--chat-bg); font-size: 14px; }
+.message [id^='presentation_message_'] .og-embed__content { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 6; white-space: normal; }
+.message [id^='presentation_message_'] .og-embed__title { font-weight: 600; text-decoration: underline; }
+.message [id^='presentation_message_'] .og-embed__title a { color: inherit; }
+.message [id^='presentation_message_'] .og-embed__description { color: var(--chat-text); }
+.message [id^='presentation_message_'] .og-embed__image { display: flex; flex-shrink: 0; max-width: 100%; aspect-ratio: 16 / 9; overflow: clip; }
+.message [id^='presentation_message_'] .og-embed__image img { width: 100%; object-fit: contain; object-position: top right; }
+.composer trix-editor .og-embed { display: flex; flex-direction: column; gap: 8px; padding: 14px; overflow: clip; border: 1px solid var(--chat-border); border-radius: 8px; background: var(--chat-bg); }
+.composer trix-editor .og-embed__content { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 6; }
+.composer trix-editor .og-embed__title { font-weight: 600; text-decoration: underline; }
+.composer trix-editor .og-embed__image { display: flex; max-width: 100%; aspect-ratio: 16 / 9; overflow: clip; }
+.composer trix-editor .og-embed__image img { width: 100%; object-fit: contain; object-position: top right; }
+@media (min-width: 100ch) { .message [id^='presentation_message_'] .og-embed { flex-direction: row; align-items: start; } .message [id^='presentation_message_'] .og-embed__image { width: 15dvw; } }
+@media (max-width: 100ch) { .message [id^='presentation_message_'] .og-embed__image img { object-position: top left; } }
 .message__attachment { display: block; max-width: min(100%, 600px); max-height: 400px; border-radius: 10px; object-fit: contain; }
 .lightbox-link { display: inline-block; }
 .image-lightbox { max-width: 96vw; max-height: 96vh; padding: 8px; border: 0; border-radius: 12px; background: #111; color: #fff; }

@@ -375,28 +375,21 @@ fn safe_preview_url(input: &str, request_host: Option<&str>) -> Option<String> {
     Some(input.to_string())
 }
 fn preview_markup(attributes: &HashMap<String, String>, host: Option<&str>) -> String {
-    let title = attributes
-        .get("filename")
-        .map(String::as_str)
-        .unwrap_or("")
-        .chars()
-        .take(280)
-        .collect::<String>();
-    let description = attributes
-        .get("caption")
-        .map(String::as_str)
-        .unwrap_or("")
-        .chars()
-        .take(560)
-        .collect::<String>();
-    let title = esc(&title);
-    let description = esc(&description);
+    fn truncate(value: &str, limit: usize) -> String {
+        if value.chars().count() <= limit {
+            value.to_string()
+        } else {
+            format!("{}…", value.chars().take(limit - 1).collect::<String>())
+        }
+    }
+    let title = esc(&truncate(attributes.get("filename").map(String::as_str).unwrap_or(""), 280));
+    let description = esc(&truncate(attributes.get("caption").map(String::as_str).unwrap_or(""), 560));
     let link = attributes
         .get("href")
         .and_then(|url| safe_preview_url(url, host))
         .map(|url| {
             format!(
-                "<a href='{}' rel='noreferrer' target='_blank'>{title}</a>",
+                "<a href='{}'>{title}</a>",
                 esc(&url)
             )
         })
@@ -404,9 +397,9 @@ fn preview_markup(attributes: &HashMap<String, String>, host: Option<&str>) -> S
     let image = attributes
         .get("url")
         .and_then(|url| safe_preview_url(url, host))
-        .map(|url| format!("<img src='{}' alt=''>", esc(&url)))
+        .map(|url| format!("<div class='og-embed__image'><img src='{}' class='image center' alt=''></div>", esc(&url)))
         .unwrap_or_default();
-    format!("<div class='og-embed'>{link}<p>{description}</p>{image}</div>")
+    format!("<div class='og-embed gap'><div class='og-embed__content'><div class='og-embed__title'>{link}</div><div class='og-embed__description'>{description}</div></div>{image}</div>")
 }
 fn replace_preview_attachments(input: &str, host: Option<&str>, display: bool) -> String {
     if !input.contains("action-text-attachment") && !input.contains("data-trix-attachment") {
@@ -567,6 +560,7 @@ fn replace_mention_attachments(
 fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
+        .link_rel(None)
         .add_tags(&["action-text-attachment", "figure", "figcaption"])
         .add_tag_attributes("action-text-attachment", &["sgid", "content-type", "filename", "filesize", "caption", "width", "height", "previewable"])
         .add_tag_attributes("span", &["class"])
@@ -10754,6 +10748,12 @@ mod tests {
         let (_, html) = super::rich_body(&safe, Some("once.campfire.test"));
         assert!(html.contains("https://example.com/page"));
         assert!(html.contains("https://example.com/image.png"));
+        assert!(html.contains("class=\"og-embed gap\""), "{html}");
+        assert!(html.contains("class=\"og-embed__content\""), "{html}");
+        assert!(html.contains("class=\"og-embed__title\""), "{html}");
+        assert!(html.contains("class=\"og-embed__description\""), "{html}");
+        assert!(html.contains("class=\"og-embed__image\""), "{html}");
+        assert!(html.contains("class=\"image center\""), "{html}");
     }
     #[test]
     fn trix_preview_ignores_untrusted_embedded_html() {

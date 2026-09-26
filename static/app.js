@@ -444,13 +444,19 @@ if (chat) {
       if(!response.ok||response.status===204)return;
       const {title,description,image,url:canonical}=await response.json();
       if(!editor.getDocument().toString().includes(url))return;
+      const embed=document.createElement('actiontext-opengraph-embed');
+      if(image?.startsWith('https://pbs.twimg.com/profile_images'))embed.className='cf-twitter-avatar';
       const wrapper=document.createElement('div');wrapper.className='og-embed';
-      const link=document.createElement('a');link.href=canonical;link.rel='noreferrer';link.target='_blank';link.textContent=title;wrapper.append(link);
-      const text=document.createElement('p');text.textContent=description;wrapper.append(text);
-      if(image){const img=document.createElement('img');img.src=image;img.alt='';wrapper.append(img)}
+      const content=document.createElement('div');content.className='og-embed__content';
+      const heading=document.createElement('div');heading.className='og-embed__title';heading.textContent=title.length>560?title.slice(0,559)+'…':title;
+      const text=document.createElement('div');text.className='og-embed__description';text.textContent=description.length>560?description.slice(0,559)+'…':description;
+      content.append(heading,text);wrapper.append(content);
+      const imageBox=document.createElement('div');imageBox.className='og-embed__image';
+      if(image){const img=document.createElement('img');img.src=image;img.className='image';img.alt='';imageBox.append(img)}
+      wrapper.append(imageBox);embed.append(wrapper);
       const prior=editor.getSelectedRange();
       editor.recordUndoEntry('Insert link preview');
-      editor.insertAttachment(new Trix.Attachment({contentType:'application/vnd.actiontext.opengraph-embed',content:wrapper.outerHTML,filename:title,href:canonical,url:image,caption:description}));
+      editor.insertAttachment(new Trix.Attachment({contentType:'application/vnd.actiontext.opengraph-embed',content:embed.outerHTML,filename:title,href:canonical,url:image,caption:description}));
       editor.setSelectedRange(prior);
     } catch(error) { console.debug('Link preview unavailable',error); }
   });
