@@ -497,32 +497,40 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   const chooseMention=(person)=>{if(!mentionRange||!typingInput.editor||typeof person.sgid!=='string')return;const span=document.createElement('span');span.className='mention';span.setAttribute('sgid',person.sgid);const avatar=document.createElement('img');avatar.src=person.avatar_url;avatar.className='avatar';avatar.alt=person.name;span.append(avatar,document.createTextNode(person.name));typingInput.editor.setSelectedRange(mentionRange);typingInput.editor.insertAttachment(new Trix.Attachment({content:span.outerHTML,contentType:'application/vnd.campfire.mention',sgid:person.sgid}));typingInput.editor.insertString(' ');ignoreNextMentionChange=true;hideMentions();typingInput.focus();};
   const refreshMentions=()=>{if(ignoreNextMentionChange){ignoreNextMentionChange=false;return;}const editor=typingInput.editor;if(!editor)return;const position=editor.getPosition();const before=editor.getDocument().toString().slice(0,position);const match=before.match(/(?:^|\s)@([^@\n]{0,32})$/);if(!match){hideMentions();return;}const query=match[1].trim();mentionRange=[position-match[1].length-1,position];const generation=++mentionGeneration;clearTimeout(mentionTimer);mentionTimer=setTimeout(async()=>{try{const response=await fetch(`/autocompletable/users?room_id=${roomId}&query=${encodeURIComponent(query)}`);if(!response.ok||generation!==mentionGeneration)return;const people=(await response.json()).map(person=>({...person,name:decodeAutocompleteName(person.name)}));if(generation!==mentionGeneration)return;mentionOptions=people.filter(person=>person.value!==Number(currentUserId));mentionSelected=0;mentionBox.replaceChildren();for(const [index,person] of mentionOptions.entries()){const button=document.createElement('button');button.type='button';button.id=`mention-option-${index}`;button.setAttribute('role','option');button.textContent=person.name;button.addEventListener('mousedown',event=>event.preventDefault());button.addEventListener('click',()=>chooseMention(person));mentionBox.append(button);}mentionBox.hidden=!mentionOptions.length;if(mentionOptions.length)markMention();}catch{hideMentions();}},120);};
   typingInput.addEventListener('trix-change',refreshMentions);
-  typingInput.addEventListener('trix-paste',async(event)=>{
+  let unfurlController=null,unfurlFrame=null;
+  typingInput.addEventListener('trix-paste',(event)=>{
     const range=event.paste?.range;
     const editor=typingInput.editor;
     if(!range||!editor)return;
     const url=editor.getDocument().getStringAtRange(range).trim();
-    if(!/^(?:https?:\/\/|www\.)\S+$/i.test(url))return;
-    try {
-      const response=await fetch('/unfurl_link',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({url})});
+    if(!/^(?:[a-z0-9]+:\/\/|www\.)[^\s]+$/.test(url))return;
+    if(typingInput.hasAttribute('data-permitted-attributes')&&!typingInput.getAttribute('data-permitted-attributes').split(' ').includes('href'))return;
+    if(!typingInput.getAttribute('data-permitted-attachment-types')?.includes('application/vnd.actiontext.opengraph-embed'))return;
+    unfurlController?.abort();if(unfurlFrame!==null)cancelAnimationFrame(unfurlFrame);
+    const controller=new AbortController();unfurlController=controller;
+    unfurlFrame=requestAnimationFrame(async()=>{try {
+      const response=await fetch('/unfurl_link',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({url}),signal:controller.signal});
       if(!response.ok||response.status===204)return;
       const {title,description,image,url:canonical}=await response.json();
       if(!editor.getDocument().toString().includes(url))return;
+      if(!image)return;
       const embed=document.createElement('actiontext-opengraph-embed');
-      if(image?.startsWith('https://pbs.twimg.com/profile_images'))embed.className='cf-twitter-avatar';
+      embed.className=image.startsWith('https://pbs.twimg.com/profile_images')?'cf-twitter-avatar':'';
       const wrapper=document.createElement('div');wrapper.className='og-embed';
       const content=document.createElement('div');content.className='og-embed__content';
       const heading=document.createElement('div');heading.className='og-embed__title';heading.textContent=title.length>560?title.slice(0,559)+'…':title;
       const text=document.createElement('div');text.className='og-embed__description';text.textContent=description.length>560?description.slice(0,559)+'…':description;
       content.append(heading,text);wrapper.append(content);
       const imageBox=document.createElement('div');imageBox.className='og-embed__image';
-      if(image){const img=document.createElement('img');img.src=image;img.className='image';img.alt='';imageBox.append(img)}
+      const img=document.createElement('img');img.src=image;img.className='image';img.alt='';imageBox.append(img);
       wrapper.append(imageBox);embed.append(wrapper);
       const prior=editor.getSelectedRange();
-      editor.recordUndoEntry('Insert link preview');
+      editor.recordUndoEntry('Insert Opengraph preview for Pasted URL');
       editor.insertAttachment(new Trix.Attachment({contentType:'application/vnd.actiontext.opengraph-embed',content:embed.outerHTML,filename:title,href:canonical,url:image,caption:description}));
       editor.setSelectedRange(prior);
-    } catch(error) { console.debug('Link preview unavailable',error); }
+    } catch(error) { if(error?.name!=='AbortError')console.debug('Link preview unavailable',error); }
+    finally { if(unfurlController===controller){unfurlController=null;unfurlFrame=null;} }
+    });
   });
   typingInput.addEventListener('keydown',event=>{if(mentionBox.hidden)return;if(event.key==='Escape'){event.preventDefault();hideMentions();return;}if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();mentionSelected=(mentionSelected+(event.key==='ArrowDown'?1:-1)+mentionOptions.length)%mentionOptions.length;markMention();return;}if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();chooseMention(mentionOptions[mentionSelected]);}},true);
   typingInput.addEventListener('blur',()=>setTimeout(()=>{if(!mentionBox.contains(document.activeElement))hideMentions();},150));
