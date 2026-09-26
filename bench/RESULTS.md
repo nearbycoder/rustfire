@@ -920,3 +920,14 @@ Rustfire served about **2.26–2.53×** as many checked reads per second in thes
 ## Rich-text presentation and search text
 
 `python bench/paired_rich_filters.py --sweep` passed 155 paired create cases against the pinned Campfire build. The probe compares each message's parsed presentation and saved FTS search text. Four additional blank browser posts matched status, presentation, and search rows; two edits matched the 302 redirect and updated search text. Campfire retains text inside some disallowed presentation tags and leading whitespace in its searchable body; Rustfire now does the same. A separate importer regression confirms that a missing search row is rebuilt from the original rich text while its displayed HTML remains sanitized. This is a sampled behavior check, not a performance or complete ActionText parity claim.
+
+## Thirty-second mixed workload with 400 browser-channel sockets
+
+The release build passed `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 3 --sockets-per-room 100 --browser-channels --campfire-workers 22 --resources` in both server orders. Each app saved 90 plain-text writes in each of four rooms, delivered **36,000/36,000** expected message appends and **36,000/36,000** unread events to 400 sockets, and had no early socket closes, unexpected deliveries, or checked HTTP read errors. The harness checked the parsed structure of all 360 paired appends, the initial and final latest-40 pages, and all saved writes. Presence setup delivered all **20,200/20,200** expected read events before the timed interval.
+
+| Rustfire first | Rustfire reads/s / p95 | Rustfire write p95 | Rustfire peak PSS MiB | Campfire reads/s / p95 | Campfire write p95 | Campfire peak PSS MiB |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 3,139 / 29.06 ms | 32.50 ms | 104.44 | 1,475 / 88.02 ms | 146.62 ms | 3,817.58 |
+| Yes | 3,120 / 29.32 ms | 31.43 ms | 103.90 | 1,469 / 102.78 ms | 161.91 ms | 3,968.12 |
+
+Rustfire served **2.12–2.13×** as many checked reads per second and had lower read and write p95 in both orders. Both apps ran serially on one 32-logical-CPU host with disposable SQLite; Campfire used 22 Puma workers and isolated Redis, and Rustfire used one process. Peak PSS includes the server processes and Redis, excluding load clients. Socket setup preceded the 30-second read/write interval, so these figures do not establish a connection-rate or maximum-user limit. All sockets in each room used one account identity. The workload does not cover rich text, uploads, push, hours of steady load, or full application parity; measured HTTP reads checked status, media type, and message count rather than every response body.

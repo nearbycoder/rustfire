@@ -69,6 +69,20 @@ def workflow(port, cookie, csrf, database, campfire):
     for label, content in (("empty_message", b""), ("blank_message", b"   ")):
         status, _, body = request(port, "POST", base, content)
         results[label] = status
+    for label, path in (
+        ("regular_index_bot_key", "/rooms/1/messages"),
+        ("room_page_bot_key", "/rooms/1"),
+        ("search_page_bot_key", "/searches"),
+        ("profile_page_bot_key", "/users/me/profile"),
+    ):
+        status, location, _ = request(port, "GET", f"{path}?bot_key={BOT_ID}-{BOT_TOKEN}", accept="text/html")
+        results[label] = status, urllib.parse.urlsplit(location or "").path
+    status, location, _ = request(port, "GET", "/rooms/1/messages?bot_key=invalid", accept="text/html")
+    results["regular_index_invalid_bot_key"] = status, urllib.parse.urlsplit(location or "").path
+    status, location, _ = request(port, "GET", f"/rooms/1/messages?bot_key={BOT_ID}-{BOT_TOKEN}", cookie=cookie, csrf=csrf, accept="text/html")
+    results["regular_index_session_before_bot_key"] = status, urllib.parse.urlsplit(location or "").path
+    status, location, _ = request(port, "GET", f"/session/new?bot_key={BOT_ID}-{BOT_TOKEN}", accept="text/html")
+    results["public_sign_in_bot_key"] = status, urllib.parse.urlsplit(location or "").path
 
     browser_body = urllib.parse.urlencode({"message[body]": "Human origin", "message[client_message_id]": "paired-bot-mutation-human", "authenticity_token": csrf})
     status, _, body = request(port, "POST", "/rooms/1/messages", browser_body, cookie=cookie, csrf=csrf, content_type="application/x-www-form-urlencoded", accept="text/vnd.turbo-stream.html, text/html")

@@ -2692,6 +2692,13 @@ async fn reject_banned_ip(
             && segments[2] != "messages"
             && segments[3] == "messages"
     };
+    let authenticated_bot_on_other_route = !bot_api_request
+        && request.uri().query()
+            .and_then(|query| form_urlencoded::parse(query.as_bytes())
+                .find(|(name, _)| name == "bot_key")
+                .map(|(_, key)| key.into_owned()))
+            .is_some_and(|key| matches!(user(&s, request.headers()), Err(StatusCode::UNAUTHORIZED))
+                && bot_user(&s, key.trim()).is_ok());
     let requested_path = request
         .uri()
         .path_and_query()
@@ -2699,6 +2706,15 @@ async fn reject_banned_ip(
         .unwrap_or_else(|| "/".to_string());
     let sign_in_url = public_url(request.headers(), "/session/new");
     let response = next.run(request).await;
+    let redirects_to_sign_in = response.status().is_redirection()
+        && response.headers().get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "/session/new" || value.ends_with("/session/new"));
+    if authenticated_bot_on_other_route
+        && (response.status() == StatusCode::UNAUTHORIZED || redirects_to_sign_in)
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if (browser_navigation || bot_api_request) && response.status() == StatusCode::UNAUTHORIZED {
         let encoded = URL_SAFE_NO_PAD.encode(requested_path.as_bytes());
         let mut redirect = found_redirect(&sign_in_url);
