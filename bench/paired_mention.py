@@ -1,5 +1,6 @@
 """Compare rendered signed mentions on matched disposable Campfire fixtures."""
 
+import base64
 import html
 import http.client
 import json
@@ -13,6 +14,14 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_link_preview import Presentation
+
+
+def unsigned_user_sgids(signed):
+    message, _ = signed.split("--", 1)
+    rotated = f"{message}--invalid"
+    marshaled_user_2 = "BAhJIhpnaWQ6Ly9jYW1wZmlyZS9Vc2VyLzIGOgZFVA=="
+    legacy = base64.b64encode(json.dumps({"_rails": {"message": marshaled_user_2, "exp": None, "pur": "attachable"}}).encode()).decode() + "--invalid"
+    return {"rotated-key": rotated, "rails7-key": legacy}
 
 
 def mention_sgid(port, cookie, campfire, user_id=2):
@@ -76,6 +85,8 @@ def main():
                 rust_sgid = mention_sgid(rust_port, rust_cookie, False)
                 rust_nonmember_sgid = mention_sgid(rust_port, rust_cookie, False, 3)
                 rust_markup = {case: post(rust_port, rust_cookie, rust_csrf, rust_nonmember_sgid if case == "nonmember" else rust_sgid, case) for case in ("bare", "embedded-content", "trix-figure", "duplicate", "nonmember")}
+                for case, sgid in unsigned_user_sgids(rust_sgid).items():
+                    rust_markup[case] = post(rust_port, rust_cookie, rust_csrf, sgid, case)
                 with sqlite3.connect(rust_db) as db:
                     db.execute("UPDATE users SET status=2 WHERE id=2")
                 rust_markup["banned"] = post(rust_port, rust_cookie, rust_csrf, rust_sgid, "banned")
@@ -89,6 +100,8 @@ def main():
                     camp_sgid = mention_sgid(camp_port, camp_cookie, True)
                     camp_nonmember_sgid = mention_sgid(camp_port, camp_cookie, True, 3)
                     camp_markup = {case: post(camp_port, camp_cookie, camp_csrf, camp_nonmember_sgid if case == "nonmember" else camp_sgid, case) for case in ("bare", "embedded-content", "trix-figure", "duplicate", "nonmember")}
+                    for case, sgid in unsigned_user_sgids(camp_sgid).items():
+                        camp_markup[case] = post(camp_port, camp_cookie, camp_csrf, sgid, case)
                     with sqlite3.connect(camp_db) as db:
                         db.execute("UPDATE users SET status=2 WHERE id=2")
                     camp_markup["banned"] = post(camp_port, camp_cookie, camp_csrf, camp_sgid, "banned")
@@ -110,12 +123,12 @@ def main():
         assert rust_markup[case] == camp_markup[case], (case, rust_markup[case], camp_markup[case])
         if case != "nonmember":
             assert ("a", (("class", "btn avatar"), ("href", "/users/2"), ("title", "Rustfire Compare – Team lead"))) in rust_markup[case]
-    expected_search = [("Hello @Rustfire Compare!",)] * 3 + [("Hello @Rustfire Compare @Rustfire Compare!",), ("Hello @User 3!",), ("Hello @Rustfire Compare!",)]
+    expected_search = [("Hello @Rustfire Compare!",)] * 3 + [("Hello @Rustfire Compare @Rustfire Compare!",), ("Hello @User 3!",)] + [("Hello @Rustfire Compare!",)] * 3
     assert rust_search == camp_search == expected_search, (rust_search, camp_search)
     rust_mentions = [(client_id, [] if user_id is None else [user_id]) for client_id, user_id in rust_mentions]
-    expected_mentions = [[f"paired-mention-{case}", [2] if case != "nonmember" else []] for case in rust_markup]
+    expected_mentions = [[f"paired-mention-{case}", [] if case in ("nonmember", "rotated-key", "rails7-key") else [2]] for case in rust_markup]
     assert rust_mentions == [tuple(row) for row in camp_mentions] == [tuple(row) for row in expected_mentions], (rust_mentions, camp_mentions)
-    print("PASS signed mention presentation, search text, duplicate and banned recipients, and nonmember exclusion match pinned Campfire")
+    print("PASS signed and rotated-key mention presentation, search text, and recipients match pinned Campfire")
 
 
 if __name__ == "__main__":

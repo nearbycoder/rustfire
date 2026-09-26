@@ -1,5 +1,9 @@
 # Preliminary Rustfire measurements
 
+## Rotated-key User mention parity
+
+`python bench/paired_mention.py` passed eight matched cases against pinned Campfire `91d294f`. Current and Rails 7 User SGIDs with invalid signatures still rendered the same parsed mention markup and searchable `@name` text in both apps. Campfire's `Message#mentionees` and Rustfire's saved recipient rows excluded those two invalid-signature mentions, while valid, duplicate, banned-member, and nonmember cases retained their existing behavior. `python bench/paired_mention_webhook.py` also passed after adding an invalid-signature bot mention: both apps showed it in the complete normalized bot message-list JSON, minted a fresh valid SGID inside its rendered mention, and sent no webhook for it. The source's broader ActionText handling and other notification paths remain unverified.
+
 Machine: local 32-logical-CPU Linux host. Rustfire was built with `cargo build --release`, using one server process and SQLite WAL on local storage. The Go load generator ran on the same host. Each trial used 32 concurrent keep-alive HTTP clients for 10 seconds, against a room initially containing 323,639 messages. Reads returned the latest 40 messages. Writes posted small text messages and updated the SQLite FTS5 index.
 
 | Workload | Throughput | p50 | p95 | p99 | Errors |

@@ -145,6 +145,7 @@ def workflow(port, cookie, csrf, campfire):
     own = f'<action-text-attachment sgid="{html.escape(sgid, quote=True)}" content-type="application/vnd.campfire.mention"></action-text-attachment>'
     peer = f'<action-text-attachment sgid="{html.escape(peer_sgid, quote=True)}" content-type="application/vnd.campfire.mention"></action-text-attachment>'
     bot_post(port, 1, f"<div>Hey {own} {peer}</div>")
+    post(port, cookie, csrf, sgid.split("--", 1)[0] + "--invalid", "rotated-key")
     received = [Receiver.received.get(timeout=15) for _ in range(6)]
     time.sleep(0.5)
     assert Receiver.received.empty(), "unexpected extra bot webhook"
@@ -210,11 +211,12 @@ def main():
     assert rust_received == camp_received, (rust_received, camp_received)
     assert rust_bot_messages == camp_bot_messages, (rust_bot_messages, camp_bot_messages)
     assert [message["id"] for message in rust_bot_messages[3]] == [7], rust_bot_messages[3]
-    assert rust_bot_messages[1][-1]["id"] == 8, rust_bot_messages[1]
-    assert rust_bot_messages[1][-1]["body"]["plain_text"] == "Hey @Probe Bot @Peer Bot", rust_bot_messages[1][-1]
+    assert rust_bot_messages[1][-2]["id"] == 8, rust_bot_messages[1]
+    assert rust_bot_messages[1][-2]["body"]["plain_text"] == "Hey @Probe Bot @Peer Bot", rust_bot_messages[1][-2]
+    assert rust_bot_messages[1][-1]["body"]["plain_text"] == "Hello @Probe Bot!", rust_bot_messages[1][-1]
     assert [payload["message"]["id"] for path, payload in rust_received] == [2, 3, 4, 5, 7, 8]
     assert [path for path, _ in rust_received] == ["/hook"] * 4 + ["/peer"] * 2
-    print("PASS mention, direct-room, and bot-originated webhook payloads and full bot API JSON match pinned Campfire; plain @bot and bot self-messages trigger none")
+    print("PASS mention, direct-room, and bot-originated webhook payloads and bot API JSON match Campfire; invalid-signature mentions render without triggering a webhook")
 
 
 if __name__ == "__main__":

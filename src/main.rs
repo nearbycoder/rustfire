@@ -527,7 +527,7 @@ fn replace_mention_attachments(
                 | Some("application/vnd.rustfire.mention") => {
                     let id = if kind.as_deref() == Some("application/vnd.campfire.mention") {
                         sgid.as_deref()
-                            .and_then(|sgid| verified_mention_id(signing_key, imported_key, sgid))
+                            .and_then(|sgid| mention_user_id_from_sgid(signing_key, imported_key, sgid))
                     } else {
                         legacy_id.filter(|id| *id > 0)
                     };
@@ -1460,7 +1460,39 @@ fn mention_id_from_sgid(key: &[u8], sgid: &str) -> Option<i64> {
         .strip_suffix("/attachable")?;
     id.parse::<i64>().ok().filter(|id| *id > 0)
 }
-fn verified_mention_id(key: &[u8], imported_key: Option<&[u8]>, sgid: &str) -> Option<i64> {
+fn unsigned_campfire_user_id(sgid: &str) -> Option<i64> {
+    // Campfire's ActionText extension recovers User attachables after a
+    // SECRET_KEY_BASE rotation. It never unmarshals the Rails 7 payload, and
+    // it does not apply this fallback to other models or blob attachments.
+    if sgid.len() > 1024 {
+        return None;
+    }
+    let encoded = sgid.split_once("--").map_or(sgid, |(message, _)| message);
+    let payload = STANDARD.decode(encoded).or_else(|_| URL_SAFE.decode(encoded)).or_else(|_| URL_SAFE_NO_PAD.decode(encoded)).ok()?;
+    let envelope: Value = serde_json::from_slice(&payload).ok()?;
+    let rails = envelope.get("_rails")?;
+    let prefix = b"gid://campfire/User/";
+    let id = if let Some(data) = rails.get("data").and_then(Value::as_str) {
+        let rest = data.strip_prefix("gid://campfire/User/")?;
+        let end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+        if !matches!(rest.get(end..), Some("" | "?expires_in")) {
+            return None;
+        }
+        rest.get(..end)?.parse::<i64>().ok()?
+    } else {
+        let encoded = rails.get("message")?.as_str()?;
+        let marshaled = STANDARD.decode(encoded).or_else(|_| URL_SAFE.decode(encoded)).or_else(|_| URL_SAFE_NO_PAD.decode(encoded)).ok()?;
+        let start = marshaled.windows(prefix.len()).position(|window| window == prefix)? + prefix.len();
+        let end = marshaled[start..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+        std::str::from_utf8(marshaled.get(start..start + end)?).ok()?.parse::<i64>().ok()?
+    };
+    (id > 0).then_some(id)
+}
+fn mention_user_id_from_sgid(key: &[u8], imported_key: Option<&[u8]>, sgid: &str) -> Option<i64> {
+    signed_mention_user_id(key, imported_key, sgid)
+        .or_else(|| unsigned_campfire_user_id(sgid))
+}
+fn signed_mention_user_id(key: &[u8], imported_key: Option<&[u8]>, sgid: &str) -> Option<i64> {
     mention_id_from_sgid(key, sgid)
         .or_else(|| imported_key.and_then(|imported| mention_id_from_sgid(imported, sgid)))
 }
@@ -1624,7 +1656,7 @@ fn mention_ids(input: &str, signing_key: &[u8], imported_key: Option<&[u8]>) -> 
             Some("application/vnd.campfire.mention") => value
                 .get("sgid")
                 .and_then(Value::as_str)
-                .and_then(|sgid| verified_mention_id(signing_key, imported_key, sgid)),
+                .and_then(|sgid| signed_mention_user_id(signing_key, imported_key, sgid)),
             Some("application/vnd.rustfire.mention") => value
                 .get("userId")
                 .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok())),
@@ -1644,7 +1676,7 @@ fn mention_ids(input: &str, signing_key: &[u8], imported_key: Option<&[u8]>) -> 
         let id = attachment
             .value()
             .attr("sgid")
-            .and_then(|sgid| verified_mention_id(signing_key, imported_key, sgid));
+            .and_then(|sgid| signed_mention_user_id(signing_key, imported_key, sgid));
         if let Some(id) = id {
             if !ids.contains(&id) {
                 ids.push(id);
@@ -4960,7 +4992,7 @@ fn bot_message_json(
             continue;
         }
         let Some(sgid) = attachment.value().attr("sgid") else { continue };
-        let Some(id) = verified_mention_id(
+        let Some(id) = mention_user_id_from_sgid(
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
             sgid,
@@ -4975,12 +5007,14 @@ fn bot_message_json(
         let name = html_escape::encode_double_quoted_attribute(&name);
         let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
         let avatar = avatar_path(avatar_key, id, &updated_at)?;
+        let mention_key = s.imported_mention_signing_key.as_deref().unwrap_or(&s.mention_signing_key);
+        let rendered_sgid = mention_sgid(mention_key, id).map_err(db_err)?;
         let content = attachment.value().attr("content").map(|value| {
             format!(" content=\"{}\"", value.replace('&', "&amp;").replace('"', "&quot;"))
         }).unwrap_or_default();
         let wrapped = format!(
             "<action-text-attachment sgid=\"{}\" content-type=\"application/octet-stream\"{content}><div class=\"mention\" sgid=\"{}\">\n  <a title=\"{}\" class=\"btn avatar\" href=\"/users/{id}\"><img src=\"{}\" width=\"48\" height=\"48\"></a>\n  {}\n</div></action-text-attachment>",
-            esc(sgid), esc(sgid), title, avatar, name,
+            esc(sgid), esc(&rendered_sgid), title, avatar, name,
         );
         attachments.push((id, wrapped));
     }
@@ -10946,7 +10980,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::{PushBody, public_ip, safe_return_path, valid_push_endpoint, valid_push_keys};
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
     use openssl::{
         bn::BigNumContext,
         ec::{EcGroup, EcKey, PointConversionForm},
@@ -11299,7 +11333,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_mentions_require_the_same_key_and_unchanged_payload() {
+    fn signed_mentions_validate_signatures_but_users_survive_key_rotation() {
         let key = [7u8; 32];
         let sgid = super::mention_sgid(&key, 42).unwrap();
         assert_eq!(super::mention_id_from_sgid(&key, &sgid), Some(42));
@@ -11328,6 +11362,19 @@ mod tests {
         let token = "eyJfcmFpbHMiOnsiZGF0YSI6ImdpZDovL2NhbXBmaXJlL1VzZXIvNDI_ZXhwaXJlc19pbiIsInB1ciI6ImF0dGFjaGFibGUifX0=--3d8933c1a8fd0d7a289fd1f62b3a5ecf0045041e";
         assert_eq!(super::mention_sgid(&key, 42).unwrap(), token);
         assert_eq!(super::mention_id_from_sgid(&key, token), Some(42));
+    }
+
+    #[test]
+    fn unsigned_campfire_attachable_fallback_is_limited_to_users() {
+        let key = [7u8; 32];
+        let signed_user = super::mention_sgid(&key, 42).unwrap();
+        let (message, _) = signed_user.split_once("--").unwrap();
+        assert_eq!(super::mention_user_id_from_sgid(&[8u8; 32], None, &format!("{message}--invalid")), Some(42));
+        let room = STANDARD.encode(serde_json::json!({"_rails":{"data":"gid://campfire/Room/42","pur":"attachable"}}).to_string());
+        assert_eq!(super::mention_user_id_from_sgid(&key, None, &format!("{room}--invalid")), None);
+        let legacy = STANDARD.encode(serde_json::json!({"_rails":{"message":"BAhJIhtnaWQ6Ly9jYW1wZmlyZS9Vc2VyLzQyBjoGRVQ=","exp":null,"pur":"attachable"}}).to_string());
+        assert_eq!(super::mention_user_id_from_sgid(&key, None, &format!("{legacy}--invalid")), Some(42));
+        assert_eq!(super::mention_user_id_from_sgid(&key, None, "invalid--invalid"), None);
     }
 
     #[test]
