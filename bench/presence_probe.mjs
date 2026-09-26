@@ -107,10 +107,19 @@ try {
   await waitFor(frame => frame.type === 'welcome', 'Action Cable welcome');
   send({ command: 'subscribe', identifier: read });
   await confirm(read);
+  const pageMarker = '2025-01-01 00:00:00';
+  sql('update memberships set unread_at=? where room_id=1 and user_id=1', [pageMarker]);
+  const page = await fetch(new URL('/rooms/1', base), { headers: { Cookie: cookie } });
+  if (page.status !== 200) throw new Error(`Room page returned ${page.status}`);
+  await page.arrayBuffer();
+  if (state()[2] !== pageMarker) throw new Error('Room GET cleared the unread marker before presence subscribed');
+  await new Promise(resolve => setTimeout(resolve, 250));
+  if (frames.some(frame => frame.identifier === read)) throw new Error('Room GET broadcast a read event before presence subscribed');
   send({ command: 'subscribe', identifier: first });
   await confirm(first);
   await readEvent();
   await until(() => state()[0] === 1, 'first subscription');
+  if (state()[2] !== null) throw new Error('Presence subscription did not clear the unread marker');
   send({ command: 'message', identifier: second, data: JSON.stringify({ action: 'absent' }) });
   send({ command: 'subscribe', identifier: second });
   await confirm(second);
@@ -133,7 +142,7 @@ try {
   await until(() => state()[0] === 0, 'first unsubscribe');
   const ended = state();
   if (ended[1] !== null || ended[2] !== marker) throw new Error(`Unsubscribe changed unread marker or remained connected: ${JSON.stringify(ended)}`);
-  console.log(JSON.stringify({ connections: [1, 2, 2, 1, 0], read_events: 2, refresh_preserved_unread: true, refresh_read_event: false, final_unread: marker }));
+  console.log(JSON.stringify({ connections: [1, 2, 2, 1, 0], read_events: 2, room_get_preserved_unread: true, room_get_read_event: false, presence_cleared_unread: true, refresh_preserved_unread: true, refresh_read_event: false, final_unread: marker }));
 } finally {
   socket.destroy();
 }

@@ -170,8 +170,8 @@ try{
   assert(updates.some(frame=>frame.identifier===unreadIdentifier&&frame.message.roomId===1));
   assert(updates.some(frame=>frame.identifier===identifier&&frame.message.message.body.plain_text==='from other'));
   const readRoom=await fetch(base+'/rooms/1',{headers:{Cookie:cookie}});assert.equal(readRoom.status,200);
-  const readUpdate=await nextFrame();assert.equal(readUpdate.identifier,readIdentifier);assert.equal(readUpdate.message.room_id,1);
   sendCommand({command:'message',identifier:presenceIdentifier,data:JSON.stringify({action:'present'})});
+  const readUpdate=await nextFrame();assert.equal(readUpdate.identifier,readIdentifier);assert.equal(readUpdate.message.room_id,1);
   for(let i=0;i<30&&connections()!==1;i++)await new Promise(r=>setTimeout(r,20));
   assert.equal(connections(),1);
   const membershipDb=path.join(temp,'test.db');

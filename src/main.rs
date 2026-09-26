@@ -4048,15 +4048,6 @@ async fn room_show_with_target(
     let refresh_since = message_timestamp_ns(&room_updated_at)
         .map(|nanos| nanos / 1_000_000)
         .unwrap_or_else(|| Utc::now().timestamp_millis());
-    db.execute(
-        "UPDATE memberships SET unread_at=NULL WHERE room_id=?1 AND user_id=?2",
-        params![rid, u.id],
-    )
-    .map_err(db_err)?;
-    s.read_events.send(Event {
-        room_id: u.id,
-        payload: json!({"room_id":rid}).to_string(),
-    });
     let target = if let Some(mid) = requested_message {
         let exists: bool = db
             .query_row(
