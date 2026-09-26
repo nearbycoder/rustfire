@@ -347,6 +347,8 @@ Rustfire now returns Campfire's editable Turbo frame for plain messages and a vi
 
 The bot list now includes Campfire's room-specific text and file-upload `curl` commands. The paired workflow normalizes only the different listen origin and random bot key, then requires both displayed command values to match. In a browser, both copy buttons wrote exactly the displayed command text and the screen loaded without console errors. The surrounding page layout and all bot-list markup still need a broader visual and structural comparison.
 
+The bot mutation workflow now checks both PATCH and PUT on the same bot-owned message. PUT returned the same normalized JSON as pinned Campfire after updating the body; both apps rejected PUT against another user's message and redirected an invalid bot key the same way. The existing check of 24 writes from eight concurrent clients still passed. This establishes PUT behavior on the sampled bot route, not all bot API payloads or sustained write throughput.
+
 ## Bot JSON read concurrency sweep after token alignment
 
 With 10,000 seeded messages and the latest 40 returned, `bench/paired_bot_messages.py` again confirmed equal parsed JSON after URL-origin normalization. The response sizes were 19,185 bytes for Rustfire and 20,385 for Campfire. Each app ran separately on the same host with Redis available to Campfire and SQLite WAL in Rustfire. One run used one Campfire worker; the other used 22. Two warmup reads preceded each measurement. The following results are separate short local trials, not a sustained capacity limit.

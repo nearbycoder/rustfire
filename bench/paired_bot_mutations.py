@@ -60,6 +60,7 @@ def workflow(port, cookie, csrf, database, campfire):
         ("invalid_key_get", "GET", invalid_base, b""),
         ("invalid_key_post", "POST", invalid_base, b"Hello"),
         ("invalid_key_patch", "PATCH", f"{invalid_base}/1", b"Hello"),
+        ("invalid_key_put", "PUT", f"{invalid_base}/1", b"Hello"),
         ("invalid_key_delete", "DELETE", f"{invalid_base}/1", b""),
         ("invalid_key_boost", "POST", f"{invalid_base}/1/boosts", b"Nice"),
     ):
@@ -100,6 +101,10 @@ def workflow(port, cookie, csrf, database, campfire):
     results["update"] = (status, normalized_json(body))
     status, _, body = request(port, "PATCH", f"{base}/{human_id}", b"Hijacked!")
     results["forbidden_update"] = status
+    status, _, body = request(port, "PUT", f"{base}/{bot_id}", "Deployed with PUT".encode())
+    results["put_update"] = (status, normalized_json(body))
+    status, _, body = request(port, "PUT", f"{base}/{human_id}", b"Hijacked with PUT!")
+    results["forbidden_put_update"] = status
 
     boost_path = f"{base}/{human_id}/boosts"
     status, _, body = request(port, "POST", boost_path, "  Nice 👀  ".encode())

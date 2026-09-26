@@ -10811,7 +10811,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/rooms/{id}/{bot_key}/messages/{mid}",
-            patch(bot_message_update).delete(bot_message_delete),
+            patch(bot_message_update).put(bot_message_update).delete(bot_message_delete),
         )
         .route(
             "/rooms/{id}/{bot_key}/messages/{mid}/boosts",
