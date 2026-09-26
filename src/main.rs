@@ -1041,6 +1041,15 @@ fn encoded_blob_filename(filename: &str) -> String {
         })
         .collect::<String>()
 }
+fn rails_sanitized_filename(filename: &str) -> String {
+    filename
+        .trim_matches(|character: char| matches!(character, '\0' | ' ' | '\t' | '\n' | '\r' | '\u{000B}' | '\u{000C}'))
+        .chars()
+        .map(|character| {
+            if "\u{202E}%$|:;/<>?*\"\t\r\n\\".contains(character) { '-' } else { character }
+        })
+        .collect()
+}
 fn rails_filename_approximation(character: char) -> &'static str {
     match character {
         c if "ÀÁÂÃÄÅĀĂĄ".contains(c) => "A",
@@ -9789,8 +9798,9 @@ async fn signed_blob_get(
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             ).optional().map_err(db_err)?;
-            let (actual_filename, content_type, storage_key, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
+            let (raw_filename, content_type, storage_key, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
             if !uploaded { return Err(StatusCode::NOT_FOUND); }
+            let actual_filename = rails_sanitized_filename(&raw_filename);
             let (served_type, inline) = active_storage_serving(&content_type, query.get("disposition").map(String::as_str));
             let disposition = rails_content_disposition(&actual_filename, inline);
             let token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"content_type":served_type,"disposition":disposition,"service_name":"local"})).map_err(db_err)?;
@@ -9844,11 +9854,11 @@ async fn signed_blob_proxy(
                 )
                 .optional()
                 .map_err(db_err)?;
-            let (filename, content_type, stored, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
+            let (raw_filename, content_type, stored, uploaded) = row.ok_or(StatusCode::NOT_FOUND)?;
             if !uploaded {
                 return Err(StatusCode::NOT_FOUND);
             }
-            (filename, content_type, stored)
+            (rails_sanitized_filename(&raw_filename), content_type, stored)
         }
         Err(error) => return Err(error),
     };
@@ -9918,7 +9928,7 @@ async fn direct_upload_create(
 ) -> AppResult {
     user(&s, &headers)?;
     let blob = payload.get("blob").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let filename = blob.get("filename").and_then(Value::as_str).filter(|name| !name.is_empty() && name.len() <= 255 && !name.contains('/') && !name.contains('\\')).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let filename = blob.get("filename").and_then(Value::as_str).filter(|name| !name.is_empty() && name.len() <= 255).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let byte_size = blob.get("byte_size").and_then(Value::as_i64).filter(|size| (0..=25 * 1024 * 1024).contains(size)).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let checksum = blob.get("checksum").and_then(Value::as_str).filter(|value| STANDARD.decode(value).is_ok_and(|digest| digest.len() == 16)).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let content_type = blob.get("content_type").and_then(Value::as_str).filter(|value| !value.is_empty() && value.len() <= 255).unwrap_or("application/octet-stream");
@@ -9932,7 +9942,7 @@ async fn direct_upload_create(
     let upload_token = disk_token(&s.blob_signing_key, "blob_token", json!({"key":storage_key,"content_type":content_type,"content_length":byte_size,"checksum":checksum,"service_name":"local"})).map_err(db_err)?;
     Ok(Json(json!({
         "id":id,"byte_size":byte_size,"checksum":checksum,"content_type":content_type,
-        "created_at":created_at,"filename":filename,"key":storage_key,"metadata":{},"service_name":"local",
+        "created_at":created_at,"filename":rails_sanitized_filename(filename),"key":storage_key,"metadata":{},"service_name":"local",
         "attachable_sgid":blob_attachable_sgid(&s.mention_signing_key,id).map_err(db_err)?,
         "signed_id":blob_token(&s.blob_signing_key,id).map_err(db_err)?,
         "direct_upload":{"url":public_url(&headers,&format!("/rails/active_storage/disk/{upload_token}")),"headers":{"Content-Type":content_type}}
@@ -9978,8 +9988,9 @@ async fn direct_upload_disk_get(
     let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
     let row: Option<(String,String,bool)> = pool(&s)?.query_row("SELECT filename,content_type,uploaded FROM direct_upload_blobs WHERE storage_key=?1",[storage_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_err)?;
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-    if let Some((actual_filename, content_type, uploaded)) = row {
+    if let Some((raw_filename, content_type, uploaded)) = row {
         if !uploaded { return Err(StatusCode::NOT_FOUND); }
+        let actual_filename = rails_sanitized_filename(&raw_filename);
         let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
         let (served_type, allowed_inline) = active_storage_serving(&content_type, if inline { None } else { Some("attachment") });
         let mut response = serve_attachment(&std::path::Path::new(&dir).join(storage_key),&actual_filename,served_type,&headers,inline && allowed_inline).await?;

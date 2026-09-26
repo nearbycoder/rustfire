@@ -79,13 +79,13 @@ def mime_case(port, cookie, csrf, database, upload_root, campfire, filename, con
                               cookie, csrf, payload, "application/json")
     assert status == 200, (filename, "metadata", status, body[:200])
     metadata = json.loads(body)
+    observations = [("metadata filename", metadata["filename"])]
     upload_path = path_from_url(metadata["direct_upload"]["url"])
     upload_status, _, _ = raw_request(port, "PUT", upload_path, data,
                                       {"Cookie": cookie, "Content-Type": content_type})
     assert upload_status == 204, (filename, "upload", upload_status)
-    signed_name = urllib.parse.quote(filename)
+    signed_name = urllib.parse.quote(metadata["filename"], safe="")
     proxy_path = f"/rails/active_storage/blobs/proxy/{metadata['signed_id']}/{signed_name}"
-    observations = []
     for label, suffix in (("default", ""), ("inline", "?disposition=inline"),
                           ("attachment", "?disposition=attachment")):
         status, headers, body = read_response(port, proxy_path + suffix)
@@ -103,11 +103,12 @@ def mime_case(port, cookie, csrf, database, upload_root, campfire, filename, con
         "content-type", "content-disposition", "x-content-type-options", "content-security-policy"))))
     with sqlite3.connect(database) as db:
         if campfire:
-            stored = db.execute("SELECT key FROM active_storage_blobs WHERE id=?", [metadata["id"]]).fetchone()[0]
+            stored, stored_filename = db.execute("SELECT key,filename FROM active_storage_blobs WHERE id=?", [metadata["id"]]).fetchone()
             path = upload_root / stored[:2] / stored[2:4] / stored
         else:
-            stored = db.execute("SELECT storage_key FROM direct_upload_blobs WHERE id=?", [metadata["id"]]).fetchone()[0]
+            stored, stored_filename = db.execute("SELECT storage_key,filename FROM direct_upload_blobs WHERE id=?", [metadata["id"]]).fetchone()
             path = upload_root / stored
+    observations.append(("stored filename", stored_filename))
     assert path.read_bytes() == data, (filename, path)
     return path, observations
 
@@ -199,6 +200,9 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
         ("café résumé.txt", "text/plain", "a Unicode filename\n".encode()),
         ("автомобиль.txt", "text/plain", b"a non-Latin filename\n"),
         ("argh+!#&^`~.txt", "text/plain", b"punctuation in filename\n"),
+        ("  report:Q%$|?*.txt  ", "text/plain", b"an unsafe filename\n"),
+        ("dir\\report/2026.txt", "text/plain", b"separators in filename\n"),
+        ("bidirectional\u202eview.txt", "text/plain", b"direction override in filename\n"),
     ):
         extra_path, observations = mime_case(port, cookie, csrf, database, upload_root, campfire,
                                               filename, content_type, data)
@@ -265,7 +269,11 @@ def main():
                     except OSError:
                         pass
         assert rust_files[0].read_bytes() == DATA
-        assert rust_proxy == camp_proxy, (rust_proxy, camp_proxy)
+        assert rust_proxy[:-1] == camp_proxy[:-1], (rust_proxy[:-1], camp_proxy[:-1])
+        for (rust_name, rust_observations), (camp_name, camp_observations) in zip(rust_proxy[-1], camp_proxy[-1], strict=True):
+            assert rust_name == camp_name
+            for rust_observation, camp_observation in zip(rust_observations, camp_observations, strict=True):
+                assert rust_observation == camp_observation, (rust_name, rust_observation, camp_observation)
         print("PASS matched direct-upload metadata, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
 
 
