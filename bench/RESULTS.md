@@ -975,3 +975,14 @@ Rustfire served **2.12–2.13×** as many checked reads per second and had lower
 ## Browser lightbox interactions
 
 `python bench/paired_lightbox_browser.py` passed against pinned Campfire in local Chromium. The paired fixture posted the same JPEG to both apps. Opening the room invite QR, uploaded image, and profile QR used the existing dialog in both apps; the image source, download link, and share file URL matched each clicked link. Closing each dialog reset those values, and no separate ad hoc dialog was created. This checks three browser interactions only; it does not measure speed or establish broader media parity.
+
+## Thirty-second mixed workload with four socket identities per room
+
+The release build passed `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 3 --sockets-per-room 100 --socket-users-per-room 4 --browser-channels --campfire-workers 22 --resources` in both server orders. Each room had 25 sockets for each of four authenticated users, with all eight source-shaped browser channels subscribed. Each app saved 90 plain-text writes per room, delivered **36,000/36,000** message appends and **36,000/36,000** unread events, and delivered **5,200/5,200** presence read events during socket setup. All 1,440 captured append samples matched in parsed tag order, attribute names, stable values, and text after the documented timestamp, origin, message-ID, and CSRF normalizations. Every measured HTML read passed its status, media-type, and 40-message checks; initial and final pages and saved writes were checked separately. Neither run had checked errors or early socket closes.
+
+| Rustfire first | Rustfire reads/s / p95 | Rustfire write p95 | Rustfire peak PSS MiB | Campfire reads/s / p95 | Campfire write p95 | Campfire peak PSS MiB |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 3,149 / 29.21 ms | 32.82 ms | 101.93 | 1,502 / 81.25 ms | 110.68 ms | 4,131.43 |
+| Yes | 3,173 / 29.06 ms | 32.31 ms | 100.60 | 1,476 / 80.42 ms | 118.99 ms | 3,967.72 |
+
+Rustfire served **2.10–2.15×** as many checked reads per second at the same socket count, with lower read and write p95 in both orders. Both apps ran serially on one 32-logical-CPU host with disposable SQLite; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Socket setup preceded the measured 30 seconds. This run improves identity coverage over the one-account-per-room trial, but it does not establish maximum concurrent users, connection rate, hours of steady load, rich content or upload throughput, push delivery, or full application parity.
