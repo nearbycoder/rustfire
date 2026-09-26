@@ -1188,3 +1188,7 @@ The same paired Chromium probe now installs a mock existing subscription before 
 ## Test-push payload
 
 `python bench/paired_push_test_payload.py` passed against pinned Campfire `91d294f`. The source's `WebPush::Notification` encoder produced a fixed JSON payload, which Rustfire's production test-push payload helper matched as parsed JSON: title, body, icon, unread badge count, and the absolute click URL. Rustfire previously used a relative click path in test notifications. This check isolates payload construction; it does not test encryption, an outbound HTTP request, expiration handling, or a real browser notification.
+
+## Device-transfer route methods
+
+`python bench/paired_profile.py --requests 32` passed against pinned Campfire `91d294f` after extending the transfer probe. With each app's signed link opened in a fresh client, both accepted the source-shaped POST form with a PUT override, direct PATCH, and direct PUT; each redirected to the root and established a session that could open `/rooms/1`. The direct requests used the page's global CSRF token because Campfire's hidden form token is scoped to the form method. Rustfire previously returned 405 to direct PATCH. The profile, avatar, and mutation checks in the same run also passed. The 32-request read timings are a short regression sample with different HTML body sizes, not a feature-equivalent capacity claim.

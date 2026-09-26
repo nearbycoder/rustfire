@@ -11001,6 +11001,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/session/transfers/{token}",
             get(transfer_show)
                 .post(transfer_update)
+                .patch(transfer_update)
                 .put(transfer_update),
         )
         .route("/cable", get(ws_upgrade))

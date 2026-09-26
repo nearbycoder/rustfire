@@ -158,7 +158,7 @@ def delete_avatar(port, cookie, csrf, database, campfire):
     assert count == 0, count
 
 
-def use_transfer(port, path):
+def use_transfer(port, path, method="POST"):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, request, response, code, message, headers, destination):
             return None
@@ -171,9 +171,21 @@ def use_transfer(port, path):
     assert "auto-submit" in page and ('name="_method"' in page or "name='_method'" in page)
     token = re.search(r'name=["\']authenticity_token["\'] value=["\']([^"\']+)', page)
     assert token, "Device-transfer form has no CSRF token"
-    body = urllib.parse.urlencode({"_method": "put", "authenticity_token": html.unescape(token.group(1))}).encode()
+    csrf = html.unescape(token.group(1))
+    if method != "POST":
+        meta = re.search(r'<meta name=["\']csrf-token["\'] content=["\']([^"\']+)', page)
+        assert meta, "Device-transfer page has no global CSRF token"
+        csrf = html.unescape(meta.group(1))
+    fields = {"authenticity_token": csrf}
+    if method == "POST":
+        fields["_method"] = "put"
+    body = urllib.parse.urlencode(fields).encode()
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if method != "POST":
+        headers["X-CSRF-Token"] = csrf
     try:
-        opener.open(base + path, data=body)
+        opener.open(urllib.request.Request(base + path, data=body, method=method,
+            headers=headers))
         raise AssertionError("Device transfer did not redirect")
     except urllib.error.HTTPError as response:
         assert response.code == 302 and urllib.parse.urlsplit(response.headers["Location"]).path == "/", (response.code, response.headers["Location"])
@@ -311,7 +323,11 @@ def main():
                 assert db.execute("SELECT COUNT(*) FROM session_transfers").fetchone()[0] == transfers_before
             use_transfer(rust_port, transfer_path(camp_page))
             use_transfer(camp_port, transfer_path(rust_page))
-            print("manifest shape, profile fields, stateless reads, and two-way transfer: passed")
+            use_transfer(rust_port, transfer_path(camp_page), method="PATCH")
+            use_transfer(camp_port, transfer_path(rust_page), method="PATCH")
+            use_transfer(rust_port, transfer_path(camp_page), method="PUT")
+            use_transfer(camp_port, transfer_path(rust_page), method="PUT")
+            print("manifest shape, profile fields, stateless reads, and two-way transfer by form POST, PATCH, and PUT: passed")
             print("GET /users/me/profile; 4 Puma workers; release Rustfire; requests per run:", args.requests)
             for concurrency in (1, 8, 32):
                 source = measure(camp_port, camp_cookie, concurrency, args.requests)
