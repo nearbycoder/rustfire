@@ -15,6 +15,12 @@ from paired_link_preview import Presentation
 
 CASES = [
     ("unattached-image", "<div>Hello <img src='https://evil.example/image.svg'>World</div>"),
+    ("table", "<div>Before<table><tr><td>Cell</td></tr></table>After</div>"),
+    ("section", "<div>Before<section><strong>Hidden</strong></section>After</div>"),
+    ("address", "<div>Before<address>Location</address>After</div>"),
+    ("big", "<div>Before<big>Large</big>After</div>"),
+    ("class", "<div><p class='para'>P</p><a class='link' href='/x'>X</a><code class='code'>C</code><strong class='bold'>B</strong></div>"),
+    ("time", "<div><time datetime='2024-01-01' title='when'>Now</time></div>"),
     ("event-handler", "<div><a href='/x' onmouseover='alert(1)'>x</a> <span onclick='alert(2)'>y</span></div>"),
     ("data-link", "<div><a href='data:text/html,pwned'>x</a></div>"),
     ("formatting", "<div><a href='https://example.com'>example</a> <strong>bold</strong> <code>code</code><ul><li>one</li><li>two</li></ul></div>"),
@@ -80,9 +86,13 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    for case, rust_result, camp_result in zip(CASES, rust_results, camp_results):
-        assert rust_result == camp_result, (case[0], rust_result, camp_result)
-    print("PASS paired rich-text image removal, unsafe attributes, data links, and formatting")
+    mismatches = [
+        (case[0], rust_result, camp_result)
+        for case, rust_result, camp_result in zip(CASES, rust_results, camp_results)
+        if rust_result != camp_result
+    ]
+    assert not mismatches, mismatches
+    print("PASS paired rich-text tag removal, unsafe attributes, data links, and formatting")
 
 
 if __name__ == "__main__":

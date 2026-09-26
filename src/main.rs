@@ -557,21 +557,49 @@ fn replace_mention_attachments(
     rendered.push_str(&input[consumed..]);
     Ok(rendered)
 }
-fn strip_unattached_images(input: &str) -> Option<String> {
-    if !input.as_bytes().windows(4).any(|bytes| bytes.eq_ignore_ascii_case(b"<img")) {
+fn campfire_rich_tag_allowed(tag: &str) -> bool {
+    matches!(tag,
+        "a" | "abbr" | "acronym" | "address" | "b" | "big" | "blockquote" | "br" |
+        "cite" | "code" | "dd" | "del" | "dfn" | "div" | "dl" | "dt" | "em" |
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "hr" | "i" | "ins" |
+        "kbd" | "li" | "ol" | "p" | "pre" | "samp" | "small" | "span" |
+        "strong" | "sub" | "sup" | "time" | "tt" | "ul" | "var" |
+        "action-text-attachment" | "figure" | "figcaption"
+    )
+}
+fn has_disallowed_rich_tag(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut offset = 0;
+    while let Some(found) = bytes[offset..].iter().position(|byte| *byte == b'<') {
+        let mut start = offset + found + 1;
+        if bytes.get(start) == Some(&b'/') {
+            start += 1;
+        }
+        let end = start + bytes[start..].iter().take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'-').count();
+        if end > start && !campfire_rich_tag_allowed(&input[start..end].to_ascii_lowercase()) {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+fn strip_disallowed_rich_tags(input: &str) -> Option<String> {
+    if !has_disallowed_rich_tag(input) {
         return None;
     }
     let mut document = ParsedHtml::parse_fragment(input);
-    let selector = Selector::parse("img").unwrap();
+    let selector = Selector::parse("*").unwrap();
+    let root = document.root_element().id();
     let untrusted = document
         .select(&selector)
-        .filter(|image| !image.ancestors().any(|ancestor| {
+        .filter(|node| node.id() != root && !campfire_rich_tag_allowed(node.value().name()))
+        .filter(|node| node.value().name() != "img" || !node.ancestors().any(|ancestor| {
             ancestor.value().as_element().is_some_and(|element| {
                 element.name() == "action-text-attachment"
                     || (element.name() == "figure" && element.attr("data-trix-attachment").is_some())
             })
         }))
-        .map(|image| image.id())
+        .map(|node| node.id())
         .collect::<Vec<_>>();
     if untrusted.is_empty() {
         return None;
@@ -583,7 +611,7 @@ fn strip_unattached_images(input: &str) -> Option<String> {
 }
 #[cfg(test)]
 fn rich_body(input: &str, request_host: Option<&str>) -> (String, String) {
-    let cleaned = strip_unattached_images(input);
+    let cleaned = strip_disallowed_rich_tags(input);
     let input = cleaned.as_deref().unwrap_or(input);
     rich_body_trusted(input, request_host)
 }
@@ -591,12 +619,10 @@ fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String
     let display_input = replace_preview_attachments(input, request_host, true);
     let html = ammonia::Builder::default()
         .link_rel(None)
-        .add_tags(&["action-text-attachment", "figure", "figcaption"])
+        .add_tags(&["action-text-attachment", "figure", "figcaption", "address", "big"])
         .add_tag_attributes("action-text-attachment", &["sgid", "content-type", "filename", "filesize", "caption", "width", "height", "previewable"])
-        .add_tag_attributes("span", &["class"])
-        .add_tag_attributes("div", &["class"])
-        .add_tag_attributes("figure", &["class"])
-        .add_tag_attributes("img", &["class"])
+        .add_tag_attributes("time", &["datetime"])
+        .add_generic_attributes(&["class"])
         .clean(&display_input)
         .to_string();
     let plain_input =
@@ -4685,7 +4711,7 @@ fn insert_message(
     };
     let db = pool(s)?;
     let (plain, body_html) = if rich && !body.trim().is_empty() {
-        let cleaned = strip_unattached_images(body);
+        let cleaned = strip_disallowed_rich_tags(body);
         let trusted = replace_mention_attachments(
             cleaned.as_deref().unwrap_or(body),
             &db,
@@ -5402,7 +5428,7 @@ async fn message_update(
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let (plain, body_html, body_source, used_inline) = if rich {
         let normalized = action_text_webhook_html(body);
-        let cleaned = strip_unattached_images(&normalized);
+        let cleaned = strip_disallowed_rich_tags(&normalized);
         let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
         let (inline, used) = render_imported_inline_files(
             cleaned.as_deref().unwrap_or(&normalized),
@@ -9934,7 +9960,7 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source, missing_search) in &batch {
-            let cleaned = strip_unattached_images(source);
+            let cleaned = strip_disallowed_rich_tags(source);
             let (inline, _) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key)
@@ -10398,10 +10424,13 @@ mod tests {
         }
     }
     #[test]
-    fn rich_text_removes_unattached_images() {
+    fn rich_text_removes_disallowed_tags() {
         let (plain, html) = super::rich_body("<div>Hello <img src='https://evil.example/image.svg'>World</div>", None);
         assert_eq!(plain, "Hello World");
         assert!(!html.contains("<img") && !html.contains("evil.example"), "{html}");
+        let (plain, html) = super::rich_body("<div>Before<table><tr><td>Cell</td></tr></table>After</div>", None);
+        assert_eq!(plain, "BeforeAfter");
+        assert!(!html.contains("table") && !html.contains("Cell"), "{html}");
         let (_, preview) = super::rich_body("<div><action-text-attachment content-type='application/vnd.actiontext.opengraph-embed' href='https://example.com' url='https://example.com/image.png' filename='Example' caption='Description'></action-text-attachment></div>", None);
         assert!(preview.contains("<img"), "{preview}");
     }
