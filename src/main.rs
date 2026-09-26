@@ -2168,7 +2168,9 @@ async fn fetch_public_url(input: &str, head: bool) -> Option<reqwest::Response> 
         };
         if response.status().is_redirection() {
             let location = response.headers().get(header::LOCATION)?.to_str().ok()?;
-            url = public_web_url(url.join(location).ok()?.as_str())?;
+            // Campfire's Opengraph::Fetch accepts only an absolute HTTP(S)
+            // Location and resolves its host again before the next request.
+            url = public_web_url(location)?;
             continue;
         }
         return Some(response);
@@ -2204,51 +2206,15 @@ fn og_attributes(document: &str) -> HashMap<String, String> {
     }
     attributes
 }
-fn media_link(url: &reqwest::Url) -> bool {
-    let path = url.path().to_ascii_lowercase();
-    let ext = path.rsplit('.').next().unwrap_or("");
-    matches!(
-        ext,
-        "zip"
-            | "tar"
-            | "gz"
-            | "bz2"
-            | "xz"
-            | "rar"
-            | "7z"
-            | "dmg"
-            | "exe"
-            | "msi"
-            | "pkg"
-            | "deb"
-            | "iso"
-            | "jpg"
-            | "jpeg"
-            | "png"
-            | "gif"
-            | "bmp"
-            | "mp4"
-            | "mov"
-            | "avi"
-            | "mkv"
-            | "wmv"
-            | "flv"
-            | "heic"
-            | "heif"
-            | "mp3"
-            | "wav"
-            | "ogg"
-            | "aac"
-            | "wma"
-            | "webm"
-            | "ogv"
-            | "mpg"
-            | "mpeg"
-    )
+fn media_link(input: &str) -> bool {
+    // Opengraph::Location checks the original URL string, including queries,
+    // with a case-sensitive pattern rather than only the parsed path suffix.
+    static MEDIA_URL: OnceLock<Regex> = OnceLock::new();
+    MEDIA_URL.get_or_init(|| Regex::new(r"\bhttps?://\S+\.(?:zip|tar|tar\.gz|tar\.bz2|tar\.xz|gz|bz2|rar|7z|dmg|exe|msi|pkg|deb|iso|jpg|jpeg|png|gif|bmp|mp4|mov|avi|mkv|wmv|flv|heic|heif|mp3|wav|ogg|aac|wma|webm|ogv|mpg|mpeg)\b").expect("Campfire media URL pattern")).is_match(input)
 }
 async fn unfurl_url(input: &str) -> Option<Value> {
     let mut url = public_web_url(input)?;
-    if media_link(&url) {
+    if media_link(input) {
         return None;
     }
     if matches!(
@@ -11447,6 +11413,27 @@ mod tests {
             "2606:4700:4700::1111", "2001:3::1", "2001:4:112::1",
         ] {
             assert!(super::public_network_ip(address.parse().unwrap()), "{address}");
+        }
+    }
+    #[test]
+    fn link_preview_media_filter_matches_campfire_url_pattern() {
+        for url in [
+            "https://example.com/100gb.zip",
+            "http://example.com/video.mp4",
+            "https://example.com/archive.tar.gz",
+            "https://example.com/image.jpg?page=1",
+            "https://example.com/image.jpg/next",
+            "https://example.com/page?file=image.png",
+        ] {
+            assert!(super::media_link(url), "{url}");
+        }
+        for url in [
+            "https://example.com/page",
+            "https://example.com/image.JPG",
+            "https://example.com/photo.jpeg_extra",
+            "HTTPS://example.com/video.mp4",
+        ] {
+            assert!(!super::media_link(url), "{url}");
         }
     }
     #[test]
