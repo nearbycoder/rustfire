@@ -166,6 +166,9 @@ def import_data(source, target, source_files, uploads):
         if missing_search:
             target.execute("INSERT INTO import_missing_search(message_id) VALUES(?)", (mid,))
         counts["messages"] += 1
+    source_sequence = source.execute("SELECT seq FROM sqlite_sequence WHERE name='messages'").fetchone()
+    if source_sequence:
+        target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name='messages'", (source_sequence[0],))
     counts["reindexed_messages"] = target.execute("SELECT count(*) FROM import_missing_search").fetchone()[0]
     counts["boosts"] = copy_table(source, target, "boosts", tables["boosts"])
     counts["searches"] = 0

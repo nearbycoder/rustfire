@@ -876,3 +876,14 @@ The current release build and pinned Campfire passed `python bench/paired_messag
 | Yes | 3,258 / 13.96 ms | 20.10 ms | 65.26 | 1,486 / 45.85 ms | 153.14 ms | 3,977.03 |
 
 Rustfire had about **2.18×** the checked read throughput and lower read and write p95 in both orders on this sampled workload. The apps ran serially on one 32-logical-CPU host with disposable SQLite; Campfire used 22 Puma workers and isolated Redis, and Rustfire used one process. Peak PSS includes those server processes and Redis, excluding load clients. Socket setup, including the read-event burst, preceded the timed HTTP interval; the capture's elapsed time is not a delivery-latency measurement. This ten-second, plain-text trial uses one socket identity per room, omits the browser's heartbeat-triggered refresh request, and does not establish full app parity, a sustained capacity ceiling, or an advantage for rich text, uploads, push delivery, and other untested work.
+
+## Mixed read/write rerun after message ID sequencing
+
+After Rustfire switched to a single-statement, monotonic message ID allocator, `python bench/paired_message_mix.py --clients 32 --seconds 5 --write-rate 5 --campfire-workers 22` passed in both server orders (`--rustfire-first` for the reverse). Each disposable app began with 40 matched messages, served 32 checked full-HTML readers, and completed 25 scheduled browser-style Turbo posts. Initial parsed markup, final message IDs and saved bodies, every read's status/type/message count, and every write's status/type/target passed. There were no checked errors. Both apps and the Go reader shared the same 32-logical-CPU host; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process.
+
+| Rustfire first | Campfire reads/s / p95 | Rustfire reads/s / p95 | Campfire write p95 | Rustfire write p95 |
+| :---: | ---: | ---: | ---: | ---: |
+| No | 1,494 / 48.78 ms | 3,380 / 14.40 ms | 96.03 ms | 7.74 ms |
+| Yes | 1,381 / 49.21 ms | 3,495 / 13.81 ms | 98.89 ms | 7.32 ms |
+
+Rustfire served about **2.26–2.53×** as many checked reads per second in these two short runs, with lower read and write p95. The single writer ran at five scheduled posts per second; the trial does not measure peak write throughput, multiple simultaneous writers, sockets, resource use, sustained capacity, or full feature parity.

@@ -1731,6 +1731,13 @@ fn bot_user(state: &AppState, key: &str) -> Result<User, StatusCode> {
     let db = pool(state)?;
     db.query_row("SELECT id,name,COALESCE(email_address,''),role,bot_token,updated_at FROM users WHERE id=?1 AND bot_token=?2 AND role=2 AND status=0", params![id,token], |r| Ok(User{id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,updated_at:r.get(5)?,csrf_token:None})).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
 }
+fn bot_api_actor(state: &AppState, headers: &HeaderMap, key: &str) -> Result<User, StatusCode> {
+    match user(state, headers) {
+        Ok(actor) => Ok(actor),
+        Err(StatusCode::UNAUTHORIZED) => bot_user(state, key),
+        Err(error) => Err(error),
+    }
+}
 fn is_admin(u: &User) -> bool {
     u.role == 1
 }
@@ -4930,7 +4937,7 @@ fn insert_message(
         .timestamp_nanos_opt()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    db.execute("INSERT INTO messages(room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich && !body.trim().is_empty() {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
+    db.execute("INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich && !body.trim().is_empty() {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     touch_room(&db, rid)?;
     let mut valid_mentions = Vec::new();
@@ -8751,7 +8758,7 @@ async fn bot_messages_get(
     Path((rid, key)): Path<(i64, String)>,
     Query(q): Query<Paging>,
 ) -> AppResult {
-    let u = bot_user(&s, &key)?;
+    let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
     if let Some(cursor) = q.after.or(q.before) {
         let found: bool = pool(&s)?
@@ -8820,7 +8827,7 @@ async fn bot_messages_post(
     headers: HeaderMap,
     req: Request,
 ) -> AppResult {
-    let u = bot_user(&s, &key)?;
+    let u = bot_api_actor(&s, &headers, &key)?;
     let (body, attachment) = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -8894,7 +8901,7 @@ async fn bot_message_update(
     Path((rid, key, mid)): Path<(i64, String, i64)>,
     body: String,
 ) -> AppResult {
-    let u = bot_user(&s, &key)?;
+    let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
     let creator: Option<i64> = db
@@ -8906,14 +8913,14 @@ async fn bot_message_update(
         .optional()
         .map_err(db_err)?;
     let creator = creator.ok_or(StatusCode::NOT_FOUND)?;
-    if creator != u.id {
+    if creator != u.id && !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
     let updated_at = now();
     let updated_at_ns =
         message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
-    let found=db.execute("UPDATE messages SET body=?1,body_html=NULL,body_source=NULL,updated_at=?2,updated_at_ns=?3 WHERE id=?4 AND room_id=?5 AND creator_id=?6",params![body,updated_at,updated_at_ns,mid,rid,u.id]).map_err(db_err)?;
+    let found=db.execute("UPDATE messages SET body=?1,body_html=NULL,body_source=NULL,updated_at=?2,updated_at_ns=?3 WHERE id=?4 AND room_id=?5",params![body,updated_at,updated_at_ns,mid,rid]).map_err(db_err)?;
     if found == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -8933,21 +8940,22 @@ async fn bot_message_update(
 }
 async fn bot_message_delete(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path((rid, key, mid)): Path<(i64, String, i64)>,
 ) -> AppResult {
-    let u = bot_user(&s, &key)?;
+    let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
     let target: Option<(i64, Option<String>, String)> = db.query_row("SELECT m.creator_id,a.stored_name,m.client_message_id FROM messages m LEFT JOIN attachments a ON a.message_id=m.id WHERE m.id=?1 AND m.room_id=?2", params![mid,rid], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(db_err)?;
     let (creator, attachment, client_message_id) = target.ok_or(StatusCode::NOT_FOUND)?;
-    if creator != u.id {
+    if creator != u.id && !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
     let inline_blobs = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let found = db
         .execute(
-            "DELETE FROM messages WHERE id=?1 AND room_id=?2 AND creator_id=?3",
-            params![mid, rid, u.id],
+            "DELETE FROM messages WHERE id=?1 AND room_id=?2",
+            params![mid, rid],
         )
         .map_err(db_err)?;
     if found == 0 {
@@ -9635,7 +9643,7 @@ async fn bot_boost_create(
     Path((rid, key, mid)): Path<(i64, String, i64)>,
     body: Bytes,
 ) -> AppResult {
-    let bot = bot_user(&s, &key)?;
+    let bot = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, bot.id, rid)?;
     let content = std::str::from_utf8(&body)
         .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
@@ -9683,9 +9691,10 @@ async fn bot_boost_create(
 }
 async fn bot_boost_delete(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path((rid, key, mid, bid)): Path<(i64, String, i64, i64)>,
 ) -> AppResult {
-    let bot = bot_user(&s, &key)?;
+    let bot = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, bot.id, rid)?;
     let content: Option<String> = pool(&s)?
         .query_row(
@@ -9975,6 +9984,9 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
             UPDATE direct_room_sets SET member_ids=COALESCE((SELECT group_concat(user_id,',') FROM (SELECT user_id FROM memberships WHERE room_id=old.room_id ORDER BY user_id)),'') WHERE room_id=old.room_id;
         END;
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
+        CREATE TABLE IF NOT EXISTS id_sequences(name TEXT PRIMARY KEY,last_id INTEGER NOT NULL);
+        INSERT INTO id_sequences(name,last_id) VALUES('messages',COALESCE((SELECT MAX(id) FROM messages),0)) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS message_id_track AFTER INSERT ON messages BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='messages'; END;
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);

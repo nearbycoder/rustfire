@@ -1,5 +1,6 @@
 """Compare Campfire and Rustfire bot message and boost write APIs."""
 
+import concurrent.futures
 import http.client
 import json
 import pathlib
@@ -50,7 +51,7 @@ def normalized_json(data):
     return normalize(value)
 
 
-def workflow(port, cookie, csrf, database):
+def workflow(port, cookie, csrf, database, campfire):
     base = f"/rooms/1/{BOT_ID}-{BOT_TOKEN}/messages"
     results = {}
 
@@ -106,6 +107,48 @@ def workflow(port, cookie, csrf, database):
     results["after_delete"] = bot_index(port, 1)
     with sqlite3.connect(database) as db:
         results["saved_rows"] = (db.execute("SELECT count(*) FROM messages").fetchone()[0], db.execute("SELECT count(*) FROM boosts").fetchone()[0])
+
+    invalid_base = "/rooms/1/invalid-bot-key/messages"
+    status, _, body = request(port, "GET", invalid_base, cookie=cookie, csrf=csrf)
+    results["session_index"] = (status, normalized_json(body) if status == 200 else None)
+    status, _, body = request(port, "POST", base, b"Bot-owned for administrator")
+    assert status == 201, (status, body[:300])
+    with sqlite3.connect(database) as db:
+        bot_owned = db.execute("SELECT id FROM messages WHERE creator_id=52 ORDER BY id DESC LIMIT 1").fetchone()[0]
+    status, _, body = request(port, "PATCH", f"{invalid_base}/{bot_owned}", b"Administrator edited bot message", cookie=cookie, csrf=csrf)
+    results["session_edit_other_creator"] = (status, normalized_json(body) if status == 200 else None)
+    status, location, body = request(port, "POST", invalid_base, b"Administrator via bot route", cookie=cookie, csrf=csrf)
+    results["session_create"] = (status, urllib.parse.urlsplit(location or "").path)
+    with sqlite3.connect(database) as db:
+        session_created = db.execute("SELECT id FROM messages WHERE creator_id=1 ORDER BY id DESC LIMIT 1").fetchone()[0]
+    if session_created != human_id:
+        status, _, body = request(port, "DELETE", f"{invalid_base}/{session_created}", cookie=cookie, csrf=csrf)
+        results["session_delete_own"] = status
+    else:
+        results["session_delete_own"] = None
+    status, _, body = request(port, "DELETE", f"{invalid_base}/{bot_owned}", cookie=cookie, csrf=csrf)
+    results["session_delete_other_creator"] = status
+
+    with sqlite3.connect(database) as db:
+        previous_id = db.execute("SELECT seq FROM sqlite_sequence WHERE name='messages'" if campfire else "SELECT last_id FROM id_sequences WHERE name='messages'").fetchone()[0]
+    def parallel_post(number):
+        status, _, body = request(port, "POST", base, f"Parallel {number}".encode())
+        assert status == 201, (number, status, body[:300])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(parallel_post, range(24)))
+    with sqlite3.connect(database) as db:
+        parallel = db.execute("SELECT m.id,idx.body FROM messages m JOIN message_search_index idx ON idx.rowid=m.id WHERE idx.body LIKE 'Parallel %' ORDER BY m.id" if campfire else "SELECT id,body FROM messages WHERE body LIKE 'Parallel %' ORDER BY id").fetchall()
+    ids = [row[0] for row in parallel]
+    assert ids == list(range(previous_id + 1, previous_id + 25)), (previous_id, ids)
+    assert sorted(row[1] for row in parallel) == sorted(f"Parallel {number}" for number in range(24))
+    status, _, body = request(port, "DELETE", f"{base}/{ids[-1]}")
+    assert status == 204, (status, body[:300])
+    status, location, body = request(port, "POST", base, b"After parallel delete")
+    assert status == 201, (status, body[:300])
+    with sqlite3.connect(database) as db:
+        next_id = db.execute("SELECT m.id FROM messages m JOIN message_search_index idx ON idx.rowid=m.id WHERE idx.body='After parallel delete'" if campfire else "SELECT id FROM messages WHERE body='After parallel delete'").fetchone()[0]
+    results["parallel_ids"] = (len(parallel), ids[0], ids[-1], next_id)
+    assert next_id == ids[-1] + 1, results["parallel_ids"]
     return results
 
 
@@ -128,7 +171,7 @@ def main():
         try:
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "1"})
             try:
-                rust_results = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db)
+                rust_results = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False)
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -136,7 +179,7 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
-                    camp_results = workflow(camp_port, cookie, csrf, camp_db)
+                    camp_results = workflow(camp_port, cookie, csrf, camp_db, True)
                 finally:
                     stop_server(camp)
         finally:
@@ -145,7 +188,7 @@ def main():
             redis_log.close()
     differences = {key: (rust_results[key], camp_results[key]) for key in rust_results if rust_results[key] != camp_results[key]}
     assert not differences, differences
-    print("PASS paired bot message and boost create, update, authorization, and delete match pinned Campfire")
+    print("PASS paired bot message and boost mutations, session access, and 24 concurrent message IDs match pinned Campfire")
 
 
 if __name__ == "__main__":

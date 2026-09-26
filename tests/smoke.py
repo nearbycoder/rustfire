@@ -684,7 +684,8 @@ def main():
             prior_webhooks = len(webhook_requests)
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]":mention_html(3),"message[format]":"html"}, headers={"Accept":"application/json"})
             assert code == 201
-            assert "/users/3/avatar" in payload
+            bot_avatar_path = urllib.parse.urlsplit(bot_suggestion["avatar_url"]).path
+            assert bot_avatar_path in json.loads(payload)["body"]["html"]
             structured_id = json.loads(payload)["id"]
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT user_id FROM message_mentions WHERE message_id=?",(structured_id,)).fetchone() == (3,)
             for _ in range(100):
@@ -716,7 +717,7 @@ def main():
             forged_sgid = ("A" if bot_suggestion["sgid"][0] != "A" else "B") + bot_suggestion["sgid"][1:]
             forged_body = mention_html(3).replace(bot_suggestion["sgid"], forged_sgid)
             code, _, forged_payload = request(admin, base, "/rooms/1/messages", {"message[body]":forged_body,"message[format]":"html"}, headers={"Accept":"application/json"})
-            assert code == 201 and "☒" in forged_payload and "/users/3/avatar" not in forged_payload
+            assert code == 201 and "☒" in forged_payload and bot_avatar_path not in json.loads(forged_payload)["body"]["html"]
             forged_message_id = json.loads(forged_payload)["id"]
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM message_mentions WHERE message_id=?",(forged_message_id,)).fetchone() == (0,)
             time.sleep(.2)
@@ -813,14 +814,14 @@ def main():
             assert code == 200
             rotated = bot_key_from_page(page)
             assert rotated != key
-            code, _, _ = request(client(), base, f"/rooms/1/{key}/messages")
-            assert code == 401
+            code, url, _ = request(client(), base, f"/rooms/1/{key}/messages")
+            assert code == 200 and url.endswith("/session/new")
             code, _, payload = request(client(), base, f"/rooms/1/{rotated}/messages", data=b"new key works", method="POST")
             assert code == 201 and payload == ""
             code, _, _ = request(admin, base, "/account/bots/3/delete", {})
             assert code == 200
-            code, _, _ = request(client(), base, f"/rooms/1/{rotated}/messages")
-            assert code == 401
+            code, url, _ = request(client(), base, f"/rooms/1/{rotated}/messages")
+            assert code == 200 and url.endswith("/session/new")
             rich = "<div><strong>formatted</strong> text <a href='javascript:alert(1)'>unsafe link</a><script>alert(1)</script></div>"
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": rich}, headers={"Accept": "application/json"})
             assert code == 201

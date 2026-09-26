@@ -66,6 +66,7 @@ def main():
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
             for mid in range(1, 11):
                 fixture.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (mid, f"imported-{mid}", "2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"))
+            fixture.execute("UPDATE sqlite_sequence SET seq=20 WHERE name='messages'")
             source_body = "<div>Hello</div><ul><li>One</li><li>Two</li></ul>"
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(1,'Message',1,'body',?,?,?)", (source_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
             fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(1,?)", ("Hello\n• One\n• Two",))
@@ -218,6 +219,7 @@ def main():
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
             assert imported.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert imported.execute("SELECT last_id FROM id_sequences WHERE name='messages'").fetchone() == (20,)
             assert imported.execute("SELECT count(*) FROM sqlite_master WHERE name='import_missing_search'").fetchone() == (0,)
             assert imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=1").fetchone() == (
                 "Hello\n• One\n• Two", source_body, source_body,
@@ -226,7 +228,9 @@ def main():
             assert imported.execute("SELECT body FROM messages WHERE id=2").fetchone() == ("",)
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=2").fetchone() == ("imported.txt",)
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
-            assert "@Rustfire Compare" in imported.execute("SELECT body_html FROM messages WHERE id=3").fetchone()[0]
+            mention_plain, mention_html = imported.execute("SELECT body,body_html FROM messages WHERE id=3").fetchone()
+            assert mention_plain == "@Rustfire Compare hello"
+            assert 'class="mention"' in mention_html and "Rustfire Compare</div>" in mention_html
             inline_html = imported.execute("SELECT body_html FROM messages WHERE id=4").fetchone()[0]
             assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html and "1.21 KB" in inline_html, inline_html
             inline_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=10").fetchone()[0]
