@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -42,9 +43,12 @@ func main() {
 	expectedStatus := flag.Int("expected-status", http.StatusOK, "expected HTTP status")
 	expectedETag := flag.String("expected-etag", "", "expected ETag response header")
 	expectedModified := flag.String("expected-last-modified", "", "expected Last-Modified response header")
+	expectedContentType := flag.String("expected-content-type", "", "expected response Content-Type media type")
 	expectedMessages := flag.Int("expected-message-count", 0, "expected number of rendered message IDs")
 	expectedCSRF := flag.Int("expected-csrf-count", 0, "expected number of hidden authenticity_token fields")
 	ifNoneMatch := flag.String("if-none-match", "", "conditional request ETag")
+	signalStart := flag.Bool("signal-start", false, "write MEASURE_START to stderr after all client warmups")
+	invalidSample := flag.String("invalid-sample", "", "save the first invalid response body for diagnosis")
 	accept := flag.String("accept", "application/json", "Accept request header")
 	clients := flag.Int("clients", 32, "number of concurrent keep-alive clients")
 	seconds := flag.Float64("seconds", 15, "measured duration")
@@ -74,6 +78,7 @@ func main() {
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	var invalidOnce sync.Once
 	get := func() (bool, error) {
 		request, err := http.NewRequest("GET", *base+*path, nil)
 		if err != nil {
@@ -109,6 +114,15 @@ func main() {
 		}
 		if *expectedModified != "" {
 			valid = valid && response.Header.Get("Last-Modified") == *expectedModified
+		}
+		if *expectedContentType != "" {
+			valid = valid && strings.SplitN(response.Header.Get("Content-Type"), ";", 2)[0] == *expectedContentType
+		}
+		if !valid && *invalidSample != "" {
+			invalidOnce.Do(func() {
+				_ = os.WriteFile(*invalidSample, body, 0600)
+				fmt.Fprintf(os.Stderr, "INVALID status=%d bytes=%d content_type=%q messages=%d csrf=%d etag=%q\n", response.StatusCode, len(body), response.Header.Get("Content-Type"), bytes.Count(body, []byte("data-message-id=")), bytes.Count(body, []byte("name=\"authenticity_token\""))+bytes.Count(body, []byte("name='authenticity_token'")), response.Header.Get("ETag"))
+			})
 		}
 		return valid, nil
 	}
@@ -158,6 +172,9 @@ func main() {
 	}
 	started := time.Now()
 	startAt = started
+	if *signalStart {
+		fmt.Fprintln(os.Stderr, "MEASURE_START")
+	}
 	close(start)
 	workers.Wait()
 	close(results)

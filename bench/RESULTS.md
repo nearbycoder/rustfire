@@ -606,3 +606,16 @@ The same paired full-200 fixture was run again for ten seconds per client count 
 | 64 | Yes | 3,292 / 27.56 ms | 262.12 / 31.84 | 1,783 / 62.39 ms | 219.28 / 2,825.38 |
 
 All measured responses passed status, validator, message-root, and CSRF-field checks with zero errors. This fixture shows more rendered-page throughput and a much smaller sampled server process footprint for Rustfire under the tested 22-worker Campfire configuration. It still does not measure a separate load-generator host, many simultaneous users and rooms, write or socket activity, or hours of steady load; the source and Rustfire also send different raw byte counts per page.
+
+## Paired message creation and mixed reads/writes
+
+`bench/paired_message_create.py` found that Rustfire's browser-style Turbo POST returned HTTP 201 with `text/html`, while Campfire returned HTTP 200 with `text/vnd.turbo-stream.html`. Rustfire now matches the source status and media type. On aligned disposable fixtures, both apps saved message ID 1 and the same client ID and text; their parsed Turbo response tags, attribute names and static values, and text matched after excluding generated timestamps. Raw response formatting still differs.
+
+`bench/paired_message_mix.py` then seeded 40 matching messages and ran 32 concurrent full-HTML readers beside one writer scheduled for 100 messages over about 9.5 seconds. All POSTs returned HTTP 200 with Turbo Stream content, all measured GETs returned HTTP 200 with 40 message roots, all 100 rows and bodies were present afterward, and the final page contained the expected latest 40 IDs in each app. Ten-second serial same-host trials in both orders measured:
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| :---: | ---: | ---: | ---: | ---: |
+| No | 3,249 / 14.43 ms | 7.46 ms | 1,359 / 49.20 ms | 122.56 ms |
+| Yes | 3,414 / 13.68 ms | 7.60 ms | 1,531 / 41.83 ms | 84.62 ms |
+
+Read and write error counts were zero in both trials. Campfire's fragment cache sometimes omitted the eight hidden CSRF fields for a newly created message, so the changing-page read check requires 40 message roots but does not require a fixed CSRF-field count; the initial pages passed the full parsed-markup comparison. This is one writer and one account in one room on a shared host, with no socket fanout or resource sample during the mix. It does not prove sustained multi-user capacity or complete feature parity.

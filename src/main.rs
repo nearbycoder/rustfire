@@ -5031,13 +5031,14 @@ async fn message_create(
             .into_response())
     } else if accept.contains("turbo-stream") {
         Ok((
-            StatusCode::CREATED,
-            Html(format!(
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html; charset=utf-8")],
+            format!(
                 "<turbo-stream action='append' target='{}'><template>{}</template></turbo-stream>",
                 room_messages_target(m.room_kind.as_deref().ok_or(StatusCode::NOT_FOUND)?, rid)
                     .ok_or(StatusCode::NOT_FOUND)?,
                 message_html(&s, &m, Some(&headers))
-            )),
+            ),
         )
             .into_response())
     } else {
