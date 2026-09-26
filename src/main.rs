@@ -10518,7 +10518,7 @@ fn render_imported_rich_text(
             }
             tx.execute("DELETE FROM message_mentions WHERE message_id=?1", [id])?;
             for user_id in mention_ids(source, signing_key, imported_key) {
-                tx.execute("INSERT OR IGNORE INTO message_mentions(message_id,user_id) VALUES(?1,?2)", params![id,user_id])?;
+                tx.execute("INSERT OR IGNORE INTO message_mentions(message_id,user_id) SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM memberships m JOIN messages msg ON msg.room_id=m.room_id WHERE msg.id=?1 AND m.user_id=?2)", params![id,user_id])?;
             }
         }
         last_id = batch.last().unwrap().0;

@@ -61,6 +61,7 @@ def main():
                 fixture.execute(f"DELETE FROM {table}")
             fixture.execute("UPDATE accounts SET settings=?,custom_styles=?", (json.dumps({"restrict_room_creation_to_administrators": True}), "body { color: navy; }"))
             fixture.execute("UPDATE rooms SET name='Imported room' WHERE id=1")
+            fixture.execute("INSERT INTO users(id,name,role,status,created_at,updated_at) VALUES(3,'Outside',0,0,'2026-01-01 00:00:00','2026-01-01 00:00:00')")
             fixture.execute("INSERT INTO sessions(id,user_id,token,created_at,updated_at,last_active_at,user_agent) VALUES(1,1,'imported-session','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','test')")
             fixture.execute("""INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                 VALUES(1,1,'https://push.example.test/1','test-p256dh','test-auth','test','2026-01-01 00:00:00','2026-01-01 00:00:00')""")
@@ -78,9 +79,12 @@ def main():
             mention_payload = b'{"_rails":{"data":"gid://campfire/User/2?expires_in","pur":"attachable"}}'
             encoded = base64.urlsafe_b64encode(mention_payload).decode()
             sgid = f"{encoded}--{hmac.new(signing_key, encoded.encode(), hashlib.sha1).hexdigest()}"
-            mention_body = f'<div><action-text-attachment sgid="{sgid}" content-type="application/vnd.campfire.mention"></action-text-attachment> hello</div>'
+            outsider_payload = b'{"_rails":{"data":"gid://campfire/User/3?expires_in","pur":"attachable"}}'
+            outsider_encoded = base64.urlsafe_b64encode(outsider_payload).decode()
+            outsider_sgid = f"{outsider_encoded}--{hmac.new(signing_key, outsider_encoded.encode(), hashlib.sha1).hexdigest()}"
+            mention_body = f'<div><action-text-attachment sgid="{sgid}" content-type="application/vnd.campfire.mention"></action-text-attachment> <action-text-attachment sgid="{outsider_sgid}" content-type="application/vnd.campfire.mention"></action-text-attachment> hello</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(2,'Message',3,'body',?,?,?)", (mention_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
-            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(3,?)", ("@Rustfire Compare hello",))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(3,?)", ("@Rustfire Compare @Outside hello",))
             blob_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/10?expires_in","pur":"attachable"}}'
             blob_encoded = base64.urlsafe_b64encode(blob_payload).decode()
             blob_sgid = f"{blob_encoded}--{hmac.new(signing_key, blob_encoded.encode(), hashlib.sha1).hexdigest()}"
@@ -241,7 +245,7 @@ def main():
             assert imported.execute("SELECT body FROM message_search_index WHERE rowid=11").fetchone() == (filtered_plain,)
             assert imported.execute("SELECT message_id,user_id FROM message_mentions").fetchall() == [(3, 2)]
             mention_plain, mention_html = imported.execute("SELECT body,body_html FROM messages WHERE id=3").fetchone()
-            assert mention_plain == "@Rustfire Compare hello"
+            assert mention_plain == "@Rustfire Compare @Outside hello"
             assert 'class="mention"' in mention_html and "Rustfire Compare</div>" in mention_html
             inline_html = imported.execute("SELECT body_html FROM messages WHERE id=4").fetchone()[0]
             assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html and "1.21 KB" in inline_html, inline_html
@@ -427,7 +431,7 @@ def main():
         assert derived_image.returncode == 0, derived_image.stderr
         with sqlite3.connect(bad_target) as imported:
             assert imported.execute("SELECT width,height FROM inline_blobs WHERE id=11").fetchone() == (1, 1)
-        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; missing image dimensions are derived and inconsistent metadata fails safely")
+    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, member-only mention recipients, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; missing image dimensions are derived and inconsistent metadata fails safely")
 
 
 if __name__ == "__main__":
