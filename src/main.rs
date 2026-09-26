@@ -4822,7 +4822,7 @@ async fn push_test_notification(
                 |r| r.get(0),
             )
             .map_err(db_err)?;
-        let payload=json!({"title":"Campfire Test","options":{"body":Uuid::new_v4().to_string(),"icon":"/account/logo","data":{"path":"/users/me/push_subscriptions","badge":badge}}}).to_string();
+        let payload=push_test_payload(&headers,&Uuid::new_v4().to_string(),badge).to_string();
         deliver_push(s, subscription, payload)
             .await
             .map_err(|error| {
@@ -4831,6 +4831,9 @@ async fn push_test_notification(
             })?;
     }
     Ok(found_redirect("/users/me/push_subscriptions"))
+}
+fn push_test_payload(headers: &HeaderMap, body: &str, badge: i64) -> Value {
+    json!({"title":"Campfire Test","options":{"body":body,"icon":"/account/logo","data":{"path":public_url(headers,"/users/me/push_subscriptions"),"badge":badge}}})
 }
 async fn push_test_notification_scoped(
     state: State<Arc<AppState>>,
@@ -11405,6 +11408,17 @@ mod tests {
         assert_eq!(super::push_message_body(&message, false), "Alex: report.pdf");
         message.body = "x".repeat(3000);
         assert_eq!(super::push_message_body(&message, false).len(), 3006);
+    }
+
+    #[test]
+    fn push_test_payload_matches_source() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::HOST, "rustfire.test:4242".parse().unwrap());
+        let actual = super::push_test_payload(&headers, "fixed-body", 3);
+        let expected = std::env::var("RUSTFIRE_EXPECTED_PUSH_TEST_PAYLOAD").unwrap_or_else(|_| {
+            r#"{"title":"Campfire Test","options":{"body":"fixed-body","icon":"/account/logo","data":{"path":"http://rustfire.test:4242/users/me/push_subscriptions","badge":3}}}"#.to_string()
+        });
+        assert_eq!(actual, serde_json::from_str::<serde_json::Value>(&expected).unwrap());
     }
 
     #[test]
