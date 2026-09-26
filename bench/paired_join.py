@@ -109,7 +109,23 @@ def check(port, database, signed_cookie):
         memberships = db.execute("SELECT room_id FROM memberships WHERE user_id=? ORDER BY room_id", [uid]).fetchall()
         open_rooms = db.execute("SELECT id FROM rooms WHERE type='Rooms::Open' ORDER BY id").fetchall()
     assert (name, email, memberships) == ("New Member", "new-member@example.invalid", open_rooms)
-    return (status, path, len(memberships)), navigation, icons
+    signup_result = (status, path, len(memberships))
+
+    mixed = {"user[name]": "Mixed Case", "user[email_address]": "Mixed.Case@Example.invalid", "user[password]": "signup-password"}
+    mixed_browser = browser()
+    status, _, page, _ = fetch(mixed_browser, port, "/join/benchmark")
+    assert status == 200
+    assert fetch(mixed_browser, port, "/join/benchmark", mixed, csrf_token(page))[:2] == (302, "/")
+    with sqlite3.connect(database) as db:
+        stored_email = db.execute("SELECT email_address FROM users WHERE name='Mixed Case'").fetchone()[0]
+    login_results = []
+    for address in ("Mixed.Case@Example.invalid", "mixed.case@example.invalid"):
+        login_browser = browser()
+        status, _, login_page, _ = fetch(login_browser, port, "/session/new")
+        assert status == 200
+        login_results.append(fetch(login_browser, port, "/session", {"email_address": address, "password": "signup-password"}, csrf_token(login_page))[0])
+    assert (stored_email, login_results) == ("Mixed.Case@Example.invalid", [302, 401]), (stored_email, login_results)
+    return signup_result, navigation, icons
 
 
 def main():

@@ -230,14 +230,14 @@ def verify_mutations(port, cookie, csrf, database):
     body = urllib.parse.urlencode({
         "_method": "patch",
         "user[name]": "Paired Admin",
-        "user[email_address]": "paired@example.invalid",
+        "user[email_address]": "Paired@Example.invalid",
         "user[bio]": "Profile parity check",
     }).encode()
     status, location, payload = request(port, "POST", "/users/me/profile", cookie, csrf, body, "application/x-www-form-urlencoded")
     assert status == 302 and urllib.parse.urlsplit(location).path == "/users/me/profile", (status, location, payload[:200])
     with sqlite3.connect(database) as db:
         profile = db.execute("SELECT name,email_address,bio FROM users WHERE id=1").fetchone()
-    assert profile == ("Paired Admin", "paired@example.invalid", "Profile parity check"), profile
+    assert profile == ("Paired Admin", "Paired@Example.invalid", "Profile parity check"), profile
     status, _, page = request(port, "GET", "/users/me/profile", cookie, csrf)
     assert status == 200 and b"Profile parity check" in page
     body = urllib.parse.urlencode({"_method": "put"}).encode()

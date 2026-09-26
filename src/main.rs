@@ -2958,7 +2958,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
         fields(&raw).0
     };
     let name = form_value(&values, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_string();
-    let email = form_value(&values, "email_address", "user[email_address]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_lowercase();
+    let email = form_value(&values, "email_address", "user[email_address]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_string();
     let password = form_value(&values, "password", "user[password]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.to_string();
     if name.is_empty() || password.is_empty() || !email.contains('@') {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -3149,7 +3149,7 @@ async fn login_post(
     let row: Option<(i64, Option<String>)> = db
         .query_row(
             "SELECT id,password_digest FROM users WHERE email_address=?1 AND status=0",
-            [f.email_address.to_lowercase()],
+            [&f.email_address],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
@@ -7852,7 +7852,7 @@ async fn profile_post(
     }
     let email = match form_value(&f, "email_address", "user[email_address]") {
         Some(e) if e.trim().is_empty() => None,
-        Some(e) if e.contains('@') => Some(e.trim().to_lowercase()),
+        Some(e) if e.contains('@') => Some(e.trim().to_string()),
         Some(_) => return Err(StatusCode::UNPROCESSABLE_ENTITY),
         None => {
             if u.email.is_empty() {
