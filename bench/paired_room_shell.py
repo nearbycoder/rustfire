@@ -245,6 +245,17 @@ def jpeg_representation(page, port, cookie, legacy_secret=None):
         return body
 
 
+def video_poster(page, port, cookie):
+    match = re.search(rb"<video\b[^>]*poster=['\"]([^'\"]+)['\"]", page)
+    assert match and match.group(1).startswith(b"/rails/active_storage/representations/redirect/"), "Missing signed WebP poster"
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{match.group(1).decode()}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read()
+        assert response.status == 200 and response.headers.get_content_type() == "image/webp", (response.status, response.headers)
+        assert body.startswith(b"RIFF") and body[8:12] == b"WEBP", body[:12]
+        return body
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
@@ -331,6 +342,16 @@ def main():
                 assert jpeg_representation(target_image_page, rust_port, "session_token=benchmark-session", env["SECRET_KEY_BASE"]) == target_jpeg
                 print(f"JPEG representations: {len(source_jpeg)} byte-identical bytes")
                 compare_message_page(4, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
+                video_file = temp / "room-page-video.mp4"
+                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=16x16:r=5:d=1", "-c:v", "mpeg4", "-y", str(video_file)], check=True)
+                for port, cookie, csrf in ((camp_port, camp_cookie, camp_csrf), (rust_port, "session_token=benchmark-session", "benchmark-csrf")):
+                    post_file_message(port, cookie, csrf, "clip.mp4", "video/mp4", video_file.read_bytes(), "room-page-video")
+                source_video_page, target_video_page = compare_message_page(5, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
+                source_poster = video_poster(source_video_page, camp_port, camp_cookie)
+                target_poster = video_poster(target_video_page, rust_port, "session_token=benchmark-session")
+                assert source_poster == target_poster, (len(source_poster), len(target_poster))
+                print(f"WebP posters: {len(source_poster)} byte-identical bytes")
+                compare_message_page(5, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)
