@@ -1041,6 +1041,15 @@ Rustfire served **3.76–4.77×** as many checked reads per second at this load,
 
 The full reports are in `bench/results/rich-browser-4k-camp-first.json` and `bench/results/rich-browser-4k-rust-first.json`. The latter records the strict writer-deadline failure even though all events arrived and markup comparisons passed.
 
+The 4,000-socket, four-room workload was also run for **120 seconds** with Campfire first, at the same three rich posts per second per room and 64 checked readers. Each app saved all **1,440** posts and delivered **1,440,000/1,440,000** message appends, **1,440,000/1,440,000** unread events, and **502,000/502,000** presence read events during setup. All **5,760** paired captured append structures matched. Neither app had checked read errors, missing or unexpected events, or early socket closes.
+
+| App | Checked reads/s | Read p95 | Write p95 | Last write | Peak server PSS |
+|---|---:|---:|---:|---:|---:|
+| Campfire | 749 | 245.14 ms | 408.40 ms | 120.063 s | 5,400.76 MiB |
+| Rustfire | 2,862 | 35.37 ms | 40.98 ms | 119.211 s | 655.21 MiB |
+
+Rustfire served **3.82×** as many checked reads per second in this single, longer trial. Its writers met the 120-second deadline; Campfire's last writer crossed it by **63 ms**, so the harness exited nonzero despite complete persistence and delivery. This narrow miss does not establish a reliable Campfire write-capacity boundary. The apps ran serially on one host, with socket setup outside the timed interval. The [full checked report](results/rich-browser-4k-120s-camp-first.json) preserves the counts and strict failure status. This trial is two minutes, not an hours-long stability test or a full-app parity measurement.
+
 ### Eight thousand browser-channel sockets
 
 The same four-room, 64-reader, 30-second rich-text workload ran in both orders with `--sockets-per-room 2000`: 8,000 authenticated sockets across four rooms, four identities per room, and eight browser channels per socket. Both apps saved all 360 rich posts and delivered **720,000/720,000** message appends, **720,000/720,000** unread events, and **2,004,000/2,004,000** presence read events during setup. All 1,440 paired captured append structures matched; neither app had checked read errors, missing or unexpected events, or early socket closes. Rustfire met the 30-second writer deadline in both orders. Campfire completed every write and delivery, but its last writer finished **5.14–6.33 seconds after** the deadline, so both paired trials returned a strict failure.
