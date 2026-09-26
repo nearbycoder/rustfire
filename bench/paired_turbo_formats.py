@@ -18,8 +18,10 @@ REVISION = "91d294f4a09f9bbe37f9548959bfcb43645678fb"
 CASES = [
     ("/rooms/1/refresh", None),
     ("/rooms/1/refresh", "text/html"),
+    ("/rooms/1/refresh", "application/json"),
     ("/rooms/1/refresh", "*/*"),
     ("/rooms/1/refresh", "text/vnd.turbo-stream.html"),
+    ("/rooms/1/refresh?since=nonsense", "text/vnd.turbo-stream.html"),
     ("/rooms/1/refresh.turbo_stream", "text/html"),
     ("/rooms/1/refresh.turbo_stream", "application/json"),
     ("/account/users", None),
@@ -45,7 +47,9 @@ def check(port, cookie):
         with response:
             body = response.read()
             content_type = response.headers.get("Content-Type", "").split(";")[0]
-            results.append((response.status, content_type if response.status == 200 else None))
+            results.append((response.status, content_type))
+            if response.status == 406 and accept == "application/json":
+                assert body == b'{"status":406,"error":"Not Acceptable"}', (path, body)
             if response.status == 200 and path.startswith("/rooms/"):
                 assert body.strip() == b"", (path, body[:100])
     return results

@@ -3979,10 +3979,25 @@ async fn room_show_with_target(
     );
     Ok(response)
 }
+fn not_acceptable_format(accept: &str) -> Response {
+    if accept.contains("application/json") {
+        (
+            StatusCode::NOT_ACCEPTABLE,
+            [(header::CONTENT_TYPE, "application/json; charset=UTF-8")],
+            r#"{"status":406,"error":"Not Acceptable"}"#,
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_ACCEPTABLE,
+            [(header::CONTENT_TYPE, "text/html; charset=UTF-8")],
+        )
+            .into_response()
+    }
+}
 #[derive(Deserialize)]
 struct RefreshQuery {
-    after: Option<i64>,
-    since: Option<i64>,
+    since: Option<String>,
 }
 async fn room_refresh(
     State(s): State<Arc<AppState>>,
@@ -3993,92 +4008,66 @@ async fn room_refresh(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let room = room_for(&s, u.id, rid)?;
-    let checked_at = Utc::now().timestamp_millis();
     let accept = headers
         .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if !uri.path().ends_with(".turbo_stream")
-        && !accept.contains("application/json")
         && !accept.contains("text/vnd.turbo-stream.html")
         && !accept.contains("*/*")
     {
-        let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
-        response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
-        return Ok(response);
+        return Ok(not_acceptable_format(accept));
     }
-    if let Some(since) = q.since {
-        let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
-            .ok_or(StatusCode::BAD_REQUEST)?
-            .timestamp_nanos_opt()
-            .ok_or(StatusCode::BAD_REQUEST)?;
-        let new_messages = messages_since(&s, rid, cutoff_ns, false)?;
-        let updated_messages = messages_since(&s, rid, cutoff_ns, true)?;
-        if accept.contains("json") && !uri.path().ends_with(".turbo_stream") {
-            let entries = |messages: &[ChatMessage]| {
-                messages
-                    .iter()
-                    .map(|m| json!({"id":m.id,"html":message_html(&s, m, Some(&headers))}))
-                    .collect::<Vec<_>>()
-            };
-            return Ok(Json(json!({
-                "messages":entries(&new_messages),
-                "updated":entries(&updated_messages),
-                "checked_at":checked_at,
-                "has_more":new_messages.len() == 40
-            }))
-            .into_response());
-        }
-        let mut html = String::new();
-        if !new_messages.is_empty() {
-            let entries: String = new_messages
-                .iter()
-                .map(|m| message_html(&s, m, Some(&headers)))
-                .collect();
-            let target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
-            html.push_str(&format!("<turbo-stream action='append' target='{target}'><template>{entries}</template></turbo-stream>"));
-        }
-        for message in &updated_messages {
-            html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(&s, message, Some(&headers))));
-        }
-        if html.is_empty() {
-            html.push('\n');
-        }
-        return Ok((
-            [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")],
-            csrf_forms(&html, u.csrf_token.as_deref().unwrap_or("")),
-        )
-            .into_response());
+    let since = q.since.as_deref().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+    let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .timestamp_nanos_opt()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let new_messages = messages_since(&s, rid, cutoff_ns, false)?;
+    let updated_messages = messages_since(&s, rid, cutoff_ns, true)?;
+    let mut html = String::new();
+    if !new_messages.is_empty() {
+        let entries: String = new_messages
+            .iter()
+            .map(|message| message_html(&s, message, Some(&headers)))
+            .collect();
+        let target = room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?;
+        html.push_str(&format!("<turbo-stream action='append' target='{target}'><template>{entries}</template></turbo-stream>"));
     }
+    for message in &updated_messages {
+        html.push_str(&format!("<turbo-stream action='replace' target='message_{}'><template>{}</template></turbo-stream>", esc(&message.client_message_id), message_html(&s, message, Some(&headers))));
+    }
+    if html.is_empty() {
+        html.push('\n');
+    }
+    Ok((
+        [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html; charset=utf-8")],
+        csrf_forms(&html, u.csrf_token.as_deref().unwrap_or("")),
+    )
+        .into_response())
+}
+#[derive(Deserialize)]
+struct RefreshStateQuery {
+    after: Option<i64>,
+}
+async fn room_refresh_state(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(rid): Path<i64>,
+    Query(q): Query<RefreshStateQuery>,
+) -> AppResult {
+    let u = user(&s, &headers)?;
+    room_for(&s, u.id, rid)?;
     let after = q.after.unwrap_or(0).max(0);
     let mut messages = messages_after_position(&s, rid, after, 101)?;
     let has_more = messages.len() > 100;
     messages.truncate(100);
-    let next_after = messages.last().map(|m| m.id).unwrap_or(after);
-    if accept.contains("json") && !uri.path().ends_with(".turbo_stream") {
-        let entries: Vec<Value> = messages
-            .iter()
-            .map(|m| json!({"id":m.id,"html":message_html(&s, m, Some(&headers))}))
-            .collect();
-        Ok(
-            Json(json!({"messages":entries,"next_after":next_after,"has_more":has_more}))
-                .into_response(),
-        )
-    } else {
-        let html = if messages.is_empty() {
-            "\n".to_string()
-        } else {
-            let entries: String = messages
-                .iter()
-                .map(|m| message_html(&s, m, Some(&headers)))
-                .collect();
-            format!(
-                "<turbo-stream action='append' target='{}'><template>{entries}</template></turbo-stream>",
-                room_messages_target(&room.kind, rid).ok_or(StatusCode::NOT_FOUND)?
-            )
-        };
-        Ok(([(header::CONTENT_TYPE, "text/vnd.turbo-stream.html")], html).into_response())
-    }
+    let next_after = messages.last().map(|message| message.id).unwrap_or(after);
+    let entries: Vec<Value> = messages
+        .iter()
+        .map(|message| json!({"id":message.id,"html":message_html(&s, message, Some(&headers))}))
+        .collect();
+    Ok(Json(json!({"messages":entries,"next_after":next_after,"has_more":has_more})).into_response())
 }
 async fn sidebar_get(
     State(s): State<Arc<AppState>>,
@@ -6390,16 +6379,7 @@ async fn account_users_index(
         && !accept.contains("text/vnd.turbo-stream.html")
         && !accept.contains("*/*")
     {
-        let mut response = if accept.contains("application/json") {
-            Json(json!({"status":406,"error":"Not Acceptable"})).into_response()
-        } else {
-            StatusCode::NOT_ACCEPTABLE.into_response()
-        };
-        *response.status_mut() = StatusCode::NOT_ACCEPTABLE;
-        if !accept.contains("application/json") {
-            response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
-        }
-        return Ok(response);
+        return Ok(not_acceptable_format(accept));
     }
     let page = query
         .get("page")
@@ -10043,6 +10023,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/rooms/{id}/refresh", get(room_refresh))
         .route("/rooms/{id}/refresh.turbo_stream", get(room_refresh))
+        .route("/rooms/{id}/refresh_state", get(room_refresh_state))
         .route("/rooms/{id}/settings", get(room_edit))
         .route(
             "/rooms/{id}/messages",

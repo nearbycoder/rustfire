@@ -234,7 +234,7 @@ if (chat) {
     }catch(error){console.error('Could not load older messages',error)}
     finally{historyLoading=false}
   }
-  let cursor = Math.max(0, ...Array.from(messages.querySelectorAll('[data-message-id]'), node => Number(node.dataset.messageId)));
+  let cursor = Number(Array.from(messages.querySelectorAll('.message[data-message-id]')).at(-1)?.dataset.messageId)||0;
   let lastRefreshAt=Number(chat.dataset.refreshSince)||0;
   let newerLoading=false;
   async function loadNewer(){
@@ -263,29 +263,20 @@ if (chat) {
     catchingUp = true;
     const wasNearBottom=nearBottom();
     try {
-      for (;;) {
-        const response = await fetch(`/rooms/${roomId}/refresh?after=${cursor}`, {headers:{Accept:'application/json'}});
-        if (!response.ok) break;
-        const page = await response.json();
-        for (const entry of page.messages) {
-          if (!messageById(entry.id)) messages.insertAdjacentHTML('beforeend', entry.html);
-        }
-        formatLocalTimes(messages);
-        cursor = page.next_after;
-        decorateOwn();
-        formatMessageGroups();
-        if (!page.has_more || !page.messages.length) break;
-      }
-      const refreshed=await fetch(`/rooms/${roomId}/refresh?since=${lastRefreshAt}`,{headers:{Accept:'application/json'}});
-      if(refreshed.ok){
-        const page=await refreshed.json();
-        for(const entry of page.updated||[]){
-          const existing=messageById(entry.id);
-          if(existing&&!existing.querySelector('.composer--edit'))existing.outerHTML=entry.html;
-        }
-        lastRefreshAt=page.checked_at;
+      for(;;){
+        const response=await fetch(`/rooms/${roomId}/refresh_state?after=${cursor}`,{headers:{Accept:'application/json'}});
+        if(!response.ok)throw Error(`Missed messages returned ${response.status}`);
+        const page=await response.json();
+        for(const entry of page.messages)if(!messageById(entry.id))messages.insertAdjacentHTML('beforeend',entry.html);
+        cursor=page.next_after;
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
+        if(!page.has_more||!page.messages.length)break;
       }
+      const refreshed=await fetch(`/rooms/${roomId}/refresh?since=${lastRefreshAt}`,{headers:{Accept:'text/vnd.turbo-stream.html'}});
+      if(!refreshed.ok)throw Error(`Room refresh returned ${refreshed.status}`);
+      applyRoomStream(await refreshed.text());
+      lastRefreshAt=Math.max(lastRefreshAt,...Array.from(messages.querySelectorAll('.message[data-message-updated-at]'),node=>Number(node.dataset.messageUpdatedAt)||0));
+      cursor=Number(Array.from(messages.querySelectorAll('.message[data-message-id]')).at(-1)?.dataset.messageId)||cursor;
       if(wasNearBottom)messages.scrollTop=messages.scrollHeight;
       updateReturnButton();
     } catch (error) { console.error('Could not refresh room', error); }

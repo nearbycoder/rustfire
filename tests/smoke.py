@@ -152,10 +152,8 @@ def main():
             time.sleep(.02)
             code, _, page = request(admin, base, f"/messages/{message['id']}/boosts", {"content": "👍"})
             assert code == 200 and "👍" in page
-            code, _, payload = request(admin, base, f"/rooms/1/refresh?since={boost_since}", headers={"Accept": "application/json"})
-            boosted = json.loads(payload)
-            assert code == 200 and boosted["messages"] == [] and [entry["id"] for entry in boosted["updated"]] == [message["id"]]
-            assert "👍" in boosted["updated"][0]["html"]
+            code, _, payload = request(admin, base, f"/rooms/1/refresh?since={boost_since}", headers={"Accept": "text/vnd.turbo-stream.html"})
+            assert code == 200 and "action='replace' target='message_test-1'" in payload and "👍" in payload
             assert request(client(),base,f"/messages/{message['id']}/boosts")[0]==401
             assert "Add a boost" in request(admin,base,f"/messages/{message['id']}/boosts/new")[2]
             code,_,page=request(admin,base,f"/messages/{message['id']}/boosts",{"boost[content]":"🔥"})
@@ -179,11 +177,11 @@ def main():
             assert "common-file-text-9043d980.svg" in attachment_page and "Share note.txt" in attachment_page
             blob_download = re.search(r"href='(/rails/active_storage/blobs/redirect/[^']+/note\.txt\?disposition=attachment)'", attachment_page).group(1)
             assert f"data-web-share-files-value='{blob_download.removesuffix('?disposition=attachment')}'" in attachment_page
-            code, _, payload = request(admin, base, f"/rooms/1/refresh?after={message['id']}", headers={"Accept":"application/json"})
+            code, _, payload = request(admin, base, f"/rooms/1/refresh_state?after={message['id']}", headers={"Accept":"application/json"})
             refresh = json.loads(payload)
             assert code == 200 and [m["id"] for m in refresh["messages"]] == [attachment_message["id"]]
             assert refresh["next_after"] == attachment_message["id"] and not refresh["has_more"]
-            with admin.open(urllib.request.Request(base + f"/rooms/1/refresh?after={message['id']}", headers={"Accept": "text/vnd.turbo-stream.html"})) as response:
+            with admin.open(urllib.request.Request(base + "/rooms/1/refresh?since=0", headers={"Accept": "text/vnd.turbo-stream.html"})) as response:
                 assert response.headers.get_content_type() == "text/vnd.turbo-stream.html"
                 assert "action='append'" in response.read().decode()
             code, _, content = request(admin, base, f"/attachments/{attachment_id}")
@@ -222,10 +220,6 @@ def main():
             time.sleep(.02)
             code, _, page = request(admin, base, f"/rooms/1/messages/{message['id']}", {"message[body]": "hello edited"}, method="PATCH")
             assert code == 303
-            code, _, payload = request(admin, base, f"/rooms/1/refresh?since={refresh_since}", headers={"Accept": "application/json"})
-            refreshed = json.loads(payload)
-            assert code == 200 and refreshed["messages"] == [] and [entry["id"] for entry in refreshed["updated"]] == [message["id"]], refreshed
-            assert "hello edited" in refreshed["updated"][0]["html"] and refreshed["checked_at"] >= refresh_since
             code, _, payload = request(admin, base, f"/rooms/1/refresh?since={refresh_since}", headers={"Accept": "text/vnd.turbo-stream.html"})
             assert code == 200 and "action='replace' target='message_test-1'" in payload and "hello edited" in payload
             code, _, page = request(admin, base, "/rooms/1")
@@ -418,7 +412,7 @@ def main():
             assert "private unread" in request(admin, base, "/searches?q=private")[2]
             code, redirected, _ = request(member, base, "/rooms/2")
             assert code == 200 and redirected.endswith("/rooms/1"), (code, redirected)
-            code, _, _ = request(member, base, "/rooms/2/refresh?after=0", headers={"Accept":"application/json"})
+            code, _, _ = request(member, base, "/rooms/2/refresh?since=0", headers={"Accept":"text/vnd.turbo-stream.html"})
             assert code == 404
             code, _, payload = request(member, base, "/autocompletable/users?room_id=2")
             assert code == 404
@@ -1017,10 +1011,9 @@ def main():
                 raise AssertionError("server did not restart for direct-room index migration")
             assert request(admin, base, "/session/new")[0] == 200
             assert request(admin, base, "/session", {"email_address":"admin@example.com","password":"password123"})[0] == 200
-            code, _, payload = request(admin, base, f"/rooms/1/refresh?since={imported_cutoff}", headers={"Accept":"application/json"})
-            imported_refresh = json.loads(payload)
-            assert code == 200 and [entry["id"] for entry in imported_refresh["messages"]] == [imported_new], imported_refresh
-            assert [entry["id"] for entry in imported_refresh["updated"]] == [imported_old], imported_refresh
+            code, _, payload = request(admin, base, f"/rooms/1/refresh?since={imported_cutoff}", headers={"Accept":"text/vnd.turbo-stream.html"})
+            assert code == 200 and "action='append'" in payload and "id='message_imported-new'" in payload
+            assert "action='replace' target='message_imported-edited'" in payload and "imported edited" in payload
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM messages WHERE id IN (?,?) AND created_at_ns IS NOT NULL AND updated_at_ns IS NOT NULL", (imported_old, imported_new)).fetchone()[0] == 2
             code, _, suggestions = request(admin, base, "/autocompletable/users?room_id=1&query=Admin")
@@ -1034,10 +1027,10 @@ def main():
                     "INSERT INTO messages(room_id,creator_id,body,client_message_id,created_at,created_at_ns,updated_at) VALUES(1,1,?1,?2,?3,?4,?3)",
                     ((f"tied {index}", f"tied-{index}", created_at, created_at_ns) for index in range(102)),
                 )
-            code, _, payload = request(admin, base, f"/rooms/1/refresh?after={first_tied_id}", headers={"Accept":"application/json"})
+            code, _, payload = request(admin, base, f"/rooms/1/refresh_state?after={first_tied_id}", headers={"Accept":"application/json"})
             first_page = json.loads(payload)
             assert code == 200 and len(first_page["messages"]) == 100 and first_page["has_more"], (code, first_page)
-            code, _, payload = request(admin, base, f"/rooms/1/refresh?after={first_page['next_after']}", headers={"Accept":"application/json"})
+            code, _, payload = request(admin, base, f"/rooms/1/refresh_state?after={first_page['next_after']}", headers={"Accept":"application/json"})
             last_page = json.loads(payload)
             assert code == 200 and len(last_page["messages"]) == 1 and not last_page["has_more"], (code, last_page)
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]":"Edit form check","message[client_message_id]":"edit-form-check"}, headers={"Accept":"application/json"})

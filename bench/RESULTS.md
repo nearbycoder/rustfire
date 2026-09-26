@@ -13,7 +13,9 @@ The older HTTP results above used a different fixture and should not be compared
 
 ## Turbo route format parity
 
-`python bench/paired_turbo_formats.py` passed on disposable instances of the pinned source and Rustfire. The room refresh and account user pagination routes now agree on HTTP status and media type for absent, HTML, wildcard, and Turbo Stream Accept headers, and for explicit `.turbo_stream` paths. Empty room refresh responses contain a newline as in the source. This is a route behavior check, not a timing result. Rustfire still accepts JSON on the room refresh path for its current browser client, whereas the source returns 406 for that format.
+`python bench/paired_turbo_formats.py` passed on disposable instances of the pinned source and Rustfire. The room refresh and account user pagination routes now agree on HTTP status and media type for absent, HTML, JSON, wildcard, and Turbo Stream Accept headers, and for explicit `.turbo_stream` paths. Both return the same JSON 406 body when the refresh route is requested as JSON, and treat a nonnumeric `since` value as zero. Empty room refresh responses contain a newline as in the source. Rustfire's browser applies Turbo refresh responses for edits and uses a separate JSON `refresh_state` route for backlog pagination. This is a route behavior check, not a timing result.
+
+In a local Chromium browser with one existing message, 105 messages and an edit were written directly to the disposable SQLite database without broadcasting WebSocket events. Dispatching an `online` event caused two checked `refresh_state` pages and one Turbo refresh. The browser then showed all 106 messages exactly once, including the first and last backlog entries, and displayed the edited original. This verifies one reconnect recovery path; it does not measure latency or replace cross-browser testing.
 
 ## Rustfire WebSocket fanout trial
 
