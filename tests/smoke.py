@@ -612,10 +612,10 @@ def main():
             with admin.open(base+signed_avatar_url(picture_bot_id)) as res:
                 image = res.read()
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and image[:4]==b"RIFF"
-            invalid_bot_body=bot_create_body.replace(b"Content-Type: image/png", b"Content-Type: text/plain").replace(b"Picture Bot", b"Invalid Bot")
+            invalid_bot_body=bot_create_body.replace(b"Picture Bot", b"")
             assert request(admin, base, "/account/bots", data=invalid_bot_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=bot-create"})[0] == 422
             with sqlite3.connect(f"{tmp}/test.db") as db:
-                assert db.execute("SELECT COUNT(*) FROM users WHERE name='Invalid Bot'").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM users WHERE name=''").fetchone()[0] == 0
             code, _, page = request(admin, base, "/account/bots/3/edit")
             assert code == 200 and "Robot" in page and "name='user[avatar]'" in page
             code, _, _ = request(admin, base, "/account/bots/3/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})

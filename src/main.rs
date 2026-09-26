@@ -2996,10 +2996,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
                     .to_string();
                 let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
                 if !bytes.is_empty() {
-                    if !safe_inline_image(&content_type) || bytes.len() > 5 * 1024 * 1024 {
-                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-                    }
-                    avatar = Some((bytes.to_vec(), content_type));
+                    avatar = Some((bytes.to_vec(), sniff_avatar_content_type(&bytes, &content_type).to_string()));
                 }
             } else if matches!(
                 name.as_str(),
@@ -4116,6 +4113,35 @@ fn safe_inline_image(content_type: &str) -> bool {
         content_type,
         "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif"
     )
+}
+fn variable_avatar_image(content_type: &str) -> bool {
+    // Campfire subtracts BMP, icon, and Photoshop from Active Storage's
+    // variable image types. Other uploads remain attached but show a fallback.
+    matches!(content_type,
+        "image/png" | "image/gif" | "image/jpeg" | "image/tiff" |
+        "image/webp" | "image/avif" | "image/heic" | "image/heif")
+}
+fn sniff_avatar_content_type<'a>(bytes: &[u8], declared: &'a str) -> &'a str {
+    // Active Storage uses Marcel to identify uploads from their bytes rather
+    // than trusting the multipart Content-Type. Cover its variable image types
+    // and the three formats Campfire deliberately leaves as fallback avatars.
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { return "image/png"; }
+    if bytes.starts_with(b"\xff\xd8\xff") { return "image/jpeg"; }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { return "image/gif"; }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { return "image/webp"; }
+    if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") { return "image/tiff"; }
+    if bytes.starts_with(b"BM") { return "image/bmp"; }
+    if bytes.starts_with(b"\0\0\x01\0") { return "image/vnd.microsoft.icon"; }
+    if bytes.starts_with(b"8BPS") { return "image/vnd.adobe.photoshop"; }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        match &bytes[8..12] {
+            b"avif" | b"avis" => return "image/avif",
+            b"heic" | b"heix" | b"hevc" | b"hevx" => return "image/heic",
+            b"mif1" | b"msf1" => return "image/heif",
+            _ => {}
+        }
+    }
+    declared
 }
 fn safe_inline_video(content_type: &str) -> bool {
     matches!(
@@ -7884,11 +7910,8 @@ async fn profile_post(
                     .content_type()
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                if !safe_inline_image(&content_type) {
-                    return Err(StatusCode::UNPROCESSABLE_ENTITY);
-                }
                 let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-                if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
+                if bytes.is_empty() {
                     return Err(StatusCode::UNPROCESSABLE_ENTITY);
                 }
                 avatar = Some((bytes.to_vec(), content_type));
@@ -7975,15 +7998,15 @@ async fn avatar_response(s: Arc<AppState>, headers: HeaderMap, token: String) ->
         })
         .ok_or(StatusCode::NOT_FOUND)?;
     let db = pool(&s)?;
-    let account: Option<(String, i64)> = db
+    let account: Option<(String, i64, String)> = db
         .query_row(
-            "SELECT name,role FROM users WHERE id=?1",
+            "SELECT name,role,updated_at FROM users WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .map_err(db_err)?;
-    let (name, role) = account.ok_or(StatusCode::NOT_FOUND)?;
+    let (name, role, updated_at) = account.ok_or(StatusCode::NOT_FOUND)?;
     let row: Option<(String, String)> = db
         .query_row(
             "SELECT stored_name,content_type FROM avatars WHERE user_id=?1",
@@ -7992,22 +8015,58 @@ async fn avatar_response(s: Arc<AppState>, headers: HeaderMap, token: String) ->
         )
         .optional()
         .map_err(db_err)?;
-    if let Some((stored, _content_type)) = row {
-        if let Some(data) = avatar_webp_variant(&s, &stored).await {
-            let mut response = data.into_response();
-            response
-                .headers_mut()
-                .insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
-            response.headers_mut().insert(
-                header::CACHE_CONTROL,
-                "public, max-age=1800, stale-while-revalidate=604800"
-                    .parse()
-                    .unwrap(),
-            );
-            response
-                .headers_mut()
-                .insert("x-content-type-options", "nosniff".parse().unwrap());
-            return Ok(response);
+    let tag_input = format!(
+        "{id}:{updated_at}:{}",
+        row.as_ref().map_or("", |(stored, _)| stored)
+    );
+    let digest = openssl::hash::hash(MessageDigest::md5(), tag_input.as_bytes()).map_err(db_err)?;
+    let etag = format!(
+        "W/\"{}\"",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                candidate.trim() == "*"
+                    || candidate.trim().trim_start_matches("W/") == etag.trim_start_matches("W/")
+            })
+        })
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response
+            .headers_mut()
+            .insert(header::ETAG, etag.parse().unwrap());
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+        return Ok(response);
+    }
+    if let Some((stored, content_type)) = row {
+        if variable_avatar_image(&content_type) {
+            if let Some(data) = avatar_webp_variant(&s, &stored).await {
+                let mut response = data.into_response();
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, "image/webp".parse().unwrap());
+                response
+                    .headers_mut()
+                    .insert(header::ETAG, etag.parse().unwrap());
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    "max-age=1800, public, stale-while-revalidate=604800"
+                        .parse()
+                        .unwrap(),
+                );
+                response
+                    .headers_mut()
+                    .insert("x-content-type-options", "nosniff".parse().unwrap());
+                return Ok(response);
+            }
         }
     }
     let body = if role == 2 {
@@ -8016,12 +8075,16 @@ async fn avatar_response(s: Arc<AppState>, headers: HeaderMap, token: String) ->
         avatar_initials_svg(id, &name)
     };
     let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "image/svg+xml; charset=utf-8".parse().unwrap(),
+    );
     response
         .headers_mut()
-        .insert(header::CONTENT_TYPE, "image/svg+xml".parse().unwrap());
+        .insert(header::ETAG, etag.parse().unwrap());
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        "public, max-age=1800, stale-while-revalidate=604800"
+        "max-age=1800, public, stale-while-revalidate=604800"
             .parse()
             .unwrap(),
     );
@@ -8045,13 +8108,15 @@ async fn avatar_webp_variant(s: &AppState, stored: &str) -> Option<Vec<u8>> {
     if tokio::fs::metadata(&output).await.is_err() {
         let _permit = s.variant_slots.acquire().await.ok()?;
         if tokio::fs::metadata(&output).await.is_err() {
-            let temporary = cache.join(format!("{stored}-{}.webp", Uuid::new_v4()));
-            let result = tokio::time::timeout(
+            let generation = Uuid::new_v4();
+            let intermediate = cache.join(format!("{stored}-{generation}.v"));
+            let temporary = cache.join(format!("{stored}-{generation}.webp"));
+            let thumbnail = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::process::Command::new("vips")
                     .arg("thumbnail")
                     .arg(&input)
-                    .arg(&temporary)
+                    .arg(&intermediate)
                     .args(["512", "--height", "512", "--size", "down"])
                     .kill_on_drop(true)
                     .output(),
@@ -8059,6 +8124,31 @@ async fn avatar_webp_variant(s: &AppState, stored: &str) -> Option<Vec<u8>> {
             .await
             .ok()
             .and_then(Result::ok);
+            let result = if thumbnail
+                .as_ref()
+                .is_some_and(|result| result.status.success())
+            {
+                // image_processing's Vips.resize_to_limit applies this mild
+                // sharpening convolution after thumbnailing. The two CLI
+                // operations match Campfire's generated WebP bytes.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tokio::process::Command::new("vips")
+                        .arg("conv")
+                        .arg(&intermediate)
+                        .arg(&temporary)
+                        .arg("static/avatar-sharpen.mat")
+                        .args(["--precision", "integer"])
+                        .kill_on_drop(true)
+                        .output(),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+            } else {
+                None
+            };
+            let _ = tokio::fs::remove_file(&intermediate).await;
             if result
                 .as_ref()
                 .is_some_and(|result| result.status.success())
@@ -8087,11 +8177,8 @@ async fn read_avatar(mut multipart: Multipart) -> Result<(Vec<u8>, String), Stat
                 .content_type()
                 .unwrap_or("application/octet-stream")
                 .to_string();
-            if !safe_inline_image(&content_type) {
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
-            }
             let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-            if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
+            if bytes.is_empty() {
                 return Err(StatusCode::UNPROCESSABLE_ENTITY);
             }
             upload = Some((bytes.to_vec(), content_type));
@@ -8105,6 +8192,7 @@ fn save_avatar(
     bytes: Vec<u8>,
     content_type: String,
 ) -> Result<(), StatusCode> {
+    let content_type = sniff_avatar_content_type(&bytes, &content_type).to_string();
     let dir = std::path::PathBuf::from(
         env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
     )
@@ -8757,9 +8845,6 @@ async fn bot_fields(
                     .to_string();
                 let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
                 if !bytes.is_empty() {
-                    if !safe_inline_image(&content_type) || bytes.len() > 5 * 1024 * 1024 {
-                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-                    }
                     avatar = Some((bytes.to_vec(), content_type));
                 }
             } else if field_name == "name"
