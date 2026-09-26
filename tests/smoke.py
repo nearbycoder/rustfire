@@ -229,9 +229,26 @@ def main():
             assert code == 200 and "<svg" in svg and "QR code" in svg and "<path" in svg
             assert request(client(), base, "/qr_code/not-base64!")[0] == 400
             member = client()
-            assert request(member, base, f"/join/{join}")[0] == 200
-            code, _, _ = request(member, base, f"/join/{join}", {"name": "Member", "email_address": "member@example.com", "password": "password123"}, headers={"X-Forwarded-For": "203.0.113.20, 8.8.8.8"})
+            code, _, join_page = request(member, base, f"/join/{join}")
+            assert code == 200 and '/static/signup.css' in join_page
+            assert 'enctype="multipart/form-data"' in join_page and 'name="user[avatar]"' in join_page
+            assert all(f'name="user[{field}]"' in join_page for field in ('name', 'email_address', 'password'))
+            duplicate = client()
+            assert request(duplicate, base, f"/join/{join}")[0] == 200
+            code, duplicate_url, duplicate_page = request(duplicate, base, f"/join/{join}", {"user[name]": "Existing", "user[email_address]": "admin@example.com", "user[password]": "password123"})
+            assert code == 200 and "/session/new?email_address=admin%40example.com" in duplicate_url
+            assert "value='admin@example.com'" in duplicate_page
+            signup_boundary = "rustfire-signup-test"
+            avatar_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==")
+            signup_parts = []
+            for field, value in (("user[name]", "Member"), ("user[email_address]", "member@example.com"), ("user[password]", "password123")):
+                signup_parts.append(f'--{signup_boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'.encode())
+            signup_parts.extend((f'--{signup_boundary}\r\nContent-Disposition: form-data; name="user[avatar]"; filename="avatar.png"\r\nContent-Type: image/png\r\n\r\n'.encode(), avatar_png, b'\r\n', f'--{signup_boundary}--\r\n'.encode()))
+            code, _, _ = request(member, base, f"/join/{join}", b''.join(signup_parts), headers={"Content-Type": f"multipart/form-data; boundary={signup_boundary}", "X-Forwarded-For": "203.0.113.20, 8.8.8.8"})
             assert code == 200
+            with sqlite3.connect(f"{tmp}/test.db") as check_db:
+                member_id = check_db.execute("SELECT id FROM users WHERE email_address='member@example.com'").fetchone()[0]
+                assert check_db.execute("SELECT content_type FROM avatars WHERE user_id=?", (member_id,)).fetchone() == ("image/png",)
             code, _, page = request(member, base, "/users/me/profile", {"name": "Member Two", "email_address": "member2@example.com", "password": "newpassword123", "bio": "I like fires"})
             assert code == 200 and "I like fires" in page
             code, _, page = request(member, base, "/users/me/profile", {"user[name]": "Member Two", "user[bio]": "Nested profile"}, method="PATCH")

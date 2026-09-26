@@ -1816,6 +1816,11 @@ fn incompatible_browser_page() -> Response {
     .into_response()
 }
 fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
+    let signup_stylesheet = if body.contains("class=\"nametag u-relative\"") {
+        "<link rel='stylesheet' href='/static/signup.css'>"
+    } else {
+        ""
+    };
     let account_stylesheet = if body.contains("class='panel account-settings") || body.contains("custom-styles-panel") {
         "<link rel='stylesheet' href='/static/account.css'>"
     } else {
@@ -1837,7 +1842,7 @@ fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str
     let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
     let custom_styles = custom_styles_tag();
     let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{signup_stylesheet}{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
         esc(token),
         VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
         esc(title),
@@ -2240,7 +2245,7 @@ async fn qr_code_show(Path(id): Path<String>) -> AppResult {
         .into_response())
 }
 fn session_response(token: String, to: &str) -> Response {
-    let mut r = Redirect::to(to).into_response();
+    let mut r = found_redirect(to);
     r.headers_mut().insert(
         header::SET_COOKIE,
         format!(
@@ -2745,7 +2750,10 @@ async fn first_run_post(
     drop(db);
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
-async fn login_get(State(s): State<Arc<AppState>>) -> AppResult {
+async fn login_get(
+    State(s): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> AppResult {
     if first_run_needed(&s)? {
         return Ok(Redirect::to("/first_run").into_response());
     }
@@ -2753,7 +2761,7 @@ async fn login_get(State(s): State<Arc<AppState>>) -> AppResult {
         "Sign in",
         &format!(
             "<section class='auth-card'><img class='hero-icon' src='/account/logo' alt=''><h1>Sign in</h1><form method='post' action='/session'>{}{}<button class='button'>Sign in</button></form></section>",
-            form_field("Email address", "email_address", "email"),
+            format!("<label>Email address<input name='email_address' type='email' value='{}' autocomplete='username' required></label>", esc(query.get("email_address").map(String::as_str).unwrap_or(""))),
             form_field("Password", "password", "password")
         ),
     ))
@@ -6865,27 +6873,69 @@ async fn user_deactivate(
     let _ = s.revoked_users.send(id);
     Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
-async fn join_get(State(s): State<Arc<AppState>>, Path(code): Path<String>) -> AppResult {
-    let db = pool(&s)?;
-    let valid: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM accounts WHERE join_code=?1)",
-            [&code],
-            |r| r.get(0),
-        )
-        .map_err(db_err)?;
-    if !valid {
-        return Err(StatusCode::NOT_FOUND);
+async fn join_get(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+) -> AppResult {
+    match user(&s, &headers) {
+        Ok(_) => return Ok(found_redirect("/")),
+        Err(StatusCode::UNAUTHORIZED) => {}
+        Err(error) => return Err(error),
     }
+    let db = pool(&s)?;
+    let account: Option<(String, String)> = db
+        .query_row(
+            "SELECT name,updated_at FROM accounts WHERE join_code=?1",
+            [&code],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(db_err)?;
+    let (account_name, updated_at) = account.ok_or(StatusCode::NOT_FOUND)?;
+    let owner: Option<(String, String)> = db
+        .query_row(
+            "SELECT name,email_address FROM users WHERE role=1 AND email_address IS NOT NULL ORDER BY id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(db_err)?;
+    let help_contact = owner.map(|(name, email)| {
+        let address = format!("mailto:\"{name}\" <{email}>");
+        format!("<div class=\"signup-help txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
+    }).unwrap_or_default();
+    let logo_version: String = updated_at.chars().filter(char::is_ascii_digit).take(14).collect();
+    let name_translation = profile_translation_button("Enter your name", [
+        "Introduce tu nombre", "Entrez votre nom", "अपना नाम दर्ज करें",
+        "Geben Sie Ihren Namen ein", "Insira seu nome", "お名前を入力してください",
+    ]);
+    let email_translation = profile_translation_button("Enter your email address", [
+        "Introduce tu correo electrónico", "Entrez votre adresse courriel",
+        "अपना ईमेल पता दर्ज करें", "Geben Sie Ihre E-Mail-Adresse ein",
+        "Insira seu endereço de email", "メールアドレスを入力してください",
+    ]);
+    let password_translation = profile_translation_button("Enter your password", [
+        "Introduce tu contraseña", "Saisissez votre mot de passe",
+        "अपना पासवर्ड दर्ज करें", "Geben Sie Ihr Passwort ein",
+        "Insira sua senha", "パスワードを入力してください",
+    ]);
+    let body = format!(
+        r#"<nav class="signup-nav"><a href="/session/new" class="btn"><img aria-hidden="true" src="/assets/login-keys-df926967.svg"><span class="for-screen-reader">Sign in</span></a></nav>
+<form class="center" enctype="multipart/form-data" action="/join/{code}" accept-charset="UTF-8" method="post">
+<section class="nametag u-relative"><div class="flex justify-center align-center pad-block"><img class="nametag__lanyard" aria-hidden="true" src="/assets/lanyard-945079e9.svg"></div>
+<div class="nametag__inner flex flex-column gap"><fieldset class="flex flex-column center-block"><legend class="txt-align-center flex gap"><figure class="account-logo avatar "><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure><strong class="txt-large">{account_name}</strong></legend>
+<label class="align-center center avatar__form gap" data-controller="upload-preview"><div class="btn input--file"><img aria-hidden="true" src="/assets/camera-927323b8.svg"><input class="input" accept="image/*" data-upload-preview-target="input" data-action="upload-preview#previewImage" type="file" name="user[avatar]" id="user_avatar"><span class="for-screen-reader">Upload avatar</span></div><div class="btn avatar input--file txt-xx-large"><img aria-hidden="true" data-upload-preview-target="image" src="/assets/default-avatar-1ee67b00.svg"><span class="for-screen-reader">Avatar</span></div></label></fieldset>
+<div class="flex align-center gap">{name_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="name" placeholder="Name" autofocus="autofocus" required="required" data-1p-ignore="true" type="text" name="user[name]" id="user_name"><img aria-hidden="true" class="colorize--black" src="/assets/person-da193438.svg" width="24" height="24"></label></div>
+<div class="flex align-center gap">{email_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="username" placeholder="Email address" required="required" type="email" name="user[email_address]" id="user_email_address"><img aria-hidden="true" class="colorize--black" src="/assets/email-6c595bc5.svg" width="24" height="24"></label></div>
+<div class="flex align-center gap">{password_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="new-password" placeholder="Password" required="required" maxlength="72" size="72" type="password" name="user[password]" id="user_password"><img aria-hidden="true" class="colorize--black" src="/assets/password-0896da4e.svg" width="24" height="24"></label></div>
+<button name="button" type="submit" class="btn btn--reversed center txt-large"><img aria-hidden="true" src="/assets/check-7897ff7e.svg"><span class="for-screen-reader">Save</span></button></div></section></form>{help_contact}"#,
+        code = esc(&code),
+        account_name = esc(&account_name),
+    );
     Ok(render_unauth(
-        "Join Rustfire",
-        &format!(
-            "<section class='auth-card'><h1>Join Rustfire</h1><form method='post' action='/join/{}'>{}{}{}<button class='button'>Join</button></form></section>",
-            esc(&code),
-            form_field("Your name", "name", "text"),
-            form_field("Email address", "email_address", "email"),
-            form_field("Password", "password", "password")
-        ),
+        "Sign up",
+        &body,
     ))
 }
 async fn join_post(
@@ -6893,8 +6943,13 @@ async fn join_post(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(code): Path<String>,
-    Form(f): Form<Signup>,
+    req: Request,
 ) -> AppResult {
+    match user(&s, &headers) {
+        Ok(_) => return Ok(found_redirect("/")),
+        Err(StatusCode::UNAUTHORIZED) => {}
+        Err(error) => return Err(error),
+    }
     let db = pool(&s)?;
     let valid: bool = db
         .query_row(
@@ -6906,14 +6961,96 @@ async fn join_post(
     if !valid {
         return Err(StatusCode::NOT_FOUND);
     }
-    if f.password.len() < 8 || !f.email_address.contains('@') {
+    drop(db);
+    let mut avatar = None;
+    let values = if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .starts_with("multipart/form-data")
+    {
+        let mut multipart = Multipart::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut values = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
+            let name = field.name().unwrap_or("").to_string();
+            if matches!(name.as_str(), "user[avatar]" | "avatar") {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                if !bytes.is_empty() {
+                    if !safe_inline_image(&content_type) || bytes.len() > 5 * 1024 * 1024 {
+                        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+                    }
+                    avatar = Some((bytes.to_vec(), content_type));
+                }
+            } else if matches!(
+                name.as_str(),
+                "name" | "user[name]" | "email_address" | "user[email_address]" | "password" | "user[password]"
+            ) {
+                values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
+            }
+        }
+        values
+    } else {
+        let RawForm(raw) = RawForm::from_request(req, &s)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        fields(&raw).0
+    };
+    let name = form_value(&values, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let email = form_value(&values, "email_address", "user[email_address]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let password = form_value(&values, "password", "user[password]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    if name.trim().is_empty() || password.is_empty() || !email.contains('@') {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
+    let email = email.trim().to_lowercase();
+    let mut db = pool(&s)?;
+    let existing: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [&email], |row| row.get(0))
+        .map_err(db_err)?;
+    if existing {
+        let encoded = form_urlencoded::Serializer::new(String::new())
+            .append_pair("email_address", &email)
+            .finish();
+        return Ok(found_redirect(&format!("/session/new?{encoded}")));
+    }
     let t = now();
-    let pw = hash(&f.password, DEFAULT_COST).map_err(db_err)?;
-    db.execute("INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,0,0,?4,?4)",params![f.name.trim(),f.email_address.trim().to_lowercase(),pw,t]).map_err(|_|StatusCode::CONFLICT)?;
-    let uid = db.last_insert_rowid();
-    db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) SELECT id,?1,'mentions',?2 FROM rooms WHERE type='Rooms::Open'",params![uid,t]).map_err(db_err)?;
+    let pw = hash(password, DEFAULT_COST).map_err(db_err)?;
+    let tx = db.transaction().map_err(db_err)?;
+    if let Err(error) = tx.execute(
+        "INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,0,0,?4,?4)",
+        params![name.trim(), email, pw, t],
+    ) {
+        drop(tx);
+        let duplicate: bool = db
+            .query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [&email], |row| row.get(0))
+            .map_err(db_err)?;
+        if duplicate {
+            let encoded = form_urlencoded::Serializer::new(String::new())
+                .append_pair("email_address", &email)
+                .finish();
+            return Ok(found_redirect(&format!("/session/new?{encoded}")));
+        }
+        return Err(db_err(error));
+    }
+    let uid = tx.last_insert_rowid();
+    tx.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) SELECT id,?1,'mentions',?2 FROM rooms WHERE type='Rooms::Open'",params![uid,t]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    drop(db);
+    if let Some((bytes, content_type)) = avatar {
+        if let Err(error) = save_avatar(&s, uid, bytes, content_type) {
+            pool(&s)?.execute("DELETE FROM users WHERE id=?1", [uid]).map_err(db_err)?;
+            return Err(error);
+        }
+    }
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
 fn profile_translation_button(english: &str, translations: [&str; 6]) -> String {

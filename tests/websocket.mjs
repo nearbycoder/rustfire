@@ -17,7 +17,7 @@ try{
   const setupCookie=setupPage.headers.get('set-cookie').split(';')[0];
   const setupCsrf=(await setupPage.text()).match(/<meta name='csrf-token' content='([^']+)'/)[1];
   const setup=await fetch(base+'/first_run',{method:'POST',headers:{Cookie:setupCookie,'X-CSRF-Token':setupCsrf,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({name:'Socket',email_address:'socket@example.com',password:'socketpass123'}),redirect:'manual'});
-  assert.equal(setup.status,303);const cookie=setup.headers.get('set-cookie').split(';')[0];
+  assert.equal(setup.status,302);const cookie=setup.headers.get('set-cookie').split(';')[0];
   const csrfPage=await fetch(base+'/rooms/1',{headers:{Cookie:cookie}});
   const roomHtml=await csrfPage.text();
   const csrf=roomHtml.match(/<meta name='csrf-token' content='([^']+)'/)[1];
@@ -152,7 +152,7 @@ try{
   const joinCookie=joinPage.headers.get('set-cookie').split(';')[0];
   const joinCsrf=(await joinPage.text()).match(/<meta name='csrf-token' content='([^']+)'/)[1];
   const joined=await fetch(base+'/join/'+joinCode,{method:'POST',headers:{Cookie:joinCookie,'X-CSRF-Token':joinCsrf,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({name:'Other',email_address:'other@example.com',password:'otherpass123'}),redirect:'manual'});
-  assert.equal(joined.status,303);const otherCookie=joined.headers.get('set-cookie').split(';')[0];
+  assert.equal(joined.status,302);const otherCookie=joined.headers.get('set-cookie').split(';')[0];
   const otherPage=await fetch(base+'/rooms/1',{headers:{Cookie:otherCookie}});
   const otherCsrf=(await otherPage.text()).match(/<meta name='csrf-token' content='([^']+)'/)[1];
   const otherPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:otherCookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':otherCsrf},body:new URLSearchParams({'message[body]':'from other','message[client_message_id]':'ws-other'})});assert.equal(otherPost.status,201);
