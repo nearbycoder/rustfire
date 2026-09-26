@@ -76,6 +76,9 @@ def main():
                 rust_sgid = mention_sgid(rust_port, rust_cookie, False)
                 rust_nonmember_sgid = mention_sgid(rust_port, rust_cookie, False, 3)
                 rust_markup = {case: post(rust_port, rust_cookie, rust_csrf, rust_nonmember_sgid if case == "nonmember" else rust_sgid, case) for case in ("bare", "embedded-content", "trix-figure", "duplicate", "nonmember")}
+                with sqlite3.connect(rust_db) as db:
+                    db.execute("UPDATE users SET status=2 WHERE id=2")
+                rust_markup["banned"] = post(rust_port, rust_cookie, rust_csrf, rust_sgid, "banned")
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -86,6 +89,9 @@ def main():
                     camp_sgid = mention_sgid(camp_port, camp_cookie, True)
                     camp_nonmember_sgid = mention_sgid(camp_port, camp_cookie, True, 3)
                     camp_markup = {case: post(camp_port, camp_cookie, camp_csrf, camp_nonmember_sgid if case == "nonmember" else camp_sgid, case) for case in ("bare", "embedded-content", "trix-figure", "duplicate", "nonmember")}
+                    with sqlite3.connect(camp_db) as db:
+                        db.execute("UPDATE users SET status=2 WHERE id=2")
+                    camp_markup["banned"] = post(camp_port, camp_cookie, camp_csrf, camp_sgid, "banned")
                 finally:
                     stop_server(camp)
         finally:
@@ -104,12 +110,12 @@ def main():
         assert rust_markup[case] == camp_markup[case], (case, rust_markup[case], camp_markup[case])
         if case != "nonmember":
             assert ("a", (("class", "btn avatar"), ("href", "/users/2"), ("title", "Rustfire Compare – Team lead"))) in rust_markup[case]
-    expected_search = [("Hello @Rustfire Compare!",)] * 3 + [("Hello @Rustfire Compare @Rustfire Compare!",), ("Hello @User 3!",)]
+    expected_search = [("Hello @Rustfire Compare!",)] * 3 + [("Hello @Rustfire Compare @Rustfire Compare!",), ("Hello @User 3!",), ("Hello @Rustfire Compare!",)]
     assert rust_search == camp_search == expected_search, (rust_search, camp_search)
     rust_mentions = [(client_id, [] if user_id is None else [user_id]) for client_id, user_id in rust_mentions]
     expected_mentions = [[f"paired-mention-{case}", [2] if case != "nonmember" else []] for case in rust_markup]
     assert rust_mentions == [tuple(row) for row in camp_mentions] == [tuple(row) for row in expected_mentions], (rust_mentions, camp_mentions)
-    print("PASS signed mention presentation, search text, duplicate recipient deduplication, and nonmember exclusion match pinned Campfire")
+    print("PASS signed mention presentation, search text, duplicate and banned recipients, and nonmember exclusion match pinned Campfire")
 
 
 if __name__ == "__main__":

@@ -5066,7 +5066,7 @@ fn insert_message(
     touch_room(&db, rid)?;
     let mut valid_mentions = Vec::new();
     for mentioned_id in candidate_mentions {
-        let allowed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND m.user_id=?2 AND u.status=0)",params![rid,mentioned_id],|r|r.get(0)).map_err(db_err)?;
+        let allowed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM memberships WHERE room_id=?1 AND user_id=?2)",params![rid,mentioned_id],|r|r.get(0)).map_err(db_err)?;
         if allowed {
             db.execute(
                 "INSERT OR IGNORE INTO message_mentions(message_id,user_id) VALUES(?1,?2)",
@@ -5153,6 +5153,38 @@ struct PushSubscription {
     p256dh_key: String,
     auth_key: String,
 }
+fn push_recipients(
+    db: &rusqlite::Connection,
+    room_id: i64,
+    creator_id: i64,
+    cutoff: &str,
+    mention_ids: &[i64],
+) -> Result<Vec<(PushSubscription, i64)>, StatusCode> {
+    let mut query=db.prepare("SELECT p.id,p.endpoint,p.p256dh_key,p.auth_key,m.user_id,(SELECT count(*) FROM memberships um WHERE um.user_id=m.user_id AND um.unread_at IS NOT NULL),m.involvement FROM push_subscriptions p JOIN memberships m ON m.user_id=p.user_id WHERE m.room_id=?1 AND m.user_id!=?2 AND (m.connected_at IS NULL OR m.connected_at<?3) AND m.involvement IN ('everything','mentions') ORDER BY CASE m.involvement WHEN 'everything' THEN 0 ELSE 1 END,p.id").map_err(db_err)?;
+    let rows = query
+        .query_map(params![room_id, creator_id, cutoff], |r| {
+            Ok((
+                PushSubscription {
+                    id: r.get(0)?,
+                    endpoint: r.get(1)?,
+                    p256dh_key: r.get(2)?,
+                    auth_key: r.get(3)?,
+                },
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(db_err)?;
+    let mut recipients = Vec::new();
+    for row in rows {
+        let (subscription, user_id, badge, involvement) = row.map_err(db_err)?;
+        if involvement == "everything" || mention_ids.contains(&user_id) {
+            recipients.push((subscription, badge));
+        }
+    }
+    Ok(recipients)
+}
 struct PushBody(Vec<u8>);
 impl From<Vec<u8>> for PushBody {
     fn from(value: Vec<u8>) -> Self {
@@ -5174,25 +5206,7 @@ fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCo
         )
         .map_err(db_err)?;
     let cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
-    let mut query=db.prepare("SELECT p.id,p.endpoint,p.p256dh_key,p.auth_key,m.user_id,(SELECT count(*) FROM memberships um WHERE um.user_id=m.user_id AND um.unread_at IS NOT NULL),m.involvement FROM push_subscriptions p JOIN memberships m ON m.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE m.room_id=?1 AND m.user_id!=?2 AND u.status=0 AND (m.connected_at IS NULL OR m.connected_at<?3) AND m.involvement IN ('everything','mentions')").map_err(db_err)?;
-    let rows = query
-        .query_map(params![message.room_id, message.creator_id, cutoff], |r| {
-            Ok((
-                PushSubscription {
-                    id: r.get(0)?,
-                    endpoint: r.get(1)?,
-                    p256dh_key: r.get(2)?,
-                    auth_key: r.get(3)?,
-                },
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, String>(6)?,
-            ))
-        })
-        .map_err(db_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    drop(query);
+    let rows = push_recipients(&db, message.room_id, message.creator_id, &cutoff, &message.mention_ids)?;
     drop(db);
     let direct = message.room_kind.as_deref() == Some("Rooms::Direct");
     let title = if direct {
@@ -5201,10 +5215,7 @@ fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCo
         room_name
     };
     let body = push_message_body(message, direct);
-    for (subscription, user_id, badge, involvement) in rows {
-        if involvement == "mentions" && !message.mention_ids.contains(&user_id) {
-            continue;
-        }
+    for (subscription, badge) in rows {
         let Ok(queue_permit) = s.push_queue_slots.clone().try_acquire_owned() else {
             break;
         };
@@ -5803,7 +5814,7 @@ async fn message_update(
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
         ) {
-            let allowed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.room_id=?1 AND m.user_id=?2 AND u.status=0)",params![rid,mentioned_id],|r|r.get(0)).map_err(db_err)?;
+            let allowed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM memberships WHERE room_id=?1 AND user_id=?2)",params![rid,mentioned_id],|r|r.get(0)).map_err(db_err)?;
             if allowed {
                 db.execute(
                     "INSERT OR IGNORE INTO message_mentions(message_id,user_id) VALUES(?1,?2)",
@@ -11396,6 +11407,25 @@ mod tests {
         ));
         assert!(!valid_push_endpoint("https://fcm.googleapis.com:444/push"));
         assert!(!valid_push_endpoint("http://fcm.googleapis.com/push"));
+    }
+    #[test]
+    fn push_targets_follow_campfire_membership_scopes_even_after_ban() {
+        let db = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .unwrap();
+        super::init_db(&db).unwrap();
+        let conn = db.get().unwrap();
+        for id in 1..=8 {
+            conn.execute("INSERT INTO users(id,name,status,created_at,updated_at) VALUES(?1,?2,?3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", rusqlite::params![id,format!("User {id}"),if id==2||id==4 {2} else {0}]).unwrap();
+        }
+        conn.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(1,'Room','Rooms::Open',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", []).unwrap();
+        for (id, involvement) in [(1,"everything"),(2,"everything"),(3,"everything"),(4,"mentions"),(5,"mentions"),(6,"invisible"),(7,"everything"),(8,"nothing")] {
+            conn.execute("INSERT INTO memberships(room_id,user_id,involvement,unread_at,connected_at,created_at) VALUES(1,?1,?2,?3,?4,'2026-01-01T00:00:00Z')", rusqlite::params![id,involvement,if id==2 {Some("2026-01-01T00:00:00Z")} else {None},if id==7 {Some("2026-01-02T00:00:00Z")} else {None}]).unwrap();
+            conn.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,created_at,updated_at) VALUES(?1,?1,?2,'key','auth','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", rusqlite::params![id,format!("https://fcm.googleapis.com/fcm/send/{id}")]).unwrap();
+        }
+        let recipients = super::push_recipients(&conn, 1, 1, "2026-01-01T00:00:00Z", &[4]).unwrap();
+        assert_eq!(recipients.iter().map(|(subscription, badge)| (subscription.id, *badge)).collect::<Vec<_>>(), vec![(2,1),(3,0),(4,0)]);
     }
     #[test]
     fn opengraph_parser_reads_meta_name_and_property() {
