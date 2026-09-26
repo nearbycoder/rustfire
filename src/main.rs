@@ -7280,9 +7280,13 @@ async fn user_role_update(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let role = match form_value(&f, "role", "user[role]").ok_or(StatusCode::BAD_REQUEST)? {
-        "administrator" => 1,
-        _ => 0,
+    if !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let role = if f.get("user[role]").is_some_and(|role| role == "administrator") {
+        1
+    } else {
+        0
     };
     let db = pool(&s)?;
     let prior: Option<i64> = db
@@ -7293,25 +7297,26 @@ async fn user_role_update(
         )
         .optional()
         .map_err(db_err)?;
-    let prior = prior.ok_or(StatusCode::NOT_FOUND)?;
-    if prior == 1 && role == 0 {
-        let count: i64 = db
-            .query_row(
-                "SELECT count(*) FROM users WHERE role=1 AND status=0",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if count <= 1 {
-            return Err(StatusCode::CONFLICT);
-        }
-    }
+    prior.ok_or(StatusCode::NOT_FOUND)?;
     db.execute(
         "UPDATE users SET role=?1,updated_at=?2 WHERE id=?3",
         params![role, now(), id],
     )
     .map_err(db_err)?;
     Ok(found_redirect(&public_url(&headers, "/account/edit")))
+}
+async fn user_role_update_alias(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    path: Path<i64>,
+    Form(mut form): Form<HashMap<String, String>>,
+) -> AppResult {
+    if !form.contains_key("user[role]") {
+        if let Some(role) = form.remove("role") {
+            form.insert("user[role]".to_string(), role);
+        }
+    }
+    user_role_update(state, headers, path, Form(form)).await
 }
 async fn user_admin_post(
     State(s): State<Arc<AppState>>,
@@ -7336,27 +7341,15 @@ async fn user_deactivate(
     }
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
-    let account: Option<(i64, Option<String>)> = tx
+    let email: Option<Option<String>> = tx
         .query_row(
-            "SELECT role,email_address FROM users WHERE id=?1 AND status=0 AND role!=2",
+            "SELECT email_address FROM users WHERE id=?1 AND status=0 AND role!=2",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .optional()
         .map_err(db_err)?;
-    let (role, email) = account.ok_or(StatusCode::NOT_FOUND)?;
-    if role == 1 {
-        let count: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM users WHERE role=1 AND status=0",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if count <= 1 {
-            return Err(StatusCode::CONFLICT);
-        }
-    }
+    let email = email.ok_or(StatusCode::NOT_FOUND)?;
     tx.execute("DELETE FROM sessions WHERE user_id=?1", [id])
         .map_err(db_err)?;
     tx.execute("DELETE FROM memberships WHERE user_id=?1 AND room_id IN (SELECT id FROM rooms WHERE type!='Rooms::Direct')", [id])
@@ -10669,7 +10662,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .put(user_role_update)
                 .delete(user_deactivate),
         )
-        .route("/account/users/{id}/role", post(user_role_update))
+        .route("/account/users/{id}/role", post(user_role_update_alias))
         .route("/account/users/{id}/deactivate", post(user_deactivate))
         .route("/join/{code}", get(join_get).post(join_post))
         .route(

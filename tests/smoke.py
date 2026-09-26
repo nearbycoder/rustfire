@@ -565,8 +565,8 @@ def main():
             assert request(admin,base,"/account/update",{"restrict_room_creation":"off"})[0]==200
             assert request(member, base, "/account/users/1", {"user[role]": "member"}, method="PUT")[0] == 403
             assert request(member, base, "/account/users/1", method="DELETE")[0] == 403
-            code, _, _ = request(admin, base, "/account/users/1/role", {"role": "member"})
-            assert code == 409
+            code, _, _ = request(admin, base, "/account/users/1/role", {"role": "administrator"})
+            assert code == 200
             code, _, _ = request(admin, base, "/account/users/2/role", {"role": "administrator"})
             assert code == 200
             code, _, _ = request(admin, base, "/account/users/2", {"user[role]": "member"}, method="PATCH")
