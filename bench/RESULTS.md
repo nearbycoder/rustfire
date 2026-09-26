@@ -986,3 +986,7 @@ The release build passed `python bench/paired_message_multi.py --rooms 4 --users
 | Yes | 3,173 / 29.06 ms | 32.31 ms | 100.60 | 1,476 / 80.42 ms | 118.99 ms | 3,967.72 |
 
 Rustfire served **2.10–2.15×** as many checked reads per second at the same socket count, with lower read and write p95 in both orders. Both apps ran serially on one 32-logical-CPU host with disposable SQLite; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Socket setup preceded the measured 30 seconds. This run improves identity coverage over the one-account-per-room trial, but it does not establish maximum concurrent users, connection rate, hours of steady load, rich content or upload throughput, push delivery, or full application parity.
+
+## Browser composer previews and mixed attachments
+
+`python bench/paired_composer_browser.py` passed against pinned Campfire in local Chromium. Both apps sorted queued PNG/JPEG cards the same way, rendered the same preview-card elements and visible labels, removed and re-added the first file, showed a pending upload after Send, cleared the queue, and displayed all three saved text and attachment messages. The saved 47 MB PNG and 13 KB JPEG matched the source fixture bytes in both storage systems. The first Rustfire run exposed its former 25 MB request limit; the release build now accepts this fixture under a 128 MB limit. This is one browser flow and not a throughput test or proof of behavior for larger files, interrupted uploads, or other browsers.

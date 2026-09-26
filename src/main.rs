@@ -2680,7 +2680,7 @@ async fn reject_banned_ip(
                     .unwrap_or("")
                     .to_string();
                 let (parts, body) = request.into_parts();
-                let bytes = match to_bytes(body, 25 * 1024 * 1024).await {
+                let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
                     Ok(bytes) => bytes,
                     Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
                 };
@@ -10861,7 +10861,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .nest_service("/assets", ServeDir::new("static/assets"))
         .nest_service("/static", ServeDir::new("static"))
-        .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(axum::middleware::from_fn(reject_unsupported_browser))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

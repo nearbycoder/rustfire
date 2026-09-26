@@ -414,11 +414,18 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       if(!fragment)continue;
       if(action==='append'){
         if(target===messages&&historyMode){updateReturnButton();continue;}
-        for(const node of [...fragment.children])if(node.id&&document.getElementById(node.id))node.remove();
-        if(!fragment.childNodes.length)continue;
         const scrollToLatest=target===messages&&(nearBottom()||[...fragment.querySelectorAll('.message')].some(node=>node.dataset.userId===currentUserId));
-        const addedMessages=[...fragment.querySelectorAll('.message[data-message-id]')];
-        target.append(fragment);
+        const replacedMessages=[];
+        for(const node of [...fragment.children])if(node.id){
+          const existing=document.getElementById(node.id);
+          if(existing){
+            if(existing.classList.contains('message')&&!existing.dataset.messageId){existing.replaceWith(node);replacedMessages.push(node)}
+            else node.remove();
+          }
+        }
+        if(!fragment.childNodes.length&&!replacedMessages.length)continue;
+        const addedMessages=[...fragment.querySelectorAll('.message[data-message-id]'),...replacedMessages.filter(node=>node.matches('.message[data-message-id]'))];
+        if(fragment.childNodes.length)target.append(fragment);
         if(target===messages){
           formatLocalTimes(messages);decorateOwn();formatMessageGroups();
           if(!catchingUp)for(const node of addedMessages)cursor=Math.max(cursor,Number(node.dataset.messageId));
@@ -505,20 +512,22 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   const queuedFiles=[];
   const renderQueuedFiles=()=>{
     fileList.replaceChildren();
-    fileList.hidden=queuedFiles.length===0;
     queuedFiles.forEach((entry,index)=>{
-      const card=document.createElement('div');card.className='composer-file';
-      const thumb=document.createElement('img');thumb.className='composer-file-thumb';thumb.src=entry.url||'/static/icons/common-file-text.svg';thumb.alt='';
-      const name=document.createElement('span');name.className='composer-file-name';name.textContent=entry.file.name;
-      const remove=document.createElement('button');remove.type='button';remove.className='composer-file-remove';remove.textContent='×';remove.setAttribute('aria-label',`Remove ${entry.file.name}`);remove.disabled=!!entry.uploading;
-      remove.addEventListener('click',()=>{if(entry.url)URL.revokeObjectURL(entry.url);queuedFiles.splice(index,1);renderQueuedFiles()});
-      card.append(thumb,name,remove);
-      if(entry.uploading){const status=document.createElement('small');status.textContent='Uploading…';card.append(status)}
+      const card=document.createElement('button');card.type='button';card.setAttribute('style','gap: 0');card.className='btn btn--plain composer__file txt-normal position-relative unpad flex-column';card.dataset.action='composer#fileUnpicked';card.dataset.composerIndexParam=String(index);
+      const thumb=entry.url?document.createElement('img'):document.createElement('span');
+      thumb.className=entry.url?'flex-item-no-shrink composer__file-thumbnail':'composer__file-thumbnail composer__file-thumbnail--common colorize--black';
+      if(entry.url){thumb.src=entry.url;thumb.setAttribute('role','presentation')}
+      const caption=document.createElement('span');caption.className='pad-inline txt-small flex align-center max-width composer__file-caption';
+      const basename=document.createElement('span');basename.className='overflow-ellipsis';
+      const extension=document.createElement('span');extension.className='flex-item-no-shrink';
+      const parts=entry.file.name.split('.');extension.textContent=parts.pop();basename.textContent=parts.length?`${parts.join('.')}.`:'';
+      caption.append(basename,extension);card.append(thumb,caption);
+      card.addEventListener('click',()=>{if(entry.url)URL.revokeObjectURL(entry.url);queuedFiles.splice(index,1);renderQueuedFiles()});
       fileList.append(card);
     });
   };
   const addFiles=files=>{
-    for(const file of files)queuedFiles.push({file,url:file.type.startsWith('image/')?URL.createObjectURL(file):null,uploading:false});
+    for(const file of files)queuedFiles.push({file,url:file.type.startsWith('image/')?URL.createObjectURL(file):null});
     queuedFiles.sort((a,b)=>a.file.name.localeCompare(b.file.name));
     renderQueuedFiles();
   };
@@ -526,29 +535,56 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
   composer.addEventListener('paste',event=>{if(event.clipboardData?.files?.length){event.preventDefault();addFiles(event.clipboardData.files)}});
   composer.addEventListener('dragover',event=>{if(Array.from(event.dataTransfer?.types||[]).includes('Files'))event.preventDefault()});
   composer.addEventListener('drop',event=>{if(event.dataTransfer?.files?.length){event.preventDefault();addFiles(event.dataTransfer.files)}});
+  const pendingTemplate=chat.querySelector('script[data-messages-target="template"]')?.innerHTML;
+  const escapeHtml=value=>{const span=document.createElement('span');span.textContent=value;return span.innerHTML};
+  const pendingUpload=(filename,percent=0)=>`<div class="message__pending-upload flex align-center gap" style="--percentage: ${percent}%"><div class="composer__file-thumbnail composer__file-thumbnail--common colorize--black borderless flex-item-no-shrink"></div><div>${escapeHtml(filename)} - <span>${percent}%</span></div></div>`;
+  const insertPending=(id,body,plainText='')=>{
+    if(!pendingTemplate)return;
+    const now=new Date();
+    const values={clientMessageId:id,body,messageTimestamp:String(now.getTime()),messageDatetime:now.toISOString(),messageClasses:/^(\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F)+$/u.test(plainText)?'message--emoji':''};
+    let html=pendingTemplate;
+    for(const [key,value] of Object.entries(values))html=html.replaceAll(`$${key}$`,value);
+    messages.insertAdjacentHTML('beforeend',html);
+    formatLocalTimes(messages);decorateOwn();formatMessageGroups();messages.scrollTop=messages.scrollHeight;
+  };
+  const failPending=id=>document.getElementById(`message_${id}`)?.classList.add('message--failed');
+  const updatePending=(id,body)=>{const content=document.getElementById(`message_${id}`)?.querySelector('.message__body-content');if(content)content.innerHTML=body};
+  const postPending=async(id,body)=>{
+    const response=await fetch(composer.action,{method:'POST',body,headers:{Accept:'text/vnd.turbo-stream.html','X-CSRF-Token':csrfToken}});
+    if(!response.ok)throw Error(`Message returned ${response.status}`);
+    applyRoomStream(await response.text());
+  };
+  const uploadPending=(id,file)=>new Promise((resolve,reject)=>{
+    const body=new FormData();body.append('message[attachment]',file,file.name);body.append('message[client_message_id]',id);
+    const request=new XMLHttpRequest();request.open('POST',composer.action);request.setRequestHeader('X-CSRF-Token',csrfToken);request.setRequestHeader('Accept','text/vnd.turbo-stream.html');
+    request.upload.addEventListener('progress',event=>{if(event.lengthComputable)updatePending(id,pendingUpload(file.name,Math.round(event.loaded/event.total*100)))});
+    request.addEventListener('load',()=>{if(request.status>=200&&request.status<400){applyRoomStream(request.responseText);resolve()}else reject(Error(`Upload returned ${request.status}`))});
+    request.addEventListener('error',()=>reject(Error('Upload failed')));request.send(body);
+  });
   let sending=false;
   composer.addEventListener('submit', async e => {
     e.preventDefault(); const form=e.currentTarget;
     if(sending||(!typingInput.editor?.getDocument().toString().trim()&&!queuedFiles.length))return;
     sending=true;
-    const sendingFiles=[...queuedFiles];sendingFiles.forEach(entry=>entry.uploading=true);renderQueuedFiles();
+    const sendingFiles=queuedFiles.splice(0);renderQueuedFiles();
     clearTimeout(typingTimer);sendTyping('stop');
-    try{
-      if(typingInput.editor?.getDocument().toString().trim()){
-        const body=new FormData(form);body.delete('message[attachment]');
-        const response=await fetch(form.action,{method:'POST',body,headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
-        if(!response.ok)throw Error('Could not send message');
-        bodyInput.value='';typingInput.editor.loadHTML('');form.querySelector('[name="message[client_message_id]"]').value=crypto.randomUUID();
-      }
-      for(const entry of sendingFiles){
-        const body=new FormData();body.append('message[attachment]',entry.file,entry.file.name);body.append('message[client_message_id]',crypto.randomUUID());
-        const response=await fetch(form.action,{method:'POST',body,headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
-        if(!response.ok)throw Error(`Could not upload ${entry.file.name}`);
-        queuedFiles.splice(queuedFiles.indexOf(entry),1);if(entry.url)URL.revokeObjectURL(entry.url);renderQueuedFiles();
-      }
-      if(historyMode)location.href=`/rooms/${roomId}`;
-    }catch(error){sendingFiles.forEach(entry=>entry.uploading=false);renderQueuedFiles();alert(error.message||'Could not send message')}
-    finally{sending=false}
+    const fileTask=(async()=>{for(const entry of sendingFiles){
+      const id=crypto.randomUUID();insertPending(id,pendingUpload(entry.file.name));
+      try{await uploadPending(id,entry.file)}catch(error){failPending(id);throw error}
+      finally{if(entry.url)URL.revokeObjectURL(entry.url)}
+    }})();
+    const textTask=(async()=>{
+      const plain=typingInput.textContent.trim();if(!plain)return;
+      const id=crypto.randomUUID();const html=typingInput.innerHTML;
+      insertPending(id,`<div class="trix-content">${html}</div>`,plain);
+      const body=new FormData(form);body.delete('message[attachment]');body.set('message[client_message_id]',id);
+      bodyInput.value='';typingInput.editor.loadHTML('');form.querySelector('[name="message[client_message_id]"]').value=crypto.randomUUID();
+      try{await postPending(id,body)}catch(error){failPending(id);throw error}
+    })();
+    const outcomes=await Promise.allSettled([fileTask,textTask]);
+    sending=false;
+    if(historyMode)location.href=`/rooms/${roomId}`;
+    const failed=outcomes.find(result=>result.status==='rejected');if(failed)alert(failed.reason.message||'Could not send message');
   });
   function revealBoost(node){
     const boost=node.closest('.boost-item');
