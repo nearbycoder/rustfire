@@ -24,7 +24,7 @@ from direct_lookup import ROOT, free_port, start_server, stop_server
 from message_markup import check_message_markup
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
-from paired_message_cache import fetch
+from paired_message_cache import fetch, resource_snapshot
 
 
 def seed_fixture(rust_db, camp_db, rooms, users):
@@ -132,7 +132,7 @@ def writer(port, rid, uid, cookie, csrf, count, seconds, result):
         connection.close()
 
 
-def measure(binary, port, identities, rooms, users, clients, seconds, count, directory, label, sockets_per_room):
+def measure(binary, port, identities, rooms, users, clients, seconds, count, directory, label, sockets_per_room, resource_pids=()):
     targets = [{"path": f"/rooms/{rid}/messages", "cookie": identities[uid][0]} for rid in range(1, rooms + 1) for uid in range(1, users + 1)]
     targets_file = directory / f"{label}-targets.json"
     targets_file.write_text(json.dumps(targets))
@@ -141,6 +141,14 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
     threads = []
     writes = []
     reader = None
+    resource_stop = threading.Event()
+    resource_samples = []
+    sampler = None
+
+    def sample_resources():
+        while not resource_stop.wait(0.5):
+            resource_samples.append(resource_snapshot(resource_pids))
+
     try:
         if sockets_per_room:
             for rid in range(1, rooms + 1):
@@ -159,6 +167,10 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
         ready, _, _ = select.select([reader.stderr], [], [], max(90, seconds + 60))
         marker = reader.stderr.readline().strip() if ready else ""
         assert marker == "MEASURE_START", f"Reader did not start: {marker}"
+        if resource_pids:
+            resource_samples.append(resource_snapshot(resource_pids))
+            sampler = threading.Thread(target=sample_resources, daemon=True)
+            sampler.start()
         for rid in range(1, rooms + 1):
             uid = (rid - 1) % users + 1
             cookie, csrf = identities[uid]
@@ -170,6 +182,10 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
         stdout, stderr = reader.communicate(timeout=max(90, seconds + 60))
         for thread in threads:
             thread.join(timeout=45)
+        if sampler:
+            resource_stop.set()
+            sampler.join()
+            resource_samples.append(resource_snapshot(resource_pids))
         assert all(not thread.is_alive() for thread in threads), "Writer did not finish"
         assert all("error" not in item and item.get("writes") == count for item in writes), writes
         assert all(item["elapsed_s"] <= seconds for item in writes), ("Writes ran past the measured read interval", writes)
@@ -185,8 +201,17 @@ def measure(binary, port, identities, rooms, users, clients, seconds, count, dir
                 assert capture.returncode == 0 and delivery["missed"] == delivery["unexpected"] == delivery["closed_early"] == 0, (rid, delivery, stderr)
                 deliveries.append({"room": rid, **delivery})
             output["sockets"] = {"per_room": deliveries, "expected": sum(item["expected"] for item in deliveries), "received": sum(item["received"] for item in deliveries)}
+        if resource_samples:
+            output["resources"] = {
+                "server_cpu_seconds": round(resource_samples[-1][1] - resource_samples[0][1], 3),
+                "server_peak_pss_mib": round(max(item[0] for item in resource_samples) / 1048576, 2),
+                "server_processes_peak": max(item[2] for item in resource_samples),
+            }
         return output
     finally:
+        if sampler and sampler.is_alive():
+            resource_stop.set()
+            sampler.join()
         if reader and reader.poll() is None:
             reader.kill()
             reader.communicate()
@@ -244,6 +269,7 @@ def main():
     parser.add_argument("--write-rate", type=float, default=5, help="scheduled writes per second per room")
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--sockets-per-room", type=int, default=0, help="signed message-stream subscribers per room")
+    parser.add_argument("--resources", action="store_true", help="sample server CPU time and peak PSS during measured reads and writes (requires psutil)")
     parser.add_argument("--rustfire-first", action="store_true")
     args = parser.parse_args()
     if not (2 <= args.rooms <= 10 and 2 <= args.users <= 10 and args.clients >= args.rooms * args.users and args.seconds >= 2 and args.write_rate > 0 and args.campfire_workers > 0 and args.sockets_per_room >= 0):
@@ -251,6 +277,11 @@ def main():
     count = round(args.seconds * args.write_rate)
     if not 1 <= count <= 1000:
         parser.error("writes per room must be 1–1000")
+    if args.resources:
+        try:
+            import psutil  # noqa: F401
+        except ImportError:
+            parser.error("--resources requires the psutil Python package")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-message-multi-") as scratch:
         temp = pathlib.Path(scratch)
@@ -270,7 +301,7 @@ def main():
                 try:
                     identities = {uid: ("session_token=benchmark-session", "benchmark-csrf") if uid == 1 else (f"session_token=multi-session-{uid}", f"multi-csrf-{uid}") for uid in range(1, args.users + 1)}
                     pages = [fetch(rust_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
-                    result = measure(binary, rust_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, "rustfire", args.sockets_per_room)
+                    result = measure(binary, rust_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, "rustfire", args.sockets_per_room, (process.pid,) if args.resources else ())
                     check_final_pages(rust_port, identities[1][0], rust_db, args.rooms, False)
                     if args.sockets_per_room:
                         check_socket_events(rust_db, temp, "rustfire", args.rooms, count)
@@ -285,7 +316,7 @@ def main():
                         wait_for_server(camp_port, process)
                         identities = {uid: campfire_login(camp_port, uid) for uid in range(1, args.users + 1)}
                         pages = [fetch(camp_port, identities[1][0], f"/rooms/{rid}/messages")[2] for rid in range(1, args.rooms + 1)]
-                        result = measure(binary, camp_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, "campfire", args.sockets_per_room)
+                        result = measure(binary, camp_port, identities, args.rooms, args.users, args.clients, args.seconds, count, temp, "campfire", args.sockets_per_room, (process.pid, redis.pid) if args.resources else ())
                         check_final_pages(camp_port, identities[1][0], camp_db, args.rooms, True)
                         if args.sockets_per_room:
                             check_socket_events(camp_db, temp, "campfire", args.rooms, count)

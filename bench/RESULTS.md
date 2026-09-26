@@ -667,3 +667,12 @@ The same multi-user probe was repeated with **100 signed subscribers per room**,
 | 8 / 8 | 64 | 800 | 240 | Yes | 3,186 / 28.96 ms | 68.29 ms | 1,360 / 104.51 ms | 211.62 ms |
 
 Socket subscription and reader warmup were outside the measured read interval. Each room's writer finished within ten seconds. This checks delivery counts and message identity under mixed activity across several rooms and accounts; it does not compare full event bytes, measure delivery latency, or establish a sustained limit. All clients and servers shared one host.
+
+The eight-room, eight-user, 64-reader, 800-socket workload was then extended to **60 seconds** at three scheduled writes per second per room. Every writer finished within the read interval, and both apps saved **1,440** writes and delivered **144,000/144,000** expected events in each trial order. Measured read errors, missing or unexpected socket events, and early socket closes were all zero. CPU seconds and peak proportional set size (PSS) were sampled after socket setup and reader warmup through the read/write interval. Rustfire's resource total covers one server process; Campfire's includes the Puma parent, 22 workers, and isolated Redis. The Go reader and eight Node socket clients are excluded.
+
+| Rustfire first | Rustfire reads/s / read p95 | Rustfire write p95 | Rustfire CPU s / peak PSS MiB | Campfire reads/s / read p95 | Campfire write p95 | Campfire CPU s / peak PSS MiB |
+| :---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No | 3,079 / 29.89 ms | 58.45 ms | 1,550.58 / 166.88 | 1,500 / 98.43 ms | 138.95 ms | 1,284.55 / 4,148.51 |
+| Yes | 3,024 / 31.07 ms | 69.41 ms | 1,487.61 / 166.93 | 1,501 / 82.86 ms | 150.11 ms | 1,317.07 / 4,092.73 |
+
+The release Rustfire process sustained roughly twice the checked read rate with lower read and write p95 latency on this one-minute fixture, while using much less sampled server process memory under the tested 22-worker Campfire configuration. Rustfire consumed more aggregate server CPU seconds because it completed roughly twice as many reads. This is still a serial local comparison of plain-text messages in eight rooms, not a maximum connection count, an hours-long stability test, or proof of full-app superiority at complete parity.
