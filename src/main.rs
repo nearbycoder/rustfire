@@ -4338,7 +4338,7 @@ fn involvement_frame_html(rid: i64, kind: &str, current: &str, csrf_token: &str)
 async fn push_subscriptions_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
     let db = pool(&s)?;
-    let mut query=db.prepare("SELECT id,endpoint,COALESCE(user_agent,'') FROM push_subscriptions WHERE user_id=?1 ORDER BY id DESC").map_err(db_err)?;
+    let mut query=db.prepare("SELECT id,endpoint,COALESCE(user_agent,'') FROM push_subscriptions WHERE user_id=?1 ORDER BY id").map_err(db_err)?;
     let rows = query
         .query_map([u.id], |r| {
             Ok((
@@ -4350,17 +4350,45 @@ async fn push_subscriptions_get(State(s): State<Arc<AppState>>, headers: HeaderM
         .map_err(db_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
+    drop(query);
+    drop(db);
     let mut list = String::new();
+    let token = u.csrf_token.as_deref().unwrap_or("");
     for (id, endpoint, agent) in rows {
-        list.push_str(&format!("<li><strong>{}</strong><p class='overflow-ellipsis'>{}</p><form method='post' action='/users/me/push_subscriptions/{id}/test_notifications'><button class='button'>Send test notification</button></form><form method='post' action='/users/me/push_subscriptions/{id}/delete'><button class='button'>Delete subscription</button></form></li>",esc(&agent),esc(&endpoint)));
+        let label = push_subscription_agent_label(&agent);
+        list.push_str(&format!("<li class=\"flex flex-column margin-none membership-item\"><span class=\"overflow-ellipsis txt-primary txt-undecorated\"><strong>{}</strong><br></span><span class=\"flex align-start gap txt-small\"><span>{}</span><span class=\"flex align-center gap\"><form class=\"button_to\" method=\"post\" action=\"/users/me/push_subscriptions/{id}/test_notifications\"><button class=\"btn btn--reversed\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/notification-bell-everything-cde41b14.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Send test notification</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"></form><form class=\"button_to\" method=\"post\" action=\"/users/me/push_subscriptions/{id}\"><input type=\"hidden\" name=\"_method\" value=\"delete\"><button class=\"btn btn--negative\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/minus-b31a1093.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Delete subscription</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"></form></span></span></li>",esc(&label),esc(&endpoint),esc(token),esc(token)));
     }
-    Ok(render(
-        "Push notification subscriptions",
-        &format!(
-            "<section class='form-card'><h1>Push notification subscriptions</h1><button type='button' class='button' data-enable-push>Enable browser notifications</button><p data-push-status role='status'></p><ul>{list}</ul></section>"
-        ),
-        Some(&u),
-    ))
+    let back_room = cookie(&headers, "last_room")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| room_for(&s, u.id, *id).is_ok())
+        .or_else(|| rooms_for(&s, u.id).ok()?.first().map(|room| room.id));
+    let back_href = back_room.map_or("/".to_string(), |id| format!("/rooms/{id}"));
+    let nav = format!("<div class=\"flex-item-justify-start\"><a class=\"btn\" href=\"{back_href}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Go Back</span></a></div>");
+    let body = format!("<section class=\"panel panel--wide flex flex-column gap\"><h1 class=\"txt-align-center txt-large margin-none\">Push Notification Subscriptions</h1><div class=\"pad-inline fill-shade border-radius\" id=\"push_subscriptions\"><menu class=\"pad flex flex-column gap\">{list}</menu></div></section>");
+    Ok(render_source_page_sections("Push notification subscriptions", &body, &nav, "", "", "", "", "", Some(&u), token))
+}
+fn push_subscription_agent_label(agent: &str) -> String {
+    let agent = if agent.trim().is_empty() { "Mozilla/4.0 (compatible)" } else { agent };
+    let comment = agent.split_once('(').and_then(|(_, rest)| rest.split_once(')')).map(|(value, _)| value).unwrap_or("");
+    let parts: Vec<&str> = comment.split(';').map(str::trim).collect();
+    let first = parts.first().copied().unwrap_or("");
+    let platform = if first.starts_with("Windows") { "Windows" } else if parts.iter().any(|part| part.starts_with("CrOS")) { "ChromeOS" } else if parts.iter().any(|part| part.starts_with("Android")) { "Android" } else if first == "compatible" || first == "Mobile" { "" } else { first };
+    let version_of = |marker: &str| agent.split_once(marker).map(|(_, tail)| tail.split(|ch: char| ch.is_whitespace() || ch == ')').next().unwrap_or(""));
+    let (browser, version) = if let Some(version) = version_of("Edge/") {
+        ("Edge", version)
+    } else if let Some(version) = version_of("CriOS/").or_else(|| version_of("Chrome/")) {
+        ("Chrome", version)
+    } else if let Some(version) = version_of("Firefox/") {
+        ("Firefox", version)
+    } else if agent.contains("AppleWebKit/") {
+        (if platform == "Android" { "Android" } else { "Safari" }, version_of("Version/").unwrap_or(""))
+    } else if let Some(version) = version_of("MSIE ") {
+        ("Internet Explorer", version.trim_end_matches(';'))
+    } else {
+        let product = agent.split(|ch: char| ch == '/' || ch.is_whitespace()).next().unwrap_or("Mozilla");
+        (product, version_of(&format!("{product}/")).unwrap_or(""))
+    };
+    format!("{browser} {version} on {platform}")
 }
 #[derive(Deserialize)]
 struct PushSubscriptionInput {
@@ -4455,7 +4483,18 @@ async fn push_subscriptions_delete(
         })
         .map_err(db_err)?;
     s.has_push_subscriptions.store(any, Ordering::Relaxed);
-    Ok(Redirect::to("/users/me/push_subscriptions").into_response())
+    Ok(found_redirect("/users/me/push_subscriptions"))
+}
+async fn push_subscriptions_delete_post(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    path: Path<i64>,
+    RawForm(raw): RawForm,
+) -> AppResult {
+    if fields(&raw).0.get("_method").map(String::as_str) != Some("delete") {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    push_subscriptions_delete(state, headers, path).await
 }
 async fn push_test_notification(
     State(s): State<Arc<AppState>>,
@@ -4482,7 +4521,7 @@ async fn push_test_notification(
                 StatusCode::BAD_GATEWAY
             })?;
     }
-    Ok(Redirect::to("/users/me/push_subscriptions").into_response())
+    Ok(found_redirect("/users/me/push_subscriptions"))
 }
 async fn involvement_post(
     State(s): State<Arc<AppState>>,
@@ -10354,7 +10393,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/users/me/push_subscriptions/{id}",
-            delete(push_subscriptions_delete),
+            post(push_subscriptions_delete_post).delete(push_subscriptions_delete),
         )
         .route(
             "/users/me/push_subscriptions/{id}/delete",
