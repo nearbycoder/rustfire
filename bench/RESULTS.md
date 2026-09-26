@@ -763,3 +763,16 @@ After the sanitizer changes, `python bench/paired_message_mix.py --clients 32 --
 | No | 3,242 / 14.57 ms | 7.29 ms | 1,616 / 35.89 ms | 91.60 ms |
 
 Rustfire completed roughly twice as many checked reads and had lower sampled read and write latency under this local plain-message workload. The ten-second trials shared one host with the load generator and ran the apps serially; Campfire used 22 Puma workers and Rustfire one process. These checks do not compare each write's full Turbo event, rich-text sanitizer cases under load, long-lived sockets, or maximum sustainable capacity, and they do not establish a whole-app advantage at full parity.
+
+## Mixed rich-text reads, writes, and room fanout
+
+The paired mixed harness now supports `--rich-writes`, cycling five formatted bodies across 100 scheduled posts: bold links, safe classes beside rejected links, lists, time attributes, and raw images that Campfire removes. With 32 concurrent checked page readers, 100 posts over ten seconds, and signed room subscribers, both apps saved all posts and delivered every expected socket event. The harness compared the complete parsed initial and final latest-40 message pages after normalizing generated times and optional nonempty CSRF inputs. It also compared the parsed markup of every one of the 100 paired Turbo appends, while checking delivery counts and message identity on every socket. All comparisons passed with zero measured read errors, missing or unexpected events, or early socket closes. Campfire used 22 Puma workers and isolated Redis; Rustfire used one release process. Both apps and the load generator ran serially on the same host.
+
+| Subscribers | Rustfire first | Deliveries per app | Rustfire reads/s / read p95 | Rustfire write p95 | Campfire reads/s / read p95 | Campfire write p95 |
+| ---: | :---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | Yes | 10,000 | 3,263 / 14.03 ms | 7.92 ms | 1,401 / 53.84 ms | 88.83 ms |
+| 100 | No | 10,000 | 2,891 / 16.43 ms | 9.76 ms | 1,454 / 41.96 ms | 85.82 ms |
+| 1,000 | Yes | 100,000 | 3,121 / 15.28 ms | 8.51 ms | 1,205 / 59.24 ms | 75.82 ms |
+| 1,000 | No | 100,000 | 2,991 / 16.09 ms | 9.39 ms | 1,150 / 59.88 ms | 86.53 ms |
+
+Rustfire had higher checked read throughput and lower read and write p95 in all four trials. Each app completed its 100 writes within the ten-second reader interval. These short runs cover five sampled rich-text bodies in one room, not all ActionText attachments or notification side effects. The reader checks response status, type, and message count during the timed interval; it does not compare every measured page body. This does not establish a maximum subscriber count or a whole-app speed advantage at full parity.

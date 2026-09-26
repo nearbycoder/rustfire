@@ -21,6 +21,7 @@ from direct_lookup import ROOT, free_port, start_server, stop_server
 from message_markup import check_message_markup
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_link_preview import PreviewPageMarkup
 from paired_message_cache import fetch, seed_additional_messages, set_distinct_creation_times
 from paired_room_refresh import seed_messages
 from paired_turbo_fanout import MessageTagSequence, check_message_times, stable_message_attributes
@@ -34,7 +35,21 @@ class StreamWithoutCsrfInputs(MessageTagSequence):
         super().handle_starttag(tag, attrs)
 
 
-def writer(port, cookie, csrf, count, seconds, result):
+def message_body(index, rich_writes):
+    text = f"mixed message {index}"
+    if not rich_writes:
+        return text
+    variants = [
+        f"<div><strong>{text}</strong> <a class='sample-link' href='https://example.com/{index}'>link</a></div>",
+        f"<div>{text} <span class='sample'>safe</span> <a href='javascript:alert(1)'>unsafe</a></div>",
+        f"<div>{text}<ul><li>one</li><li><code>two</code></li></ul></div>",
+        f"<div>{text} <time datetime='2024-01-01'>date</time></div>",
+        f"<div>{text} <img src='https://example.com/untrusted.svg'>after image</div>",
+    ]
+    return variants[(index - 1) % len(variants)]
+
+
+def writer(port, cookie, csrf, count, seconds, result, rich_writes):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     latencies = []
     started = time.monotonic()
@@ -46,7 +61,7 @@ def writer(port, cookie, csrf, count, seconds, result):
                 time.sleep(delay)
             client_id = f"mixed-{index + 1}"
             fields = urllib.parse.urlencode({
-                "message[body]": f"mixed message {index + 1}",
+                "message[body]": message_body(index + 1, rich_writes),
                 "message[client_message_id]": client_id,
                 "authenticity_token": csrf,
             })
@@ -68,7 +83,7 @@ def writer(port, cookie, csrf, count, seconds, result):
         connection.close()
 
 
-def measure(binary, port, cookie, csrf, clients, seconds, count, sockets=0, invalid_sample=None, stream_sample=None, stream_events=None):
+def measure(binary, port, cookie, csrf, clients, seconds, count, sockets=0, invalid_sample=None, stream_sample=None, stream_events=None, rich_writes=False):
     capture = None
     if sockets:
         capture_command = [
@@ -103,7 +118,7 @@ def measure(binary, port, cookie, csrf, clients, seconds, count, sockets=0, inva
         if marker != "MEASURE_START":
             raise AssertionError(f"Reader did not start: {marker}")
         writes = {}
-        thread = threading.Thread(target=writer, args=(port, cookie, csrf, count, seconds, writes))
+        thread = threading.Thread(target=writer, args=(port, cookie, csrf, count, seconds, writes, rich_writes))
         thread.start()
         stdout, stderr = reader.communicate(timeout=max(90, seconds + 60))
         thread.join(timeout=45)
@@ -148,6 +163,17 @@ def check_final_page(body, count):
     assert ids == expected, (ids, expected)
 
 
+def check_final_markup(camp_body, rust_body):
+    camp, rust = PreviewPageMarkup(), PreviewPageMarkup()
+    camp.feed(camp_body.decode())
+    rust.feed(rust_body.decode())
+    assert all(camp.csrf_values) and all(rust.csrf_values)
+    assert camp.events == rust.events, next(
+        ((index, left, right) for index, (left, right) in enumerate(zip(camp.events, rust.events)) if left != right),
+        (len(camp.events), len(rust.events)),
+    )
+
+
 def check_stream_events(camp_file, rust_file, count):
     camp_events = json.loads(camp_file.read_text())
     rust_events = json.loads(rust_file.read_text())
@@ -186,6 +212,7 @@ def main():
     parser.add_argument("--write-rate", type=float, default=10, help="target message POSTs per second")
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--sockets", type=int, default=0, help="signed room-stream subscribers; zero disables socket capture")
+    parser.add_argument("--rich-writes", action="store_true", help="cycle formatted, linked, listed, and filtered message bodies")
     parser.add_argument("--rustfire-first", action="store_true")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="save initial and first invalid read responses")
     args = parser.parse_args()
@@ -227,9 +254,12 @@ def main():
                     first = fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")
                     if args.sample_dir:
                         (args.sample_dir / "rustfire-initial.html").write_bytes(first[2])
-                    result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", args.clients, args.seconds, count, args.sockets, args.sample_dir / "rustfire-invalid.html" if args.sample_dir else None, (args.sample_dir or temp) / "rustfire-stream.html" if args.sockets else None, (args.sample_dir or temp) / "rustfire-events.json" if args.sockets else None)
-                    check_final_page(fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")[2], count)
-                    return first[2], result
+                    result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", args.clients, args.seconds, count, args.sockets, args.sample_dir / "rustfire-invalid.html" if args.sample_dir else None, (args.sample_dir or temp) / "rustfire-stream.html" if args.sockets else None, (args.sample_dir or temp) / "rustfire-events.json" if args.sockets else None, args.rich_writes)
+                    final = fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")[2]
+                    check_final_page(final, count)
+                    if args.sample_dir:
+                        (args.sample_dir / "rustfire-final.html").write_bytes(final)
+                    return first[2], final, result
                 finally:
                     stop_server(rust)
 
@@ -242,27 +272,31 @@ def main():
                         first = fetch(camp_port, cookie, "/rooms/1/messages")
                         if args.sample_dir:
                             (args.sample_dir / "campfire-initial.html").write_bytes(first[2])
-                        result = measure(binary, camp_port, cookie, csrf, args.clients, args.seconds, count, args.sockets, args.sample_dir / "campfire-invalid.html" if args.sample_dir else None, (args.sample_dir or temp) / "campfire-stream.html" if args.sockets else None, (args.sample_dir or temp) / "campfire-events.json" if args.sockets else None)
-                        check_final_page(fetch(camp_port, cookie, "/rooms/1/messages")[2], count)
-                        return first[2], result
+                        result = measure(binary, camp_port, cookie, csrf, args.clients, args.seconds, count, args.sockets, args.sample_dir / "campfire-invalid.html" if args.sample_dir else None, (args.sample_dir or temp) / "campfire-stream.html" if args.sockets else None, (args.sample_dir or temp) / "campfire-events.json" if args.sockets else None, args.rich_writes)
+                        final = fetch(camp_port, cookie, "/rooms/1/messages")[2]
+                        check_final_page(final, count)
+                        if args.sample_dir:
+                            (args.sample_dir / "campfire-final.html").write_bytes(final)
+                        return first[2], final, result
                     finally:
                         stop_server(camp)
 
             if args.rustfire_first:
-                (rust_body, rust_result), (camp_body, camp_result) = run_rustfire(), run_campfire()
+                (rust_body, rust_final, rust_result), (camp_body, camp_final, camp_result) = run_rustfire(), run_campfire()
             else:
-                (camp_body, camp_result), (rust_body, rust_result) = run_campfire(), run_rustfire()
+                (camp_body, camp_final, camp_result), (rust_body, rust_final, rust_result) = run_campfire(), run_rustfire()
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
         check_message_markup(camp_body, rust_body, 40)
+        check_final_markup(camp_final, rust_final)
         if args.sockets:
             check_stream_events((args.sample_dir or temp) / "campfire-events.json", (args.sample_dir or temp) / "rustfire-events.json", count)
         saved_messages(rust_db, count, False)
         saved_messages(camp_db, count, True)
         print("PASS paired mixed message reads and writes, response checks, and saved rows")
-        print(json.dumps({"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate, "sockets": args.sockets, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
+        print(json.dumps({"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate, "rich_writes": args.rich_writes, "sockets": args.sockets, "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
 
 
 if __name__ == "__main__":
