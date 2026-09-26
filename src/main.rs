@@ -4765,7 +4765,11 @@ fn message_json(
         .unwrap_or_else(|_| m.created_at.clone());
     let content = m.body_html.clone().unwrap_or_else(|| esc(&m.body));
     let body_html = if content.is_empty() {
-        String::new()
+        if m.attachment.is_some() {
+            String::new()
+        } else {
+            "<div class=\"trix-content\">\n  \n</div>\n".to_string()
+        }
     } else {
         format!(
             "<div class=\"trix-content\">\n  {}\n</div>\n",
