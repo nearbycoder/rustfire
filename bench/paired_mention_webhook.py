@@ -1,5 +1,6 @@
 """Compare bot-mention webhook triggers and payloads with pinned Campfire."""
 
+import argparse
 import html
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,7 +46,7 @@ def seed_bot(database, campfire, url):
     with sqlite3.connect(database) as db:
         if campfire:
             db.execute("DELETE FROM sqlite_sequence WHERE name='messages'")
-        db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES(52,'Probe Bot',2,0,?1,?2,?2)", (BOT_TOKEN, stamp))
+        db.execute("INSERT INTO users(id,name,bio,role,status,bot_token,created_at,updated_at) VALUES(52,'Probe Bot','Team / Ops & Co',2,0,?1,?2,?2)", (BOT_TOKEN, stamp))
         db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES(53,'Peer Bot',2,0,?1,?2,?2)", (PEER_TOKEN, stamp))
         db.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(2,NULL,'Rooms::Direct',1,?1,?1)", (stamp,))
         db.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(3,NULL,'Rooms::Direct',52,?1,?1)", (stamp,))
@@ -86,8 +87,9 @@ def post(port, cookie, csrf, sgid, case):
     elif case == "plain":
         message = "<div>Hello @Probe Bot!</div>"
     elif case == "trix-figure":
-        data = html.escape(json.dumps({"contentType": "application/vnd.campfire.mention", "sgid": sgid, "content": "<span>Probe Bot</span>"}), quote=True)
-        message = f'<div>Hello <figure data-trix-attachment="{data}"><span>Probe Bot</span></figure>!</div>'
+        content = '<span class="mention">Probe &amp; Bot</span>'
+        data = html.escape(json.dumps({"contentType": "application/vnd.campfire.mention", "sgid": sgid, "content": content}), quote=True)
+        message = f'<div>Hello <figure data-trix-attachment="{data}">{content}</figure>!</div>'
     else:
         message = f"<div>Hello {attachment}{' ' + attachment if case == 'duplicate' else ''}!</div>"
     body = urllib.parse.urlencode({"message[body]": message, "message[client_message_id]": f"paired-webhook-{case}", "authenticity_token": csrf})
@@ -148,6 +150,9 @@ def workflow(port, cookie, csrf, campfire):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sample-dir", type=pathlib.Path, help="save normalized bot message JSON from both apps")
+    args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     receiver_port = free_port()
     receiver = ThreadingHTTPServer(("127.0.0.1", receiver_port), Receiver)
@@ -195,22 +200,19 @@ def main():
     finally:
         receiver.shutdown()
         receiver.server_close()
+    if args.sample_dir:
+        args.sample_dir.mkdir(parents=True, exist_ok=True)
+        (args.sample_dir / "rustfire-bot-messages.json").write_text(json.dumps(rust_bot_messages, indent=2, ensure_ascii=False))
+        (args.sample_dir / "campfire-bot-messages.json").write_text(json.dumps(camp_bot_messages, indent=2, ensure_ascii=False))
     assert rust_sgid == camp_sgid, (rust_sgid, camp_sgid)
     assert rust_received == camp_received, (rust_received, camp_received)
-    assert {room: rust_bot_messages[room] for room in (2, 3)} == {room: camp_bot_messages[room] for room in (2, 3)}, (rust_bot_messages, camp_bot_messages)
-    rust_shared, camp_shared = rust_bot_messages[1], camp_bot_messages[1]
-    assert len(rust_shared) == len(camp_shared)
-    for rust_message, camp_message in zip(rust_shared, camp_shared):
-        for key in ("id", "creator", "room", "url"):
-            assert rust_message[key] == camp_message[key], (key, rust_message, camp_message)
-        assert rust_message["body"]["plain_text"] == camp_message["body"]["plain_text"]
-    rich_html_differences = [rust_message["id"] for rust_message, camp_message in zip(rust_shared, camp_shared) if rust_message["body"]["html"] != camp_message["body"]["html"]]
+    assert rust_bot_messages == camp_bot_messages, (rust_bot_messages, camp_bot_messages)
     assert [message["id"] for message in rust_bot_messages[3]] == [7], rust_bot_messages[3]
     assert rust_bot_messages[1][-1]["id"] == 8, rust_bot_messages[1]
     assert rust_bot_messages[1][-1]["body"]["plain_text"] == "Hey @Probe Bot @Peer Bot", rust_bot_messages[1][-1]
     assert [payload["message"]["id"] for path, payload in rust_received] == [2, 3, 4, 5, 7, 8]
     assert [path for path, _ in rust_received] == ["/hook"] * 4 + ["/peer"] * 2
-    print(f"PASS mention, direct-room, and bot-originated webhook payloads and plain bot API JSON match pinned Campfire; plain @bot and bot self-messages trigger none; remaining rich mention JSON HTML differences={rich_html_differences}")
+    print("PASS mention, direct-room, and bot-originated webhook payloads and full bot API JSON match pinned Campfire; plain @bot and bot self-messages trigger none")
 
 
 if __name__ == "__main__":

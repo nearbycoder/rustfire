@@ -4776,6 +4776,79 @@ fn message_json(
         json!({"id":m.id,"created_at":created_at,"body":{"plain_text":if m.body.is_empty(){m.attachment.as_ref().map(|a|a.filename.as_str()).unwrap_or("")}else{&m.body},"html":body_html},"creator":{"id":m.creator_id,"name":m.creator_name,"role":match m.creator_role{1=>"administrator",2=>"bot",_=>"member"},"avatar_url":avatar_url},"room":{"id":m.room_id},"url":url}),
     )
 }
+fn bot_message_json(
+    s: &AppState,
+    m: &ChatMessage,
+    headers: &HeaderMap,
+    db: &rusqlite::Connection,
+) -> Result<Value, StatusCode> {
+    let mut message = message_json(s, m, Some(headers))?;
+    let Some(display) = m.body_html.as_deref().filter(|html| html.contains("class=\"mention\"")) else {
+        return Ok(message);
+    };
+    let source: Option<String> = db
+        .query_row("SELECT body_source FROM messages WHERE id=?1", [m.id], |row| row.get(0))
+        .map_err(db_err)?;
+    let Some(source) = source else {
+        return Ok(message);
+    };
+    let normalized = action_text_webhook_html(&source);
+    let fragment = ParsedHtml::parse_fragment(&normalized);
+    let selector = Selector::parse("action-text-attachment[sgid]").unwrap();
+    let mut attachments = Vec::new();
+    for attachment in fragment.select(&selector) {
+        if attachment.value().attr("content-type") != Some("application/vnd.campfire.mention") {
+            continue;
+        }
+        let Some(sgid) = attachment.value().attr("sgid") else { continue };
+        let Some(id) = verified_mention_id(
+            &s.mention_signing_key,
+            s.imported_mention_signing_key.as_deref(),
+            sgid,
+        ) else { continue };
+        let user: Option<(String, String, String)> = db
+            .query_row("SELECT name,COALESCE(bio,''),updated_at FROM users WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .optional()
+            .map_err(db_err)?;
+        let Some((name, bio, updated_at)) = user else { continue };
+        let title = if bio.trim().is_empty() { name.clone() } else { format!("{name} – {bio}") };
+        let title = html_escape::encode_double_quoted_attribute(&title);
+        let name = html_escape::encode_double_quoted_attribute(&name);
+        let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
+        let avatar = avatar_path(avatar_key, id, &updated_at)?;
+        let content = attachment.value().attr("content").map(|value| {
+            format!(" content=\"{}\"", value.replace('&', "&amp;").replace('"', "&quot;"))
+        }).unwrap_or_default();
+        let wrapped = format!(
+            "<action-text-attachment sgid=\"{}\" content-type=\"application/octet-stream\"{content}><div class=\"mention\" sgid=\"{}\">\n  <a title=\"{}\" class=\"btn avatar\" href=\"/users/{id}\"><img src=\"{}\" width=\"48\" height=\"48\"></a>\n  {}\n</div></action-text-attachment>",
+            esc(sgid), esc(sgid), title, avatar, name,
+        );
+        attachments.push((id, wrapped));
+    }
+    if attachments.is_empty() {
+        return Ok(message);
+    }
+    static MENTION: OnceLock<Regex> = OnceLock::new();
+    let pattern = MENTION.get_or_init(|| Regex::new(r#"(?s)<div class="mention">.*?</div>"#).unwrap());
+    let found = pattern.find_iter(display).collect::<Vec<_>>();
+    if found.len() != attachments.len() || found.iter().zip(&attachments).any(|(html, (id, _))| {
+        !html.as_str().contains(&format!("href=\"/users/{id}\""))
+    }) {
+        return Ok(message);
+    }
+    let mut content = String::with_capacity(display.len());
+    let mut consumed = 0;
+    for (html, (_, wrapped)) in found.iter().zip(&attachments) {
+        content.push_str(&display[consumed..html.start()]);
+        content.push_str(wrapped);
+        consumed = html.end();
+    }
+    content.push_str(&display[consumed..]);
+    message["body"]["html"] = Value::String(format!(
+        "<div class=\"trix-content\">\n  {content}\n</div>\n"
+    ));
+    Ok(message)
+}
 #[derive(Deserialize)]
 struct PostMessage {
     #[serde(rename = "message[body]")]
@@ -8692,7 +8765,7 @@ async fn bot_messages_get(
     let mut r = Json(
         messages
             .iter()
-            .map(|m| message_json(&s, m, Some(&headers)))
+            .map(|m| bot_message_json(&s, m, &headers, &db))
             .collect::<Result<Vec<_>, _>>()?,
     )
     .into_response();
