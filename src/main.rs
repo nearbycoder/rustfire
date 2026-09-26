@@ -5574,7 +5574,13 @@ async fn message_show(
     {
         Json(message_json(&s, &m, Some(&headers))?).into_response()
     } else {
-        render("Message", &message_html(&s, &m, Some(&headers)), Some(&u))
+        render_source_page_sections(
+            "Rustfire",
+            &message_html(&s, &m, Some(&headers)),
+            "", "", "", "", "", "",
+            Some(&u),
+            u.csrf_token.as_deref().unwrap_or(""),
+        )
     })
 }
 async fn message_edit(
@@ -5627,7 +5633,11 @@ async fn message_edit(
     let frame = format!(
         "<turbo-frame id='{frame_id}'><div class='message__body position-relative' data-controller='scroll-into-view'><div class='message__body-content message__body-content--editing gap'>{editor}</div><div class='message__actions flex flex-wrap'><a class='message__action-btn message__edit-close-btn txt-small btn btn--borderless' href='{action}'><img class='colorize--black' aria-hidden='true' src='/assets/remove-0e7a045d.svg'><span class='for-screen-reader'>Close editor and discard changes</span></a></div><form id='{delete_form_id}' data-turbo-frame='{frame_id}' action='{action}' accept-charset='UTF-8' method='post'><input type='hidden' name='_method' value='delete'></div></turbo-frame>"
     );
-    Ok(render("Edit message", &frame, Some(&u)))
+    let frame = csrf_forms(&frame, u.csrf_token.as_deref().unwrap_or(""));
+    Ok(render_source_page_sections(
+        "Rustfire", &frame, "", "", "", "", "", "", Some(&u),
+        u.csrf_token.as_deref().unwrap_or(""),
+    ))
 }
 async fn message_update(
     State(s): State<Arc<AppState>>,

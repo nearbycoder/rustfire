@@ -118,10 +118,10 @@ def get_room(port, cookie, path):
         connection.close()
 
 
-def post_message(port, cookie, csrf):
+def post_message(port, cookie, csrf, body="Room page message check", client_id="room-page-1"):
     payload = urllib.parse.urlencode({
-        "message[body]": "Room page message check",
-        "message[client_message_id]": "room-page-1",
+        "message[body]": body,
+        "message[client_message_id]": client_id,
         "authenticity_token": csrf,
     })
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
@@ -179,6 +179,19 @@ def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sa
     return source, target
 
 
+def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, rust_cookie, sample_dir):
+    path = f"/rooms/1/messages/{message_id}{action}"
+    label = "edit" if action else "detail"
+    source = get_room(camp_port, camp_cookie, path)
+    target = get_room(rust_port, rust_cookie, path)
+    if sample_dir:
+        (sample_dir / f"campfire-message-{label}-{message_id}.html").write_bytes(source)
+        (sample_dir / f"rustfire-message-{label}-{message_id}.html").write_bytes(target)
+    for part in ("nav", "footer", "sidebar", "main-content"):
+        assert_equal(f"message {message_id} {label} {part}", section(source, part, normalize_times=True), section(target, part, normalize_times=True))
+    assert 'class="admin"' in target.decode()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
@@ -229,6 +242,8 @@ def main():
                 post_message(camp_port, camp_cookie, camp_csrf)
                 post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf")
                 compare_room("original with message", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True)
+                compare_message_page(1, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
+                compare_message_page(1, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
                 jpeg = (repository / "test/fixtures/files/moon.jpg").read_bytes()
                 post_account_logo(camp_port, camp_cookie, camp_csrf, jpeg)
                 post_account_logo(rust_port, "session_token=benchmark-session", "benchmark-csrf", jpeg)
@@ -245,6 +260,11 @@ def main():
                         for name, port, cookie in applications:
                             report = measure_room_page(binary, port, cookie, clients, args.seconds)
                             print(f"{name} {clients} clients: {report['rps']:.1f} rps, p95 {report['p95_ms']:.2f} ms, {report['errors']} errors")
+                rich_body = "<div>Hi <strong>bold</strong><br>next</div>"
+                post_message(camp_port, camp_cookie, camp_csrf, rich_body, "room-page-rich")
+                post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rich_body, "room-page-rich")
+                compare_message_page(2, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
+                compare_message_page(2, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)
