@@ -477,11 +477,11 @@ fn replace_mention_attachments(
     signing_key: &[u8],
     imported_key: Option<&[u8]>,
     avatar_key: &[u8],
-) -> Result<String, StatusCode> {
+) -> Result<(String, String), StatusCode> {
     if !input.contains("application/vnd.campfire.mention")
         && !input.contains("application/vnd.rustfire.mention")
     {
-        return Ok(input.to_string());
+        return Ok((input.to_string(), input.to_string()));
     }
     static ATTACHMENTS: OnceLock<Regex> = OnceLock::new();
     let pattern = ATTACHMENTS.get_or_init(|| {
@@ -489,9 +489,11 @@ fn replace_mention_attachments(
     });
     let selector = Selector::parse("figure[data-trix-attachment],action-text-attachment").unwrap();
     let mut rendered = String::with_capacity(input.len());
+    let mut plain_source = String::with_capacity(input.len());
     let mut consumed = 0;
     for found in pattern.find_iter(input) {
         rendered.push_str(&input[consumed..found.start()]);
+        plain_source.push_str(&input[consumed..found.start()]);
         let fragment = ParsedHtml::parse_fragment(found.as_str());
         let replacement = if let Some(element) = fragment.select(&selector).next() {
             let (kind, sgid, legacy_id) =
@@ -534,27 +536,30 @@ fn replace_mention_attachments(
                         if let Some((name, bio, updated_at)) = user {
                             let title = if bio.trim().is_empty() { name.clone() } else { format!("{name} – {bio}") };
                             let avatar = avatar_path(avatar_key, id, &updated_at)?;
-                            format!(
+                            let display = format!(
                                 "<div class='mention'><a href='/users/{id}' title='{}' class='btn avatar' data-turbo-frame='_top'><img aria-hidden='true' src='{}' width='48' height='48'></a>{}</div>",
                                 esc(&title), esc(&avatar), esc(&name)
-                            )
+                            );
+                            (display, format!("@{}", esc(&name)))
                         } else {
-                            "☒".to_string()
+                            ("☒".to_string(), "☒".to_string())
                         }
                     } else {
-                        "☒".to_string()
+                        ("☒".to_string(), "☒".to_string())
                     }
                 }
-                _ => found.as_str().to_string(),
+                _ => (found.as_str().to_string(), found.as_str().to_string()),
             }
         } else {
-            found.as_str().to_string()
+            (found.as_str().to_string(), found.as_str().to_string())
         };
-        rendered.push_str(&replacement);
+        rendered.push_str(&replacement.0);
+        plain_source.push_str(&replacement.1);
         consumed = found.end();
     }
     rendered.push_str(&input[consumed..]);
-    Ok(rendered)
+    plain_source.push_str(&input[consumed..]);
+    Ok((rendered, plain_source))
 }
 fn campfire_rich_tag_allowed(tag: &str) -> bool {
     matches!(tag,
@@ -4812,14 +4817,17 @@ fn insert_message(
     let db = pool(s)?;
     let (plain, body_html) = if rich && !body.trim().is_empty() {
         let cleaned = strip_disallowed_rich_tags(body);
-        let trusted = replace_mention_attachments(
+        let (trusted, plain_source) = replace_mention_attachments(
             cleaned.as_deref().unwrap_or(body),
             &db,
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
             s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
         )?;
-        let (plain, html) = rich_body_trusted(&trusted, request_host);
+        let (mut plain, html) = rich_body_trusted(&trusted, request_host);
+        if plain_source != trusted {
+            plain = rich_body_trusted(&plain_source, request_host).0;
+        }
         (plain, Some(html))
     } else {
         (body.trim().to_string(), None)
@@ -5541,19 +5549,23 @@ async fn message_update(
             blob_key,
             false,
         )?;
-        let trusted = replace_mention_attachments(
+        let (trusted, plain_source) = replace_mention_attachments(
             &inline,
             &db,
             &s.mention_signing_key,
             s.imported_mention_signing_key.as_deref(),
             s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
         )?;
-        let (plain, html) = rich_body_trusted(
+        let request_host = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok());
+        let (mut plain, html) = rich_body_trusted(
             &trusted,
-            headers
-                .get(header::HOST)
-                .and_then(|value| value.to_str().ok()),
+            request_host,
         );
+        if plain_source != trusted {
+            plain = rich_body_trusted(&plain_source, request_host).0;
+        }
         (plain, Some(html), Some(normalized), used)
     } else {
         (body.to_string(), None, None, Vec::new())
@@ -10121,9 +10133,12 @@ fn render_imported_rich_text(
             let cleaned = strip_disallowed_rich_tags(source);
             let (inline, _) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
-            let trusted = replace_mention_attachments(&inline, &tx, signing_key, imported_key, avatar_key)
+            let (trusted, plain_source) = replace_mention_attachments(&inline, &tx, signing_key, imported_key, avatar_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
-            let (plain, html) = rich_body_trusted(&trusted, None);
+            let (mut plain, html) = rich_body_trusted(&trusted, None);
+            if plain_source != trusted {
+                plain = rich_body_trusted(&plain_source, None).0;
+            }
             if *missing_search {
                 tx.execute("UPDATE messages SET body=?1,body_html=?2 WHERE id=?3", params![plain, html, id])?;
             } else {

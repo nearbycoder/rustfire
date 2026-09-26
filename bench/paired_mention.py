@@ -30,8 +30,12 @@ def mention_sgid(port, cookie, campfire):
 
 def post(port, cookie, csrf, sgid, case):
     client_id = f"paired-mention-{case}"
-    content = ' content="&lt;span&gt;Untrusted name&lt;/span&gt;"' if case == "embedded-content" else ""
-    attachment = f'<action-text-attachment sgid="{html.escape(sgid, quote=True)}" content-type="application/vnd.campfire.mention"{content}></action-text-attachment>'
+    if case == "trix-figure":
+        data = html.escape(json.dumps({"contentType": "application/vnd.campfire.mention", "sgid": sgid, "content": "<span>Untrusted name</span>"}), quote=True)
+        attachment = f'<figure data-trix-attachment="{data}"><span>Untrusted name</span></figure>'
+    else:
+        content = ' content="&lt;span&gt;Untrusted name&lt;/span&gt;"' if case == "embedded-content" else ""
+        attachment = f'<action-text-attachment sgid="{html.escape(sgid, quote=True)}" content-type="application/vnd.campfire.mention"{content}></action-text-attachment>'
     message = f"<div>Hello {attachment}!</div>"
     body = urllib.parse.urlencode({"message[body]": message, "message[client_message_id]": client_id, "authenticity_token": csrf})
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
@@ -68,7 +72,7 @@ def main():
             try:
                 rust_cookie, rust_csrf = "session_token=benchmark-session", "benchmark-csrf"
                 rust_sgid = mention_sgid(rust_port, rust_cookie, False)
-                rust_markup = {case: post(rust_port, rust_cookie, rust_csrf, rust_sgid, case) for case in ("bare", "embedded-content")}
+                rust_markup = {case: post(rust_port, rust_cookie, rust_csrf, rust_sgid, case) for case in ("bare", "embedded-content", "trix-figure")}
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -77,18 +81,22 @@ def main():
                     wait_for_server(camp_port, camp)
                     camp_cookie, camp_csrf = login_campfire(camp_port)
                     camp_sgid = mention_sgid(camp_port, camp_cookie, True)
-                    camp_markup = {case: post(camp_port, camp_cookie, camp_csrf, camp_sgid, case) for case in ("bare", "embedded-content")}
+                    camp_markup = {case: post(camp_port, camp_cookie, camp_csrf, camp_sgid, case) for case in ("bare", "embedded-content", "trix-figure")}
                 finally:
                     stop_server(camp)
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
+        with sqlite3.connect(rust_db) as rust, sqlite3.connect(camp_db) as camp:
+            rust_search = rust.execute("SELECT body FROM message_search_index ORDER BY rowid").fetchall()
+            camp_search = camp.execute("SELECT body FROM message_search_index ORDER BY rowid").fetchall()
     assert rust_sgid == camp_sgid, (rust_sgid, camp_sgid)
     for case in rust_markup:
         assert rust_markup[case] == camp_markup[case], (case, rust_markup[case], camp_markup[case])
         assert ("a", (("class", "btn avatar"), ("href", "/users/2"), ("title", "Rustfire Compare – Team lead"))) in rust_markup[case]
-    print("PASS signed mention SGID and parsed ActionText presentation match pinned Campfire for bare and embedded-content attachments, including user bio")
+    assert rust_search == camp_search == [("Hello @Rustfire Compare!",)] * 3, (rust_search, camp_search)
+    print("PASS signed mention presentation and searchable plain text match pinned Campfire for bare, embedded-content, and Trix figure attachments, including user bio")
 
 
 if __name__ == "__main__":
