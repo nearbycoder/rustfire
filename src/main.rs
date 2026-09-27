@@ -5519,12 +5519,35 @@ async fn messages_index(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path(room_id): Path<String>,
-    Query(q): Query<Paging>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> AppResult {
+    fn cursor_not_found(headers: &HeaderMap, uri: &Uri) -> Response {
+        let mut response = rails_error_response(StatusCode::NOT_FOUND, headers, uri);
+        let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(rails_not_found_type(uri, accept)));
+        response
+    }
     let u = user(&s, &headers)?;
     let rid = path_record_id(&room_id)?;
     room_for(&s, u.id, rid)?;
-    if let Some(cursor) = q.after.or(q.before) {
+    let before = params.get("before").filter(|value| !value.trim().is_empty())
+        .map(|value| path_record_id(value)).transpose();
+    let before = match before {
+        Ok(value) => value,
+        Err(_) => return Ok(cursor_not_found(&headers, &uri)),
+    };
+    let after = if before.is_some() {
+        None
+    } else {
+        let cursor = params.get("after").filter(|value| !value.trim().is_empty())
+            .map(|value| path_record_id(value)).transpose();
+        match cursor {
+            Ok(value) => value,
+            Err(_) => return Ok(cursor_not_found(&headers, &uri)),
+        }
+    };
+    let q = Paging { before, after };
+    if let Some(cursor) = q.before.or(q.after) {
         let found: bool = pool(&s)?
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id=?2)",
@@ -5533,7 +5556,7 @@ async fn messages_index(
             )
             .map_err(db_err)?;
         if !found {
-            return Err(StatusCode::NOT_FOUND);
+            return Ok(cursor_not_found(&headers, &uri));
         }
     }
     // Matching validators need only the selected page's IDs and timestamps.
@@ -10007,7 +10030,10 @@ async fn bot_messages_get(
     Query(q): Query<Paging>,
 ) -> AppResult {
     if uri.path().ends_with(".html") {
-        return messages_index(State(s), headers, OriginalUri(uri), Path(rid.to_string()), Query(q)).await;
+        let mut params = HashMap::new();
+        if let Some(before) = q.before { params.insert("before".to_string(), before.to_string()); }
+        if let Some(after) = q.after { params.insert("after".to_string(), after.to_string()); }
+        return messages_index(State(s), headers, OriginalUri(uri), Path(rid.to_string()), Query(params)).await;
     }
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;

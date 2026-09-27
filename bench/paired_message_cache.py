@@ -116,6 +116,16 @@ def check(port, cookie, database, rails, sample_path=None):
 
     empty = fetch(port, cookie, path + "?before=1")
     assert empty[0] == 204 and not empty[2], (empty[0], len(empty[2]))
+    cursor_cases = ("?before=bad", "?after=bad", "?before=0", "?after=999", "?before=2&after=1", "?before=2&after=bad", "?before=2abc")
+    cursor_results = {}
+    cursor_bodies = {}
+    for suffix in cursor_cases:
+        status, response_headers, body = fetch(port, cookie, path + suffix)
+        if status == 200:
+            cursor_etag = get_header(response_headers, "ETag")
+            assert cursor_etag and fetch(port, cookie, path + suffix, {"If-None-Match": cursor_etag})[0] == 304, (suffix, status, cursor_etag)
+            cursor_bodies[suffix] = body
+        cursor_results[suffix] = (status, get_header(response_headers, "Content-Type"), hashlib.sha256(body).hexdigest() if status == 404 else ids(body))
 
     changed_at = datetime.now(timezone.utc) + timedelta(seconds=10)
     update_timestamp(database, rails, changed_at)
@@ -132,6 +142,7 @@ def check(port, cookie, database, rails, sample_path=None):
         "date_conditional": by_date[0],
         "stale_date": stale[0],
         "empty_page": empty[0],
+        "cursor_results": cursor_results,
         "changed": changed[0],
         "stale_etag_fresh_date": mixed[0],
         "cache_control": cache_control,
@@ -142,7 +153,7 @@ def check(port, cookie, database, rails, sample_path=None):
         "before_ids": pages["before"][2],
         "after_ids": pages["after"][2],
     }
-    return result, new_etag, new_modified, first_body
+    return result, new_etag, new_modified, first_body, cursor_bodies
 
 
 def measure_cached_read(binary, port, cookie, etag, modified, clients, seconds):
@@ -271,33 +282,36 @@ def main():
                     try:
                         wait_for_server(camp_port, camp)
                         cookie, _ = login_campfire(camp_port)
-                        result, etag, modified, body = check(camp_port, cookie, camp_db, True, args.sample_dir / "campfire-messages.html" if args.sample_dir else None)
+                        result, etag, modified, body, cursors = check(camp_port, cookie, camp_db, True, args.sample_dir / "campfire-messages.html" if args.sample_dir else None)
                         performance = {clients: measure_cached_read(binary, camp_port, cookie, etag, modified, clients, args.seconds) for clients in args.clients}
                         full_performance = {clients: measure_full_read(binary, camp_port, cookie, etag, modified, clients, args.seconds, args.messages, (camp.pid, redis.pid) if args.resources else ()) for clients in args.full_clients}
-                        return result, performance, full_performance, body
+                        return result, performance, full_performance, body, cursors
                     finally:
                         stop_server(camp)
 
             def run_rustfire():
                 rust = start_server(rust_db, rust_port)
                 try:
-                    result, etag, modified, body = check(rust_port, "session_token=benchmark-session", rust_db, False, args.sample_dir / "rustfire-messages.html" if args.sample_dir else None)
+                    result, etag, modified, body, cursors = check(rust_port, "session_token=benchmark-session", rust_db, False, args.sample_dir / "rustfire-messages.html" if args.sample_dir else None)
                     performance = {clients: measure_cached_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds) for clients in args.clients}
                     full_performance = {clients: measure_full_read(binary, rust_port, "session_token=benchmark-session", etag, modified, clients, args.seconds, args.messages, (rust.pid,) if args.resources else ()) for clients in args.full_clients}
-                    return result, performance, full_performance, body
+                    return result, performance, full_performance, body, cursors
                 finally:
                     stop_server(rust)
 
             if args.rustfire_first:
-                (rust_result, rust_performance, rust_full, rust_body), (camp_result, camp_performance, camp_full, camp_body) = run_rustfire(), run_campfire()
+                (rust_result, rust_performance, rust_full, rust_body, rust_cursors), (camp_result, camp_performance, camp_full, camp_body, camp_cursors) = run_rustfire(), run_campfire()
             else:
-                (camp_result, camp_performance, camp_full, camp_body), (rust_result, rust_performance, rust_full, rust_body) = run_campfire(), run_rustfire()
+                (camp_result, camp_performance, camp_full, camp_body, camp_cursors), (rust_result, rust_performance, rust_full, rust_body, rust_cursors) = run_campfire(), run_rustfire()
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
         assert {key: value for key, value in rust_result.items() if key not in ("body_bytes", "before_bytes", "after_bytes")} == {key: value for key, value in camp_result.items() if key not in ("body_bytes", "before_bytes", "after_bytes")}, (rust_result, camp_result)
         check_message_markup(camp_body, rust_body, args.messages)
+        assert camp_cursors.keys() == rust_cursors.keys(), (camp_cursors.keys(), rust_cursors.keys())
+        for suffix in camp_cursors:
+            check_message_markup(camp_cursors[suffix], rust_cursors[suffix], len(re.findall(rb'id=["\']message_refresh-\d+["\']', camp_cursors[suffix])))
         print("PASS paired message-list ETag, Last-Modified, pagination, empty page, and invalidation")
         print({"rustfire": rust_result, "campfire": camp_result})
         for clients in args.clients:

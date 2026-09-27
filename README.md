@@ -117,7 +117,7 @@ The importer preserves unknown inline image subtypes as file attachments and pre
 
 ## Remaining parity work
 
-- Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior
+- Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior, including the standalone message-page document head and asset graph
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior, remaining browser profiles, and actual cross-browser push delivery validation

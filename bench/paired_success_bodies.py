@@ -4,6 +4,7 @@ Run after ``cargo build --release``. Dynamic avatar signatures and server origin
 are normalized; the message's text, markup, metadata, and JSON remain checked.
 """
 
+import argparse
 import datetime
 import http.client
 import json
@@ -27,6 +28,11 @@ CASES = (
     ("/up?format=json", "text/html"),
     ("/up", "application/json"),
     ("/service-worker.js", "text/javascript"),
+    ("/rooms/1/messages", "text/html"),
+    ("/rooms/1/messages?before=1", "text/html"),
+    ("/rooms/1/messages?before=3", "text/html"),
+    ("/rooms/1/messages?after=2", "text/html"),
+    ("/rooms/1/messages?after=3", "text/html"),
     ("/rooms/1/invalid/messages.html", "text/html"),
     ("/rooms/1/invalid/messages.json", "text/html"),
     ("/rooms/1/invalid/messages?format=html", "text/html"),
@@ -45,6 +51,21 @@ def request(port, cookie, path, accept):
 
 def collect(port, cookie):
     return {case: request(port, cookie, *case) for case in CASES}
+
+
+def seed_page_messages(rust_db, camp_db):
+    base = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)
+    for message_id in (2, 3):
+        created = base + datetime.timedelta(seconds=message_id)
+        rust_time = created.isoformat().replace("+00:00", "Z")
+        camp_time = created.strftime("%Y-%m-%d %H:%M:%S.%f")
+        body = f"Body fixture {message_id}"
+        client_id = f"body-fixture-{message_id}"
+        with sqlite3.connect(rust_db) as db:
+            db.execute("INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?,?)", (message_id, body, client_id, rust_time, rust_time))
+        with sqlite3.connect(camp_db) as db:
+            db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)", (message_id, client_id, camp_time, camp_time))
+            db.execute("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body',?,'Message',?,?,?)", (body, message_id, camp_time, camp_time))
 
 
 def canonical(value):
@@ -77,6 +98,9 @@ def check(rust, camp):
     for case in CASES:
         rust_status, rust_type, rust_body = rust[case]
         camp_status, camp_type, camp_body = camp[case]
+        if case[0] in {"/rooms/1/messages?before=1", "/rooms/1/messages?after=3"}:
+            assert (rust_status, rust_type, rust_body) == (camp_status, camp_type, camp_body) == (204, None, b""), case
+            continue
         assert (rust_status, rust_type) == (camp_status, camp_type) == (200, camp_type), (case, rust_status, rust_type, camp_status, camp_type)
         path, accept = case
         if path.startswith("/up") and (path.endswith(".json") or path.endswith("?format=json") or (accept == "application/json" and not path.endswith(".html"))):
@@ -91,7 +115,7 @@ def check(rust, camp):
             assert normalized[0] == normalized[1], (case, normalized)
         elif path.endswith(".json") or path.endswith("?format=html"):
             assert canonical(json.loads(rust_body)) == canonical(json.loads(camp_body)), (case, rust_body[:250], camp_body[:250])
-        elif path.endswith("messages.html"):
+        elif path.startswith("/rooms/1/messages?") or path == "/rooms/1/messages" or path.endswith("messages.html"):
             rust_tokens, camp_tokens = markup(rust_body), markup(camp_body)
             assert rust_tokens == camp_tokens, (case, len(rust_tokens), len(camp_tokens), next(((i, a, b) for i, (a, b) in enumerate(zip(rust_tokens, camp_tokens)) if a != b), None))
         else:
@@ -99,6 +123,9 @@ def check(rust, camp):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sample-dir", type=pathlib.Path)
+    args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-success-bodies-") as scratch:
         temp = pathlib.Path(scratch)
@@ -107,6 +134,7 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         seed_boost_message(rust_db, camp_db)
+        seed_page_messages(rust_db, camp_db)
         with sqlite3.connect(camp_db) as db:
             db.execute("UPDATE users SET name='User 1',updated_at='2026-01-01 00:00:00' WHERE id=1")
             db.execute("UPDATE rooms SET name='Campfire' WHERE id=1")
@@ -127,12 +155,17 @@ def main():
                     camp = collect(camp_port, cookie)
                 finally:
                     stop_server(process)
+            if args.sample_dir:
+                args.sample_dir.mkdir(parents=True, exist_ok=True)
+                for index, case in enumerate(CASES):
+                    (args.sample_dir / f"rust-{index}.body").write_bytes(rust[case][2])
+                    (args.sample_dir / f"camp-{index}.body").write_bytes(camp[case][2])
             check(rust, camp)
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print(f"PASS {len(CASES)} paired successful response bodies, including complete bot HTML/JSON and byte-identical health HTML/service worker")
+    print(f"PASS {len(CASES)} paired successful response bodies, including message-list pages, bot HTML/JSON, and byte-identical health HTML/service worker")
 
 
 if __name__ == "__main__":
