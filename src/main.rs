@@ -52,6 +52,7 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::io::ReaderStream;
+use tower::ServiceExt;
 use tower_http::{compression::{CompressionLayer, predicate::{Predicate, SizeAbove}}, services::ServeDir};
 use uuid::Uuid;
 use web_push::{
@@ -2154,6 +2155,7 @@ fn found_redirect(path: &str) -> Response {
     response
         .headers_mut()
         .insert(header::LOCATION, path.parse().unwrap());
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
     response
 }
 fn path_record_id(value: &str) -> Result<i64, StatusCode> {
@@ -4611,8 +4613,16 @@ async fn room_show(
 async fn room_show_at(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, mid)): Path<(i64, i64)>,
+    OriginalUri(uri): OriginalUri,
+    Path((room_id, message_id)): Path<(String, String)>,
 ) -> AppResult {
+    let rid = path_record_id(&room_id)?;
+    let mid = path_record_id(&message_id)?;
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        let u = user(&s, &headers)?;
+        room_for(&s, u.id, rid)?;
+        return Ok(response);
+    }
     room_show_with_target(s, headers, rid, Some(mid)).await
 }
 fn room_invitation(
@@ -4831,7 +4841,7 @@ async fn room_refresh(
         && !accept.contains("text/vnd.turbo-stream.html")
         && !accept.contains("*/*")
     {
-        return Ok(not_acceptable_format(accept));
+        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else { accept }));
     }
     let since = q.since.as_deref().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
     let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
@@ -7512,7 +7522,7 @@ async fn account_users_index(
         && !accept.contains("text/vnd.turbo-stream.html")
         && !accept.contains("*/*")
     {
-        return Ok(not_acceptable_format(accept));
+        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else { accept }));
     }
     let page = query
         .get("page")
@@ -9304,10 +9314,20 @@ async fn user_unban(
 async fn autocomplete(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult {
     let _autocomplete_slot = s.autocomplete_slots.acquire().await.map_err(db_err)?;
     let u = user(&s, &headers)?;
+    let format = uri.path().rsplit_once('.').map(|(_, suffix)| suffix);
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if matches!(format, Some("html" | "turbo_stream"))
+        || (format.is_none() && !accept.split(',').any(|part| {
+            matches!(part.trim().split(';').next(), Some("application/json" | "application/*" | "*/*"))
+        }))
+    {
+        return Ok(not_acceptable_format(""));
+    }
     let db = pool(&s)?;
     let room_id = q
         .get("room_id")
@@ -9458,10 +9478,13 @@ fn bot_command_html(command: &str, icon: &str, input_label: &str, copy_label: &s
         esc(command)
     )
 }
-async fn bot_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+async fn bot_new(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
+    }
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
     }
     Ok(render(
         "New chat bot",
@@ -10827,6 +10850,7 @@ async fn boosts_index(
 async fn boost_new(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(message_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -10842,6 +10866,9 @@ async fn boost_new(
         .map_err(db_err)?;
     let (rid, client_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     room_for(&s, u.id, rid)?;
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
+    }
     let frame_id = format!("new_boost_message_{client_id}");
     let frame_request = headers
         .get("Turbo-Frame")
@@ -11805,7 +11832,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if state.webhooks_enabled {
         tokio::spawn(run_webhook_jobs(state.clone()));
     }
-    let app = Router::new()
+    let core_router = Router::new()
         .route("/", get(root))
         .route("/up", any(|| async { StatusCode::NOT_FOUND }).get(health))
         .route("/webmanifest", get(webmanifest))
@@ -12004,6 +12031,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/autocompletable/users", get(autocomplete))
         .route("/account/bots", get(bots_get).post(bot_create))
         .route("/account/bots/new", get(bot_new))
+        .route("/account/bots/new.html", get(bot_new))
+        .route("/account/bots/new.json", get(bot_new))
+        .route("/account/bots/new.turbo_stream", get(bot_new))
         .route(
             "/account/bots/{id}",
             any(|| async { StatusCode::NOT_FOUND }).post(bot_post_override)
@@ -12043,6 +12073,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(boosts_index).post(boost_create),
         )
         .route("/messages/{id}/boosts/new", get(boost_new))
+        .route("/messages/{id}/boosts/new.html", get(boost_new))
+        .route("/messages/{id}/boosts/new.json", get(boost_new))
+        .route("/messages/{id}/boosts/new.turbo_stream", get(boost_new))
         .route(
             "/messages/{id}/boosts/{bid}",
             get(|| async { StatusCode::NOT_FOUND })
@@ -12098,6 +12131,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         )))
         .with_state(state);
+    // Rails treats a recognized suffix as a requested response format. Axum
+    // matches it as a different path, so retry unmatched GETs against the
+    // unsuffixed route while retaining OriginalUri for handler negotiation.
+    let format_router = core_router.clone();
+    let app = core_router.fallback_service(tower::service_fn(move |mut request: Request| {
+        let format_router = format_router.clone();
+        async move {
+            let original = request.uri().clone();
+            let path = original.path();
+            let Some((base, suffix)) = path.rsplit_once('.') else {
+                return Ok::<Response, std::convert::Infallible>(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
+            };
+            if !matches!(suffix, "html" | "json" | "turbo_stream")
+                || !matches!(request.method(), &Method::GET | &Method::HEAD)
+            {
+                return Ok(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
+            }
+            let rewritten = match original.query() {
+                Some(query) => format!("{base}?{query}"),
+                None => base.to_string(),
+            };
+            let Ok(uri) = rewritten.parse() else {
+                return Ok(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
+            };
+            *request.uri_mut() = uri;
+            request.extensions_mut().insert(OriginalUri(original.clone()));
+            let response = format_router.oneshot(request).await.unwrap_or_else(|never| match never {});
+            if !response.status().is_success() {
+                return Ok(response);
+            }
+            let binary = base == "/account/logo" || base.ends_with("/avatar");
+            let rejected = match suffix {
+                "html" => base == "/account/users" || base.ends_with("/refresh") || base == "/autocompletable/users",
+                "json" => !binary && base != "/autocompletable/users",
+                "turbo_stream" => !binary && !base.ends_with("/refresh"),
+                _ => false,
+            };
+            if rejected {
+                return Ok(not_acceptable_format(if suffix == "json" { "application/json" } else { "" }));
+            }
+            Ok(response)
+        }
+    }));
     let addr: SocketAddr = env::var("RUSTFIRE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse()?;
