@@ -2225,6 +2225,13 @@ fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> R
     };
     (status, [(header::CONTENT_TYPE, media)], body).into_response()
 }
+fn rails_exception_500_response(headers: &HeaderMap, uri: &Uri) -> Response {
+    let mut response = rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, headers, uri);
+    if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"text/html")) {
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=UTF-8"));
+    }
+    response
+}
 fn path_record_id(value: &str) -> Result<i64, StatusCode> {
     let value = value.trim_start();
     let sign_len = usize::from(value.starts_with('+') || value.starts_with('-'));
@@ -7411,19 +7418,14 @@ async fn direct_post_override(
 async fn direct_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(room_id): Path<String>,
+    OriginalUri(uri): OriginalUri,
 ) -> AppResult {
-    let u = match user(&s, &headers) {
-        Ok(user) => user,
+    match user(&s, &headers) {
+        Ok(_) => {},
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
         Err(error) => return Err(error),
-    };
-    let rid = path_record_id(&room_id)?;
-    let room = room_for(&s, u.id, rid)?;
-    if room.kind != "Rooms::Direct" {
-        return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+    Ok(rails_exception_500_response(&headers, &uri))
 }
 async fn room_delete(
     State(s): State<Arc<AppState>>,
@@ -10944,11 +10946,7 @@ async fn direct_upload_disk_get(
     if let Some((raw_filename, content_type, uploaded, content_type_is_null)) = row {
         if !uploaded { return Err(StatusCode::NOT_FOUND); }
         if content_type_is_null {
-            let mut response = rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri);
-            if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"text/html")) {
-                response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=UTF-8"));
-            }
-            return Ok(response);
+            return Ok(rails_exception_500_response(&headers, &uri));
         }
         let actual_filename = rails_sanitized_filename(&raw_filename);
         let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));

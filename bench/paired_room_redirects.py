@@ -1,5 +1,6 @@
 """Compare room index and room-namespace redirects with pinned Campfire."""
 
+import hashlib
 import http.client
 import pathlib
 import sqlite3
@@ -44,9 +45,11 @@ def request(port, cookie, path):
     try:
         connection.request("GET", path, headers={"Cookie": cookie})
         response = connection.getresponse()
-        response.read()
+        body = response.read()
         location = response.getheader("Location")
-        return response.status, urllib.parse.urlsplit(location).path if location else None
+        return (response.status, urllib.parse.urlsplit(location).path if location else None,
+                response.getheader("Content-Type") if response.status == 500 else None,
+                hashlib.sha256(body).hexdigest() if response.status == 500 else None)
     finally:
         connection.close()
 
@@ -84,10 +87,9 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    comparable = [path for path in PATHS if camp_result[path][0] != 500]
     source_errors = [path for path in PATHS if camp_result[path][0] == 500]
     assert set(source_errors) == {"/rooms/directs/1", "/rooms/directs/2", "/rooms/directs/3", "/rooms/directs/999"}, source_errors
-    mismatches = {path: (rust_result[path], camp_result[path]) for path in comparable if rust_result[path] != camp_result[path]}
+    mismatches = {path: (rust_result[path], camp_result[path]) for path in PATHS if rust_result[path] != camp_result[path]}
     if mismatches:
         for path, (rust, camp) in mismatches.items():
             print(f"{path}: Rustfire={rust}, Campfire={camp}")
@@ -97,7 +99,7 @@ def main():
         for path, (rust, camp) in anonymous_mismatches.items():
             print(f"anonymous {path}: Rustfire={rust}, Campfire={camp}")
         raise AssertionError(f"{len(anonymous_mismatches)} anonymous room redirect mismatches")
-    print(f"PASS {len(comparable)} signed-in and {len(ANONYMOUS_PATHS)} anonymous room redirects match Campfire; skipped {len(source_errors)} upstream 500 routes")
+    print(f"PASS {len(PATHS)} signed-in and {len(ANONYMOUS_PATHS)} anonymous room namespace responses match Campfire, including {len(source_errors)} upstream 500 pages")
 
 
 if __name__ == "__main__":
