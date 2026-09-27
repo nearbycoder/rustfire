@@ -64,6 +64,8 @@ Imported user and bot avatar originals are stored in the avatar directory used b
 
 `python bench/paired_import_roundtrip.py` creates a disposable bot, rich-text message, and file attachment in pinned Campfire, imports the stopped account, and compares the rendered bot list, bot editor, and room page with Rustfire. The sampled signed avatar and attachment paths and original bytes match; complete parsed page structure matches after normalizing generated values. This is a repeatable sample, not a full migration validation.
 
+With the same import fixture, ten-second checked room-page reads at 32, 128, and 256 clients in both server orders measured **2.62–3.35×** Rustfire throughput with lower p95 latency and zero read errors in either app. See [the raw results](bench/results/imported-room-reads.json). This sampled workload does not prove sustained or whole-app superiority.
+
 If Campfire has push subscriptions, also set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to its original VAPID keys before import. The importer verifies the pair and creates Rustfire's key file so those subscriptions retain the same application server key.
 
 The importer preserves unknown inline image subtypes as file attachments and previews valid `video/*` blobs, matching sampled Campfire behavior. It still stops if a previewable image or video cannot be decoded, if image dimensions conflict with saved metadata, or if it encounters an unknown Active Storage attachment record type. It requires local Active Storage files and a stopped source app for a consistent snapshot. Rebuilt search text still needs parity checks for less common ActionText content. These cases, plus full rich-text rendering and media edge cases, remain migration parity work.

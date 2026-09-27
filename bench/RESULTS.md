@@ -21,6 +21,16 @@ The importer fixture now includes two bot users whose avatars reference one sour
 
 `python bench/paired_import_roundtrip.py --sample-dir /tmp/rustfire-import-roundtrip` now creates a bot with a PNG avatar, a rich-text message, and a text-file message through pinned Campfire's HTTP routes, then stops it and imports its SQLite database and Active Storage files. The importer reported 52 users, two messages, one file attachment, one avatar, one push subscription, and three sessions. The imported Rustfire server accepted the copied signed session. Both apps served the same original PNG and text-file bytes from identical source-signed blob paths. Complete parsed head and body comparisons passed for the bot list (146/180 tokens), bot editor (146/213), and room (148/769). The comparator normalizes listen origins, generated times, signed avatar and blob values, product names, and the source's intermittent boost-form CSRF inputs; both servers used the same VAPID key and browser user agent. This is a live-to-import sample with two message types, not comprehensive migration parity or a performance comparison.
 
+The same parity gate preceded `python bench/paired_import_roundtrip.py --read-clients 32 128 256 --seconds 10 --report bench/results/imported-room-reads.json`. One Rustfire release process and Campfire with 22 Puma workers ran serially on the same 32-logical-CPU host as the Go load generator. Each keep-alive client made two checked warmup reads. Every measured response had HTTP 200, HTML media type, and both imported message IDs; all 12 trials had zero errors. Both server orders used the same browser user agent and ten-second interval at each concurrency point.
+
+| Clients | Rustfire reads/s | Campfire reads/s | Rustfire / Campfire | Rustfire p95 | Campfire p95 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 32 | 3,273–3,285 | 980–1,178 | 2.78–3.35× | 12.1–12.3 ms | 56.3–64.5 ms |
+| 128 | 3,102–3,267 | 1,160–1,177 | 2.64–2.82× | 61.7–66.0 ms | 213.1–312.6 ms |
+| 256 | 3,212–3,232 | 1,109–1,236 | 2.62–2.90× | 136.0–138.4 ms | 328.3–379.5 ms |
+
+The [raw report](results/imported-room-reads.json) contains per-order counts and latencies. This measures one imported room page with two messages; it does not establish maximum scale, long-duration stability, equal raw HTML bytes, or a whole-app performance advantage at full parity.
+
 `python bench/paired_sidebar_fanout.py --sockets 100 --rooms 10 --campfire-workers 22` passed in both server orders using the release build. Each app created ten open rooms with 51 memberships each and delivered all 1,000 expected, source-shaped sidebar events with no missed or unexpected events. The sampled payloads matched byte for byte. The measured ten-request interval was 50 ms for Rustfire versus 640 ms for Campfire with Rustfire first, and 56 ms versus 664 ms with Campfire first. This short same-host burst checks room creation and delivery at 100 sockets; it does not establish sustained or maximum capacity.
 
 ## Paired QR code response parity

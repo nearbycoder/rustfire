@@ -358,6 +358,7 @@ def measure_room_page(binary, port, cookie, clients, seconds, messages=1):
     result = subprocess.run([
         str(binary), "--base", f"http://127.0.0.1:{port}", "--path", "/rooms/1",
         "--cookie", cookie, "--accept", "text/html", "--expected-status", "200",
+        "--user-agent", AGENT,
         "--expected-content-type", "text/html", "--expected-message-count", str(messages),
         "--clients", str(clients), "--seconds", str(seconds),
     ], capture_output=True, text=True, check=True)

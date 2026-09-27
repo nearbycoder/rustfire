@@ -1,0 +1,189 @@
+{
+  "source_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "rustfire_revision": "5ecf236655fa74d536ed9446e19fe28a75744093",
+  "fixture": "imported Campfire account with one rich message, one text attachment, and one bot avatar",
+  "seconds": 10.0,
+  "campfire_workers": 22,
+  "trials": [
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.01940614,
+      "successes": 9817,
+      "errors": 0,
+      "rps": 979.7985891407333,
+      "median_ms": 29.242971,
+      "p95_ms": 56.317459,
+      "p99_ms": 92.977094
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.00539383,
+      "successes": 32864,
+      "errors": 0,
+      "rps": 3284.628327318926,
+      "median_ms": 9.689716,
+      "p95_ms": 12.094993,
+      "p99_ms": 13.313546
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.0077919,
+      "successes": 32761,
+      "errors": 0,
+      "rps": 3273.5492831340744,
+      "median_ms": 9.729785,
+      "p95_ms": 12.308916,
+      "p99_ms": 13.53398
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.025427959,
+      "successes": 11813,
+      "errors": 0,
+      "rps": 1178.3038138930783,
+      "median_ms": 18.323094,
+      "p95_ms": 64.476025,
+      "p99_ms": 89.990922
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.088810417,
+      "successes": 11706,
+      "errors": 0,
+      "rps": 1160.2953684484921,
+      "median_ms": 93.638626,
+      "p95_ms": 213.143277,
+      "p99_ms": 317.354711
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.031863185,
+      "successes": 32777,
+      "errors": 0,
+      "rps": 3267.289375418251,
+      "median_ms": 38.754868,
+      "p95_ms": 61.691124,
+      "p99_ms": 74.233554
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.037080771,
+      "successes": 31135,
+      "errors": 0,
+      "rps": 3101.997553906105,
+      "median_ms": 40.637132,
+      "p95_ms": 65.961386,
+      "p99_ms": 79.016281
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.159222225,
+      "successes": 11953,
+      "errors": 0,
+      "rps": 1176.5664472409942,
+      "median_ms": 61.811143,
+      "p95_ms": 312.617062,
+      "p99_ms": 395.704601
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.246206513,
+      "successes": 11364,
+      "errors": 0,
+      "rps": 1109.0933981841754,
+      "median_ms": 201.201572,
+      "p95_ms": 379.548135,
+      "p99_ms": 456.73027
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.070311575,
+      "successes": 32351,
+      "errors": 0,
+      "rps": 3212.5123199080363,
+      "median_ms": 76.729777,
+      "p95_ms": 138.35364,
+      "p99_ms": 172.389535
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.081481923,
+      "successes": 32583,
+      "errors": 0,
+      "rps": 3231.965325024766,
+      "median_ms": 77.018561,
+      "p95_ms": 136.041984,
+      "p99_ms": 170.450827
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.239615521,
+      "successes": 12653,
+      "errors": 0,
+      "rps": 1235.6909274621191,
+      "median_ms": 178.613115,
+      "p95_ms": 328.260341,
+      "p99_ms": 420.757171
+    }
+  ]
+}

@@ -6,6 +6,7 @@ Run after cargo build --release with the pinned Ruby bundle and Redis.
 import argparse
 import base64
 import html
+import json
 import os
 from pathlib import Path
 import re
@@ -19,7 +20,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_bot_admin import AvatarPreview, PNG, cleanup_campfire_uploads, multipart, request
 from paired_attachment_mime import post as post_attachment
 from paired_direct_lookup import login_campfire, seed_campfire, wait_for_server
-from paired_room_shell import AGENT, assert_equal, section
+from paired_room_shell import AGENT, assert_equal, measure_room_page, section
 
 
 def page(port, path, cookie, csrf):
@@ -52,13 +53,59 @@ def attachment(port, document, cookie, csrf):
     return path
 
 
+def measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust_port,
+        uploads, cookie, clients_list, seconds, campfire_workers):
+    binary = temp / "checked_get"
+    subprocess.run(("go", "build", "-o", str(binary), "bench/checked_get.go"), check=True)
+    trials = []
+    for clients in clients_list:
+        for order in (("Campfire", "Rustfire"), ("Rustfire", "Campfire")):
+            for name in order:
+                if name == "Campfire":
+                    trial_env = dict(env, WEB_CONCURRENCY=str(campfire_workers),
+                        PIDFILE=str(temp / "benchmark-puma.pid"))
+                    with (temp / "benchmark-puma.log").open("w+") as log:
+                        process = subprocess.Popen((str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"),
+                            cwd=repository, env=trial_env, stdout=log, stderr=log)
+                        try:
+                            wait_for_server(camp_port, process)
+                            report = measure_room_page(binary, camp_port, cookie, clients, seconds, messages=2)
+                        except Exception:
+                            log.flush()
+                            log.seek(0)
+                            print(log.read()[-3000:])
+                            raise
+                        finally:
+                            stop_server(process)
+                else:
+                    process = start_server(rust_db, rust_port, {
+                        "RUSTFIRE_UPLOAD_DIR": str(uploads),
+                        "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"],
+                    })
+                    try:
+                        report = measure_room_page(binary, rust_port, cookie, clients, seconds, messages=2)
+                    finally:
+                        stop_server(process)
+                trials.append({"clients": clients, "order": list(order), "app": name, **report})
+                print(f"{clients} clients {'-'.join(order)} {name}: {report['rps']:.1f} rps, p95 {report['p95_ms']:.2f} ms, {report['errors']} errors")
+    return trials
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campfire-repo", type=Path, default=Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=Path, default=Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=Path, default=Path("/tmp/rustfire-baseline/bundle"))
     parser.add_argument("--sample-dir", type=Path)
+    parser.add_argument("--read-clients", type=int, nargs="*", default=[])
+    parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument("--campfire-workers", type=int, default=22)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
+    if any(clients < 1 for clients in args.read_clients) or args.seconds <= 0 or args.campfire_workers < 1:
+        parser.error("positive clients, seconds, and Campfire worker count are required")
+    if args.report and not args.read_clients:
+        parser.error("--report requires --read-clients")
     repository, ruby, bundle_path = args.campfire_repo.resolve(), args.ruby.resolve(), args.bundle_path.resolve()
     revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repository, text=True).strip()
     assert revision == "91d294f4a09f9bbe37f9548959bfcb43645678fb", revision
@@ -124,22 +171,35 @@ def main():
                 target_attachment = attachment(rust_port, target["room"], cookie, csrf)
             finally:
                 stop_server(rust_process)
+            assert source_preview == target_preview, (source_preview, target_preview)
+            print("imported original avatar signed path and bytes match")
+            assert source_attachment == target_attachment, (source_attachment, target_attachment)
+            print("imported message attachment signed path and bytes match")
+            if args.sample_dir:
+                args.sample_dir.mkdir(parents=True, exist_ok=True)
+                for label, documents in (("campfire", source), ("rustfire", target)):
+                    for name, document in documents.items():
+                        (args.sample_dir / f"{label}-import-{name}.html").write_bytes(document)
+            for name in paths:
+                for part in ("head", "body"):
+                    options = {"normalize_times": True, "normalize_avatar_paths": True, "normalize_blob_paths": True,
+                        "normalize_text_origins": True, "ignore_csrf_inputs": name == "room"}
+                    assert_equal(f"imported {name} {part}", section(source[name], part, **options), section(target[name], part, **options))
+            if args.read_clients:
+                trials = measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust_port,
+                    uploads, cookie, args.read_clients, args.seconds, args.campfire_workers)
+                if args.report:
+                    args.report.parent.mkdir(parents=True, exist_ok=True)
+                    args.report.write_text(json.dumps({
+                        "source_revision": revision,
+                        "rustfire_revision": subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
+                        "fixture": "imported Campfire account with one rich message, one text attachment, and one bot avatar",
+                        "seconds": args.seconds,
+                        "campfire_workers": args.campfire_workers,
+                        "trials": trials,
+                    }, indent=2) + "\n")
         finally:
             cleanup_campfire_uploads(source_database, camp_db, repository)
-        assert source_preview == target_preview, (source_preview, target_preview)
-        print("imported original avatar signed path and bytes match")
-        assert source_attachment == target_attachment, (source_attachment, target_attachment)
-        print("imported message attachment signed path and bytes match")
-        if args.sample_dir:
-            args.sample_dir.mkdir(parents=True, exist_ok=True)
-            for label, documents in (("campfire", source), ("rustfire", target)):
-                for name, document in documents.items():
-                    (args.sample_dir / f"{label}-import-{name}.html").write_bytes(document)
-        for name in paths:
-            for part in ("head", "body"):
-                options = {"normalize_times": True, "normalize_avatar_paths": True, "normalize_blob_paths": True,
-                    "normalize_text_origins": True, "ignore_csrf_inputs": name == "room"}
-                assert_equal(f"imported {name} {part}", section(source[name], part, **options), section(target[name], part, **options))
 
 
 if __name__ == "__main__":

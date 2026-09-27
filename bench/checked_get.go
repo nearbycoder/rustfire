@@ -57,6 +57,7 @@ func main() {
 	signalStart := flag.Bool("signal-start", false, "write MEASURE_START to stderr after all client warmups")
 	invalidSample := flag.String("invalid-sample", "", "save the first invalid response body for diagnosis")
 	accept := flag.String("accept", "application/json", "Accept request header")
+	userAgent := flag.String("user-agent", "", "optional User-Agent request header")
 	clients := flag.Int("clients", 32, "number of concurrent keep-alive clients")
 	seconds := flag.Float64("seconds", 15, "measured duration")
 	flag.Parse()
@@ -108,6 +109,9 @@ func main() {
 		}
 		request.Header.Set("Cookie", item.Cookie)
 		request.Header.Set("Accept", *accept)
+		if *userAgent != "" {
+			request.Header.Set("User-Agent", *userAgent)
+		}
 		if *ifNoneMatch != "" {
 			request.Header.Set("If-None-Match", *ifNoneMatch)
 		}
