@@ -2052,11 +2052,14 @@ fn render(title: &str, body: &str, current: Option<&User>) -> Response {
     )
 }
 fn render_unauth(title: &str, body: &str, logo_version: Option<&str>) -> Response {
-    render_unauth_with_nav(title, body, "", logo_version)
+    render_unauth_with_nav_and_flash(title, body, "", "", logo_version)
 }
 fn render_unauth_with_nav(title: &str, body: &str, nav: &str, logo_version: Option<&str>) -> Response {
+    render_unauth_with_nav_and_flash(title, body, nav, "", logo_version)
+}
+fn render_unauth_with_nav_and_flash(title: &str, body: &str, nav: &str, flash: &str, logo_version: Option<&str>) -> Response {
     let token = Uuid::new_v4().to_string();
-    let mut response = render_source_page_sections_with_logo(title, body, nav, "", "", "", "", "", None, &token, logo_version);
+    let mut response = render_source_page_sections_with_logo(title, body, nav, "", "", "", "", "", flash, None, &token, logo_version);
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
@@ -2076,9 +2079,9 @@ fn render_source_page_with_footer(title: &str, body: &str, nav: &str, footer: &s
 }
 fn render_source_page_sections(title: &str, body: &str, nav: &str, footer: &str, sidebar: &str, body_class_extra: &str, body_class_suffix: &str, head_extra: &str, current: Option<&User>, token: &str) -> Response {
     let logo_version = current.map(|user| user.account_updated_at.chars().filter(char::is_ascii_digit).take(14).collect::<String>());
-    render_source_page_sections_with_logo(title, body, nav, footer, sidebar, body_class_extra, body_class_suffix, head_extra, current, token, logo_version.as_deref())
+    render_source_page_sections_with_logo(title, body, nav, footer, sidebar, body_class_extra, body_class_suffix, head_extra, "", current, token, logo_version.as_deref())
 }
-fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, footer: &str, sidebar: &str, body_class_extra: &str, body_class_suffix: &str, head_extra: &str, current: Option<&User>, token: &str, logo_version: Option<&str>) -> Response {
+fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, footer: &str, sidebar: &str, body_class_extra: &str, body_class_suffix: &str, head_extra: &str, flash: &str, current: Option<&User>, token: &str, logo_version: Option<&str>) -> Response {
     const CAMPFIRE_STYLES: &[&str] = &[
         "_reset-9c3efd7b.css", "actiontext-2aab36c6.css", "animation-bcdb4bab.css",
         "autocomplete-cdf3d8bd.css", "avatars-279376ab.css", "base-637a0ec8.css",
@@ -2104,7 +2107,7 @@ fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, foo
     let logo_url = logo_version.map_or_else(|| "/account/logo".to_string(), |version| format!("/account/logo?v={version}"));
     let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}<script defer src="/static/app.js"></script>{head_extra}</head>
-<body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav><main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
+<body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav>{flash}<main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
         title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
     );
     Html(if current.is_some() { html } else { csrf_forms(&html, token) }).into_response()
@@ -3375,7 +3378,7 @@ async fn first_run_post(
     let Some(uid) = created? else { return Ok(found_redirect("/")) };
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
-fn login_page(s: &AppState, email_address: &str, rejection: Option<StatusCode>) -> AppResult {
+fn login_page(s: &AppState, headers: &HeaderMap, email_address: &str, rejection: Option<StatusCode>) -> AppResult {
     let db = pool(s)?;
     let (account_name, updated_at): (String, String) = db.query_row(
         "SELECT name,updated_at FROM accounts ORDER BY id LIMIT 1",
@@ -3400,21 +3403,25 @@ fn login_page(s: &AppState, email_address: &str, rejection: Option<StatusCode>) 
     ]);
     let help_contact = owner.map(|(name, email)| {
         let address = format!("mailto:\"{name}\" <{email}>");
-        format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
+        let version = env::var("APP_VERSION").ok().filter(|value| !value.trim().is_empty())
+            .or_else(|| env::var("GIT_REVISION").ok().filter(|value| !value.trim().is_empty()))
+            .unwrap_or_else(|| "0".to_string());
+        format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Rustfire&trade; version <span class=\"version-badge\">{}</span></div></div>", esc(&address), esc(&name), esc(&email), esc(&version))
     }).unwrap_or_default();
     let flash = if rejection.is_some() {
-        "<div class=\"flash\" role=\"alert\">Too many requests or unauthorized.</div>"
+        "<div class=\"flash\" data-controller=\"element-removal\" data-action=\"animationend->element-removal#remove\"><div class=\"flash__inner shadow\" style=\"--flash-background: var(--color-negative)\"><img src=\"/assets/alert-b937985b.svg\" aria-hidden=\"true\" width=\"24\" height=\"24\" class=\"colorize--white\"></div><span class=\"for-screen-reader\" role=\"alert\" aria-atomic=\"true\">Too many requests or unauthorized.</span></div>"
     } else { "" };
-    let shake = if rejection.is_some() { " shake" } else { "" };
-    let body = format!(r#"{flash}<section class="txt-align-center"><div class="panel{shake}"><figure class="account-logo avatar center margin-block-end txt-xx-large"><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure>
-<form class="flex flex-column gap" action="/session" accept-charset="UTF-8" method="post"><fieldset class="flex flex-column gap center-block upad"><legend class="txt-large txt-align-center"><strong>{account_name}</strong></legend>
+    let shake = if rejection.is_some() { "shake" } else { "" };
+    let session_url = esc(&public_url(headers, "/session"));
+    let body = format!(r#"<section class="txt-align-center"><div class="panel {shake}"><figure class="account-logo avatar center margin-block-end txt-xx-large"><img alt="Account logo" src="/account/logo?v={logo_version}" width="300" height="300"></figure>
+<form class="flex flex-column gap" action="{session_url}" accept-charset="UTF-8" method="post"><fieldset class="flex flex-column gap center-block upad"><legend class="txt-large txt-align-center"><strong>{account_name}</strong></legend>
 <div class="flex align-center gap">{email_translation}<label class="flex align-center gap input input--actor txt-large"><input required="required" class="input" autofocus="autofocus" autocomplete="username" placeholder="Enter your email address" value="{email_address}" type="email" name="email_address" id="email_address"><img aria-hidden="true" class="colorize--black" src="/assets/email-6c595bc5.svg" width="24" height="24"></label></div>
 <div class="flex align-center gap">{password_translation}<label class="flex align-center gap input input--actor txt-large"><input required="required" class="input" autocomplete="current-password" placeholder="Enter your password" maxlength="72" size="72" type="password" name="password" id="password"><img aria-hidden="true" class="colorize--black" src="/assets/password-0896da4e.svg" width="24" height="24"></label></div>
 <button class="btn btn--reversed center txt-large" type="submit" name="log_in"><img aria-hidden="true" src="/assets/arrow-right-8f3eb40d.svg"><span class="for-screen-reader">Go</span></button></fieldset></form></div>{help_contact}</section>"#,
         account_name = esc(&account_name),
         email_address = esc(email_address),
     );
-    let mut response = render_unauth("Sign in", &body, Some(&logo_version));
+    let mut response = render_unauth_with_nav_and_flash("Sign in", &body, "", flash, Some(&logo_version));
     if let Some(status) = rejection {
         *response.status_mut() = status;
     }
@@ -3422,12 +3429,13 @@ fn login_page(s: &AppState, email_address: &str, rejection: Option<StatusCode>) 
 }
 async fn login_get(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     if first_run_needed(&s)? {
         return Ok(found_redirect("/first_run"));
     }
-    login_page(&s, query.get("email_address").map(String::as_str).unwrap_or(""), None)
+    login_page(&s, &headers, query.get("email_address").map(String::as_str).unwrap_or(""), None)
 }
 #[derive(Deserialize)]
 struct Login {
@@ -3460,7 +3468,7 @@ async fn login_post(
             times.pop_front();
         }
         if times.len() >= 10 {
-            return login_page(&s, &f.email_address, Some(StatusCode::TOO_MANY_REQUESTS));
+            return login_page(&s, &headers, &f.email_address, Some(StatusCode::TOO_MANY_REQUESTS));
         }
         times.push_back(moment);
     }
@@ -3491,7 +3499,7 @@ async fn login_post(
             return Ok(response);
         }
     }
-    login_page(&s, &f.email_address, Some(StatusCode::UNAUTHORIZED))
+    login_page(&s, &headers, &f.email_address, Some(StatusCode::UNAUTHORIZED))
 }
 async fn session_post(
     State(s): State<Arc<AppState>>,

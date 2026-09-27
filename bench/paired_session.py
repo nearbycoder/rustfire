@@ -13,7 +13,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 from paired_join import browser
-from paired_room_shell import HeadMeta
+from paired_room_shell import HeadMeta, section
 from paired_turbo_fanout import MessageTagSequence
 
 
@@ -84,6 +84,8 @@ def check(port, database):
     status, _, rejected = request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "wrong-password"}, token(page))
     assert status == 401 and "shake" in rejected and "Too many requests or unauthorized." in rejected
     assert form_shape(rejected) == original_shape
+    status, _, alert_asset = request(opener, port, "/assets/alert-b937985b.svg")
+    assert status == 200 and alert_asset.encode() == pathlib.Path("static/assets/alert-b937985b.svg").read_bytes()
 
     status, location, _ = request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "benchmark-password"}, token(rejected))
     assert (status, location) == (302, "/"), (status, location)
@@ -102,7 +104,7 @@ def check(port, database):
     status, _, sign_in_page = request(opener, port, "/session/new")
     assert status == 200
     assert request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "benchmark-password"}, token(sign_in_page))[:2] == (302, "/rooms/1")
-    return original_shape, original_icons
+    return original_shape, original_icons, page, rejected
 
 
 def main():
@@ -121,7 +123,7 @@ def main():
             digest = db.execute("SELECT password_digest FROM users WHERE id=1").fetchone()[0]
         with sqlite3.connect(rust_db) as db:
             db.execute("UPDATE accounts SET name='Benchmark',updated_at=? WHERE id=1", [account_updated_at])
-            db.execute("UPDATE users SET email_address='benchmark@example.invalid',password_digest=? WHERE id=1", [digest])
+            db.execute("UPDATE users SET name='Test Admin',email_address='benchmark@example.invalid',password_digest=? WHERE id=1", [digest])
         for database in (rust_db, camp_db):
             with sqlite3.connect(database) as db:
                 db.executemany("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,created_at,updated_at) VALUES(?1,?2,'key','auth','2026-01-01 00:00:00','2026-01-01 00:00:00')", [
@@ -152,11 +154,28 @@ def main():
                 mismatches = [(i, left, right) for i, (left, right) in enumerate(zip(rust_part, camp_part)) if left != right]
                 assert not mismatches and len(rust_part) == len(camp_part), (len(rust_part), len(camp_part), mismatches[:12])
             assert rust_shape[1] == camp_shape[1], (rust_shape[1], camp_shape[1])
+            for target in ("nav", "main-content", "footer", "sidebar"):
+                rust_tokens = section(rust_shape[2].encode(), target)
+                camp_tokens = section(camp_shape[2].encode(), target)
+                differences = [(index, left, right) for index, (left, right) in enumerate(zip(rust_tokens, camp_tokens)) if left != right]
+                assert not differences and len(rust_tokens) == len(camp_tokens), (target, len(rust_tokens), len(camp_tokens), differences[:8])
+                rust_rejected = section(rust_shape[3].encode(), target)
+                camp_rejected = section(camp_shape[3].encode(), target)
+                differences = [(index, left, right) for index, (left, right) in enumerate(zip(rust_rejected, camp_rejected)) if left != right]
+                assert not differences and len(rust_rejected) == len(camp_rejected), ("rejected", target, len(rust_rejected), len(camp_rejected), differences[:8])
+            for page in (rust_shape[3], camp_shape[3]):
+                assert page.index('class="flash"') < page.index('id="main-content"'), "rejection flash must precede main"
+            rust_flash = section(rust_shape[3].replace('<div class="flash"', '<div id="session-flash" class="flash"', 1).encode(), "session-flash")
+            # The pinned layout emits a stray </span> after the flash icon. Browsers discard it.
+            camp_rejected = re.sub(r'(<div class="flash__inner shadow"[^>]*>\s*<img[^>]*>)\s*</span>', r'\1', camp_shape[3], count=1)
+            assert camp_rejected != camp_shape[3]
+            camp_flash = section(camp_rejected.replace('<div class="flash"', '<div id="session-flash" class="flash"', 1).encode(), "session-flash")
+            assert rust_flash == camp_flash, (rust_flash, camp_flash)
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired sign-in form, rejection, device push removal on sign-out, and return to a requested room")
+    print("PASS paired sign-in page sections, rejection flash, device push removal on sign-out, and return to a requested room")
 
 
 if __name__ == "__main__":
