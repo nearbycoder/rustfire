@@ -2613,7 +2613,7 @@ fn og_attributes(document: &str) -> HashMap<String, String> {
             continue;
         };
         if matches!(key, "title" | "url" | "image" | "description") {
-            if let Some(content) = meta.value().attr("content") {
+            if let Some(content) = meta.value().attr("content").filter(|value| !value.trim().is_empty()) {
                 // Nokogiri's source implementation re-encodes meta content as
                 // binary when the document declares no charset. That drops
                 // every non-ASCII byte, including otherwise valid UTF-8.
@@ -13702,6 +13702,17 @@ mod tests {
         }
         let html = "<meta property='og:description' content='Hello â\u{0080}\u{0099}World'>";
         assert_eq!(super::og_attributes(html).get("description").unwrap(), "Hello World");
+    }
+    #[test]
+    fn opengraph_blank_duplicate_tags_leave_previous_values() {
+        let html = "<meta property='og:title' content='First'>\
+            <meta property='og:title' content=''>\
+            <meta name='og:title' content='  '>\
+            <meta property='og:description' content='Description'>\
+            <meta property='og:description' content='Second'>";
+        let tags = super::og_attributes(html);
+        assert_eq!(tags.get("title").unwrap(), "First");
+        assert_eq!(tags.get("description").unwrap(), "Second");
     }
     #[test]
     fn live_message_replace_requests_scroll_maintenance() {
