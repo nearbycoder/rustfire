@@ -1,0 +1,155 @@
+"""Import a large seeded Campfire fixture and compare every paged message response.
+
+Requires the pinned checkout, bundled Ruby, Redis, and a release Rustfire build.
+The pinned database schema is copied, then deterministic, distinct-time messages
+are inserted into a disposable fixture so both apps can traverse every row.
+"""
+
+import argparse
+from datetime import datetime, timedelta
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import tempfile
+import time
+
+from direct_lookup import free_port, start_server, stop_server
+from paired_banned_content import start_redis
+from paired_direct_lookup import login_campfire, seed_campfire, wait_for_server
+from paired_room_shell import AGENT, section
+
+
+SOURCE_REVISION = "91d294f4a09f9bbe37f9548959bfcb43645678fb"
+MESSAGE_IDS = re.compile(rb'data-message-id=["\'](\d+)')
+
+
+def get(port, cookie, path):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.request("GET", path, headers={"Cookie": cookie, "User-Agent": AGENT, "Accept": "text/html"})
+        response = connection.getresponse()
+        return response.status, {key.lower(): value for key, value in response.getheaders()}, response.read()
+    finally:
+        connection.close()
+
+
+def page_signature(body):
+    tokens = section(b"<body>" + body + b"</body>", "body", normalize_times=True,
+        normalize_avatar_paths=True, normalize_blob_paths=True, normalize_text_origins=True,
+        ignore_csrf_inputs=True)
+    return hashlib.sha256(repr(tokens).encode()).hexdigest(), len(tokens)
+
+
+def pages(port, cookie, expected, label):
+    path = "/rooms/1/messages"
+    seen = set()
+    total_bytes = 0
+    number = 0
+    while True:
+        status, headers, body = get(port, cookie, path)
+        if status == 204:
+            assert not body and number and len(seen) == expected, (label, number, len(seen), expected)
+            break
+        assert status == 200, (label, path, status, body[:300])
+        ids = [int(value) for value in MESSAGE_IDS.findall(body)]
+        assert ids and len(ids) <= 40 and not (set(ids) & seen), (label, number, ids)
+        assert headers.get("etag", "").startswith('W/"') and headers.get("last-modified"), (label, path, headers)
+        signature, token_count = page_signature(body)
+        result = (ids, headers["etag"], headers["last-modified"], signature, token_count)
+        yield result
+        seen.update(ids)
+        total_bytes += len(body)
+        number += 1
+        if number % 50 == 0:
+            print(f"{label}: {number} pages, {len(seen)} messages", flush=True)
+        path = f"/rooms/1/messages?before={ids[0]}"
+    print(f"{label}: {number} pages, {len(seen)} messages, {total_bytes} raw HTML bytes", flush=True)
+
+
+def seed_messages(database, count):
+    base = datetime.fromisoformat("2026-01-01 00:00:00")
+    messages, rich_texts, search_rows = [], [], []
+    for id in range(1, count + 1):
+        timestamp = (base + timedelta(milliseconds=id)).strftime("%Y-%m-%d %H:%M:%S.%f")
+        plain = f"Large import message {id:05d}"
+        body = f"<div>{plain} <strong>bold</strong></div>" if id % 10 == 0 else f"<div>{plain}</div>"
+        messages.append((id, f"large-import-{id}", timestamp))
+        rich_texts.append((body, id, timestamp, timestamp))
+        search_rows.append((id, plain + (" bold" if id % 10 == 0 else "")))
+    with sqlite3.connect(database) as db:
+        db.executemany("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,1,1,?,?,?)",
+            ((id, client_id, timestamp, timestamp) for id, client_id, timestamp in messages))
+        db.executemany("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body',?,'Message',?,?,?)", rich_texts)
+        db.executemany("INSERT INTO message_search_index(rowid,body) VALUES(?,?)", search_rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--campfire-repo", type=Path, default=Path("/tmp/once-campfire-reference"))
+    parser.add_argument("--ruby", type=Path, default=Path("/tmp/rustfire-baseline/local/bin/ruby"))
+    parser.add_argument("--bundle-path", type=Path, default=Path("/tmp/rustfire-baseline/bundle"))
+    parser.add_argument("--messages", type=int, default=16_230, help="number of seeded messages (at least 41)")
+    args = parser.parse_args()
+    if args.messages < 41:
+        parser.error("--messages must be at least 41")
+    repository, ruby, bundle_path = args.campfire_repo.resolve(), args.ruby.resolve(), args.bundle_path.resolve()
+    revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repository, text=True).strip()
+    assert revision == SOURCE_REVISION, revision
+    with tempfile.TemporaryDirectory(prefix="paired-large-import-") as directory:
+        temp = Path(directory)
+        source_db, target_db, uploads = temp / "campfire.sqlite3", temp / "rustfire.sqlite3", temp / "uploads"
+        camp_port, rust_port, redis_port = free_port(), free_port(), free_port()
+        environment = seed_campfire(repository, ruby, bundle_path,
+            repository / "storage/db/production.sqlite3", source_db, [], camp_port, temp)
+        seed_messages(source_db, args.messages)
+        expected = args.messages
+        environment["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
+        bundle = ruby.parent / "bundle"
+        redis, redis_log = start_redis(temp, redis_port)
+        try:
+            with (temp / "puma.log").open("w+") as log:
+                camp = subprocess.Popen((str(ruby), str(bundle), "exec", "puma", "-C", "config/puma.rb"),
+                    cwd=repository, env=environment, stdout=log, stderr=log)
+                try:
+                    wait_for_server(camp_port, camp)
+                    cookie, _ = login_campfire(camp_port)
+                    source_pages = list(pages(camp_port, cookie, expected, "Campfire"))
+                except Exception:
+                    log.flush()
+                    log.seek(0)
+                    print(log.read()[-3000:])
+                    raise
+                finally:
+                    stop_server(camp)
+            started = time.monotonic()
+            importer = subprocess.run(("python", "tools/import_campfire.py", "--source-db", str(source_db),
+                "--source-files", str(repository / "storage/files"), "--target-db", str(target_db),
+                "--target-uploads", str(uploads), "--rustfire-bin", "target/release/rustfire"),
+                env=dict(os.environ, RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE=environment["SECRET_KEY_BASE"]),
+                check=True, text=True, capture_output=True)
+            elapsed = time.monotonic() - started
+            counts = json.loads(importer.stdout)
+            assert counts["messages"] == expected, counts
+            print(f"import: {counts['messages']} messages in {elapsed:.2f}s", flush=True)
+            rust = start_server(target_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(uploads),
+                "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": environment["SECRET_KEY_BASE"]})
+            try:
+                target_pages = pages(rust_port, cookie, expected, "Rustfire")
+                for number, (original, imported) in enumerate(zip(source_pages, target_pages, strict=True), 1):
+                    assert original == imported, (number, original[:3], imported[:3], original[3:], imported[3:])
+                print(f"PASS {len(source_pages)} complete message pages with matching IDs, ETags, Last-Modified, and parsed bodies")
+            finally:
+                stop_server(rust)
+        finally:
+            redis.terminate()
+            redis.wait(timeout=10)
+            redis_log.close()
+
+
+if __name__ == "__main__":
+    main()
