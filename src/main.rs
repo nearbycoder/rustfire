@@ -8855,6 +8855,7 @@ async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResul
 async fn profile_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -8914,34 +8915,22 @@ async fn profile_post(
         return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")], "").into_response());
     }
     let name = form_value(&f, "name", "user[name]").unwrap_or(&u.name);
-    if name.trim().is_empty() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let email = match form_value(&f, "email_address", "user[email_address]") {
-        Some(e) if e.trim().is_empty() => None,
-        Some(e) if e.contains('@') => Some(e.trim().to_string()),
-        Some(_) => return Err(StatusCode::UNPROCESSABLE_ENTITY),
-        None => {
-            if u.email.is_empty() {
-                None
-            } else {
-                Some(u.email.clone())
-            }
-        }
-    };
+    let email = form_value(&f, "email_address", "user[email_address]");
     let password = match form_value(&f, "password", "user[password]") {
         Some(p) if p.is_empty() => None,
-        Some(p) if p.len() >= 8 => Some(hash(p, DEFAULT_COST).map_err(db_err)?),
-        Some(_) => return Err(StatusCode::UNPROCESSABLE_ENTITY),
+        Some(p) => Some(hash(p, DEFAULT_COST).map_err(db_err)?),
         None => None,
     };
-    let bio = form_value(&f, "bio", "user[bio]").map(|s| s.chars().take(200).collect::<String>());
-    pool(&s)?
+    let bio = form_value(&f, "bio", "user[bio]");
+    if pool(&s)?
         .execute(
-            "UPDATE users SET name=?1,email_address=?2,bio=COALESCE(?3,bio),password_digest=COALESCE(?4,password_digest),updated_at=?5 WHERE id=?6",
-            params![name.trim(),email,bio,password,now(),u.id],
+            "UPDATE users SET name=?1,email_address=COALESCE(?2,email_address),bio=COALESCE(?3,bio),password_digest=COALESCE(?4,password_digest),updated_at=?5 WHERE id=?6",
+            params![name,email,bio,password,now(),u.id],
         )
-        .map_err(|_|StatusCode::CONFLICT)?;
+        .is_err()
+    {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
     if let Some((bytes, content_type)) = avatar {
         save_avatar(&s, u.id, bytes, content_type)?;
     }
