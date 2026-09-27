@@ -20,15 +20,19 @@ use base64::{
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{Duration, SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
+use hkdf::Hkdf;
 use openssl::{
     bn::BigNumContext,
+    derive::Deriver,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     hash::MessageDigest,
     memcmp,
     nid::Nid,
     pkcs5::pbkdf2_hmac,
     pkey::PKey,
+    rand::rand_bytes,
     sign::Signer,
+    symm::{Cipher, encrypt_aead},
 };
 use qrcodegen::{Mask, QrCode, QrCodeEcc, QrSegment, QrSegmentMode, Version};
 use r2d2::Pool;
@@ -38,6 +42,7 @@ use rusqlite::{OptionalExtension, params};
 use scraper::{Html as ParsedHtml, Node as HtmlNode, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
@@ -56,7 +61,8 @@ use tower::ServiceExt;
 use tower_http::{compression::{CompressionLayer, predicate::{Predicate, SizeAbove}}, services::ServeDir};
 use uuid::Uuid;
 use web_push::{
-    ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushMessageBuilder,
+    ContentEncoding, SubscriptionInfo, Urgency, VapidSignature, VapidSignatureBuilder,
+    WebPushMessage, WebPushMessageBuilder, WebPushPayload,
     request_builder,
 };
 
@@ -2541,14 +2547,22 @@ fn valid_push_endpoint(endpoint: &str) -> bool {
                 || host.to_ascii_lowercase().ends_with(&format!(".{allowed}"))
         })
 }
+fn decode_push_key(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    URL_SAFE_NO_PAD.decode(value).or_else(|_| URL_SAFE.decode(value))
+}
 fn valid_push_keys(p256dh: &str, auth: &str) -> bool {
-    let decode = |value: &str| {
-        URL_SAFE_NO_PAD
-            .decode(value)
-            .or_else(|_| URL_SAFE.decode(value))
-    };
-    matches!(decode(p256dh),Ok(key) if key.len()==65&&key[0]==4)
-        && matches!(decode(auth),Ok(key) if key.len()==16)
+    !p256dh.is_empty()
+        && decode_push_key(p256dh).is_ok()
+        && !auth.is_empty()
+        && decode_push_key(auth).is_ok()
+}
+fn invalid_push_point(p256dh: &str) -> bool {
+    let key = decode_push_key(p256dh);
+    let Ok(key) = key else { return false };
+    if key.is_empty() { return false; }
+    let Ok(group) = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1) else { return false };
+    let Ok(mut context) = BigNumContext::new() else { return false };
+    EcPoint::from_bytes(&group, &key, &mut context).is_err()
 }
 fn public_web_url(input: &str) -> Option<reqwest::Url> {
     if input.len() > 2048 {
@@ -5325,6 +5339,7 @@ async fn push_subscriptions_delete_post_scoped(
 }
 async fn push_test_notification(
     State(s): State<Arc<AppState>>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> AppResult {
@@ -5341,12 +5356,10 @@ async fn push_test_notification(
             )
             .map_err(db_err)?;
         let payload=push_test_payload(&headers,&Uuid::new_v4().to_string(),badge).to_string();
-        deliver_push(s, subscription, payload)
-            .await
-            .map_err(|error| {
-                eprintln!("Rustfire test push error: {error}");
-                StatusCode::BAD_GATEWAY
-            })?;
+        if let Err(error) = deliver_push(s, subscription, payload, false).await {
+            eprintln!("Rustfire test push error: {error}");
+            return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+        }
     }
     Ok(found_redirect("/users/me/push_subscriptions"))
 }
@@ -5355,10 +5368,11 @@ fn push_test_payload(headers: &HeaderMap, body: &str, badge: i64) -> Value {
 }
 async fn push_test_notification_scoped(
     state: State<Arc<AppState>>,
+    uri: OriginalUri,
     headers: HeaderMap,
     Path((_, id)): Path<(String, i64)>,
 ) -> AppResult {
-    push_test_notification(state, headers, Path(id)).await
+    push_test_notification(state, uri, headers, Path(id)).await
 }
 async fn involvement_post(
     State(s): State<Arc<AppState>>,
@@ -6052,7 +6066,7 @@ fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCo
             let Ok(_worker_permit) = state.push_slots.clone().acquire_owned().await else {
                 return;
             };
-            if let Err(error) = deliver_push(state, subscription, payload).await {
+            if let Err(error) = deliver_push(state, subscription, payload, true).await {
                 eprintln!("Rustfire push delivery error: {error}");
             }
         });
@@ -6071,49 +6085,130 @@ fn push_message_body(message: &ChatMessage, direct: bool) -> String {
         format!("{}: {plain}", message.creator_name)
     }
 }
+fn campfire_push_message_fallback(
+    info: &SubscriptionInfo,
+    signature: VapidSignature,
+    payload: &[u8],
+) -> Result<WebPushMessage, String> {
+    // The pinned Ruby web-push encryptor accepts non-16-byte auth secrets and
+    // compressed P-256 points, and payloads above the Rust ECE limit. Use the
+    // same AES128GCM construction for these saved or larger messages.
+    let recipient_bytes = decode_push_key(&info.keys.p256dh).map_err(|e| e.to_string())?;
+    let auth = decode_push_key(&info.keys.auth).map_err(|e| e.to_string())?;
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(|e| e.to_string())?;
+    let mut context = BigNumContext::new().map_err(|e| e.to_string())?;
+    let recipient_point = EcPoint::from_bytes(&group, &recipient_bytes, &mut context)
+        .map_err(|e| e.to_string())?;
+    let recipient_key = EcKey::from_public_key(&group, &recipient_point).map_err(|e| e.to_string())?;
+    let sender_key = EcKey::generate(&group).map_err(|e| e.to_string())?;
+    let sender_bytes = sender_key.public_key()
+        .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)
+        .map_err(|e| e.to_string())?;
+    let sender_pkey = PKey::from_ec_key(sender_key).map_err(|e| e.to_string())?;
+    let recipient_pkey = PKey::from_ec_key(recipient_key).map_err(|e| e.to_string())?;
+    let mut deriver = Deriver::new(&sender_pkey).map_err(|e| e.to_string())?;
+    deriver.set_peer(&recipient_pkey).map_err(|e| e.to_string())?;
+    let secret = deriver.derive_to_vec().map_err(|e| e.to_string())?;
+    let mut info_bytes = b"WebPush: info\0".to_vec();
+    info_bytes.extend_from_slice(&recipient_bytes);
+    info_bytes.extend_from_slice(&sender_bytes);
+    let mut ikm = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(&auth), &secret)
+        .expand(&info_bytes, &mut ikm).map_err(|e| e.to_string())?;
+    let mut salt = [0u8; 16];
+    rand_bytes(&mut salt).map_err(|e| e.to_string())?;
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt), &ikm);
+    let mut key = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    hkdf.expand(b"Content-Encoding: aes128gcm\0", &mut key).map_err(|e| e.to_string())?;
+    hkdf.expand(b"Content-Encoding: nonce\0", &mut nonce).map_err(|e| e.to_string())?;
+    let mut plaintext = payload.to_vec();
+    plaintext.extend_from_slice(&[2, 0]);
+    let mut tag = [0u8; 16];
+    let mut ciphertext = encrypt_aead(Cipher::aes_128_gcm(), &key, Some(&nonce), &[], &plaintext, &mut tag)
+        .map_err(|e| e.to_string())?;
+    ciphertext.extend_from_slice(&tag);
+    if ciphertext.len() > 4096 {
+        return Err("encrypted payload is too big".into());
+    }
+    let mut content = salt.to_vec();
+    content.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    content.push(sender_bytes.len() as u8);
+    content.extend_from_slice(&sender_bytes);
+    content.extend_from_slice(&ciphertext);
+    let authorization = format!("vapid t={}, k={}", signature.auth_t, URL_SAFE_NO_PAD.encode(signature.auth_k));
+    Ok(WebPushMessage {
+        endpoint: info.endpoint.parse::<http_02::Uri>().map_err(|e| e.to_string())?,
+        ttl: 2_419_200,
+        urgency: Some(Urgency::High),
+        topic: None,
+        payload: Some(WebPushPayload {
+            content,
+            crypto_headers: vec![("Authorization", authorization)],
+            content_encoding: ContentEncoding::Aes128Gcm,
+        }),
+    })
+}
 async fn deliver_push(
     s: Arc<AppState>,
     subscription: PushSubscription,
     payload: String,
+    invalidate_expired: bool,
 ) -> Result<(), String> {
-    if !valid_push_endpoint(&subscription.endpoint)
-        || !valid_push_keys(&subscription.p256dh_key, &subscription.auth_key)
-    {
-        return Err("invalid subscription".into());
+    // Campfire's notification skips delivery when its endpoint cannot be
+    // resolved to an allowed public address, even if its saved keys are bad.
+    if !valid_push_endpoint(&subscription.endpoint) {
+        return Ok(());
     }
     let endpoint = reqwest::Url::parse(&subscription.endpoint).map_err(|e| e.to_string())?;
     let host = endpoint.host_str().ok_or("missing host")?;
-    let addresses: Vec<_> = tokio::net::lookup_host((host, 443))
-        .await
-        .map_err(|e| e.to_string())?
-        .collect();
+    let addresses: Vec<_> = match tokio::net::lookup_host((host, 443)).await {
+        Ok(addresses) => addresses.collect(),
+        Err(_) => return Ok(()),
+    };
     if addresses.is_empty() || addresses.iter().any(|addr| !public_network_ip(addr.ip())) {
-        return Err("push endpoint resolved to a private or invalid address".into());
+        return Ok(());
+    }
+    if !valid_push_keys(&subscription.p256dh_key, &subscription.auth_key) {
+        if invalidate_expired && !subscription.auth_key.is_empty()
+            && invalid_push_point(&subscription.p256dh_key) {
+            invalidate_push_subscription(&s, subscription.id)?;
+        }
+        return Err("invalid subscription".into());
     }
     let address = addresses[0];
+    let p256dh_bytes = decode_push_key(&subscription.p256dh_key).map_err(|e| e.to_string())?;
+    let auth_bytes = decode_push_key(&subscription.auth_key).map_err(|e| e.to_string())?;
+    let normalized_p256dh = URL_SAFE_NO_PAD.encode(&p256dh_bytes);
+    let normalized_auth = URL_SAFE_NO_PAD.encode(&auth_bytes);
     let info = SubscriptionInfo::new(
         &subscription.endpoint,
-        &subscription.p256dh_key,
-        &subscription.auth_key,
+        &normalized_p256dh,
+        &normalized_auth,
     );
     let signature = VapidSignatureBuilder::from_der(s.vapid_private.as_slice(), &info)
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
-    let mut builder = WebPushMessageBuilder::new(&info);
-    builder.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
-    builder.set_vapid_signature(signature);
-    builder.set_urgency(Urgency::High);
-    let message = builder.build().map_err(|error| {
-        if matches!(error, web_push::WebPushError::InvalidCryptoKeys) {
-            // Campfire's WebPush::Pool discards subscriptions whose encryption
-            // raises OpenSSL::OpenSSLError, including an invalid P-256 point.
-            if let Err(invalidation_error) = invalidate_push_subscription(&s, subscription.id) {
-                return invalidation_error;
+    let standard_point = p256dh_bytes.len() == 65 && p256dh_bytes[0] == 4;
+    let message_result = if auth_bytes.len() == 16 && standard_point && payload.len() <= 3052 {
+        let mut builder = WebPushMessageBuilder::new(&info);
+        builder.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
+        builder.set_vapid_signature(signature);
+        builder.set_urgency(Urgency::High);
+        builder.build().map_err(|e| e.to_string())
+    } else {
+        campfire_push_message_fallback(&info, signature, payload.as_bytes())
+    };
+    let message = match message_result {
+        Ok(message) => message,
+        Err(error) => {
+            if invalidate_expired && invalid_push_point(&subscription.p256dh_key) {
+                invalidate_push_subscription(&s, subscription.id)?;
             }
+            return Err(error);
         }
-        error.to_string()
-    })?;
+    };
     let request = request_builder::build_request::<PushBody>(message);
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -6131,7 +6226,7 @@ async fn deliver_push(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    if matches!(response.status().as_u16(), 404 | 410) {
+    if invalidate_expired && response.status().as_u16() == 410 {
         invalidate_push_subscription(&s, subscription.id)?;
     }
     if !response.status().is_success() {
@@ -13141,25 +13236,81 @@ mod tests {
             .public_key()
             .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)
             .unwrap();
-        let p256dh = URL_SAFE_NO_PAD.encode(public);
+        let compressed = recipient
+            .public_key()
+            .to_bytes(&group, PointConversionForm::COMPRESSED, &mut context)
+            .unwrap();
+        for (public, auth_length) in [
+            (public.clone(), 1), (public.clone(), 16), (public, 32), (compressed, 16),
+        ] {
+            let p256dh = URL_SAFE_NO_PAD.encode(&public);
+            let auth = URL_SAFE_NO_PAD.encode(vec![17u8; auth_length]);
+            let info =
+                SubscriptionInfo::new("https://fcm.googleapis.com/fcm/send/test", &p256dh, &auth);
+            assert!(valid_push_keys(&p256dh, &auth));
+            let signature =
+                VapidSignatureBuilder::from_der(server.private_key_to_der().unwrap().as_slice(), &info)
+                    .unwrap()
+                    .build()
+                    .unwrap();
+            let standard_keys = auth_length == 16 && public.len() == 65;
+            let message = if standard_keys {
+                let mut builder = WebPushMessageBuilder::new(&info);
+                builder.set_vapid_signature(signature);
+                builder.set_payload(ContentEncoding::Aes128Gcm, b"{\"title\":\"test\"}");
+                builder.build().unwrap()
+            } else {
+                super::campfire_push_message_fallback(
+                    &info, signature, b"{\"title\":\"test\"}",
+                ).unwrap()
+            };
+            if !standard_keys {
+                let content = &message.payload.as_ref().unwrap().content;
+                let sender_length = content[20] as usize;
+                assert_eq!(sender_length, 65);
+                let sender_bytes = &content[21..21 + sender_length];
+                let ciphertext = &content[21 + sender_length..];
+                assert_eq!(u32::from_be_bytes(content[16..20].try_into().unwrap()) as usize, ciphertext.len());
+                let sender_point = openssl::ec::EcPoint::from_bytes(&group, sender_bytes, &mut context).unwrap();
+                let sender_public = EcKey::from_public_key(&group, &sender_point).unwrap();
+                let recipient_pkey = openssl::pkey::PKey::from_ec_key(recipient.clone()).unwrap();
+                let sender_pkey = openssl::pkey::PKey::from_ec_key(sender_public).unwrap();
+                let mut deriver = openssl::derive::Deriver::new(&recipient_pkey).unwrap();
+                deriver.set_peer(&sender_pkey).unwrap();
+                let secret = deriver.derive_to_vec().unwrap();
+                let mut info_bytes = b"WebPush: info\0".to_vec();
+                info_bytes.extend_from_slice(&public);
+                info_bytes.extend_from_slice(sender_bytes);
+                let mut ikm = [0u8; 32];
+                hkdf::Hkdf::<sha2::Sha256>::new(Some(&vec![17u8; auth_length]), &secret)
+                    .expand(&info_bytes, &mut ikm).unwrap();
+                let hkdf = hkdf::Hkdf::<sha2::Sha256>::new(Some(&content[..16]), &ikm);
+                let mut key = [0u8; 16];
+                let mut nonce = [0u8; 12];
+                hkdf.expand(b"Content-Encoding: aes128gcm\0", &mut key).unwrap();
+                hkdf.expand(b"Content-Encoding: nonce\0", &mut nonce).unwrap();
+                let clear = openssl::symm::decrypt_aead(
+                    openssl::symm::Cipher::aes_128_gcm(), &key, Some(&nonce), &[],
+                    &ciphertext[..ciphertext.len() - 16], &ciphertext[ciphertext.len() - 16..],
+                ).unwrap();
+                assert_eq!(clear, b"{\"title\":\"test\"}\x02\x00");
+            }
+            let request = request_builder::build_request::<PushBody>(message);
+            assert_eq!(
+                request.headers().get("content-encoding").unwrap(),
+                "aes128gcm"
+            );
+            assert!(!request.into_body().0.is_empty());
+        }
+        let key = URL_SAFE_NO_PAD.encode(recipient.public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context).unwrap());
         let auth = URL_SAFE_NO_PAD.encode([17u8; 16]);
-        let info =
-            SubscriptionInfo::new("https://fcm.googleapis.com/fcm/send/test", &p256dh, &auth);
-        assert!(valid_push_keys(&p256dh, &auth));
-        let signature =
-            VapidSignatureBuilder::from_der(server.private_key_to_der().unwrap().as_slice(), &info)
-                .unwrap()
-                .build()
-                .unwrap();
-        let mut builder = WebPushMessageBuilder::new(&info);
-        builder.set_vapid_signature(signature);
-        builder.set_payload(ContentEncoding::Aes128Gcm, b"{\"title\":\"test\"}");
-        let request = request_builder::build_request::<PushBody>(builder.build().unwrap());
-        assert_eq!(
-            request.headers().get("content-encoding").unwrap(),
-            "aes128gcm"
-        );
-        assert!(!request.into_body().0.is_empty());
+        let info = SubscriptionInfo::new("https://fcm.googleapis.com/fcm/send/test", &key, &auth);
+        let signature = VapidSignatureBuilder::from_der(server.private_key_to_der().unwrap().as_slice(), &info)
+            .unwrap().build().unwrap();
+        let large = super::campfire_push_message_fallback(&info, signature.clone(), &vec![b'x'; 4_078]).unwrap();
+        assert_eq!(large.payload.unwrap().content.len(), 4_182);
+        assert!(super::campfire_push_message_fallback(&info, signature, &vec![b'x'; 4_079]).is_err());
     }
     #[test]
     fn push_endpoint_allowlist_excludes_other_hosts_and_ports() {

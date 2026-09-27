@@ -118,7 +118,7 @@ The importer preserves unknown inline image subtypes as file attachments and pre
 
 ## Remaining parity work
 
-The paired invalid-key push probe now confirms both apps discard a saved subscription with an invalid P-256 point while retaining a malformed-base64 subscription. This checks local encryption failure handling; real push-service responses and browser delivery remain open.
+The paired invalid-key push probe now checks background cleanup and direct test notifications separately. Both apps discard background subscriptions with malformed P-256 points, including a short but valid-base64 point, retain malformed-base64 and blank-auth subscriptions, return the same 500 page for direct test failures without deleting those rows, and skip delivery to a saved endpoint outside the permitted host list. Rustfire also has a decryptable encryption fallback for legacy auth-secret lengths, compressed P-256 keys, and payloads above its normal Web Push library's limit that Campfire accepts. This checks local delivery decisions; real push-service responses and browser delivery remain open.
 
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior, including remaining generated document-head metadata and HTML serialization differences
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases
