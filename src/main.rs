@@ -2522,11 +2522,12 @@ async fn fetch_public_url(input: &str, head: bool) -> Option<reqwest::Response> 
     None
 }
 fn clean_og_text(input: &str) -> String {
-    let cleaned = ammonia::Builder::default()
-        .tags(HashSet::new())
-        .clean(input)
-        .to_string();
-    html_escape::decode_html_entities(&cleaned)
+    // Rails strip_tags removes markup but retains text inside elements such as
+    // <script>. Ammonia drops their contents and changes the preview title.
+    ParsedHtml::parse_fragment(input)
+        .root_element()
+        .text()
+        .collect::<String>()
         .trim()
         .to_string()
 }
@@ -2564,6 +2565,17 @@ fn media_link(input: &str) -> bool {
     static MEDIA_URL: OnceLock<Regex> = OnceLock::new();
     MEDIA_URL.get_or_init(|| Regex::new(r"\bhttps?://\S+\.(?:zip|tar|tar\.gz|tar\.bz2|tar\.xz|gz|bz2|rar|7z|dmg|exe|msi|pkg|deb|iso|jpg|jpeg|png|gif|bmp|mp4|mov|avi|mkv|wmv|flv|heic|heif|mp3|wav|ogg|aac|wma|webm|ogv|mpg|mpeg)\b").expect("Campfire media URL pattern")).is_match(input)
 }
+fn acceptable_og_document_response(
+    status: StatusCode,
+    content_type: Option<&str>,
+    content_length: Option<u64>,
+) -> bool {
+    status == StatusCode::OK
+        && content_type
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/html"))
+        && content_length.is_none_or(|length| length <= 5 * 1024 * 1024)
+}
 async fn unfurl_url(input: &str) -> Option<Value> {
     let mut url = public_web_url(input)?;
     if media_link(input) {
@@ -2577,24 +2589,11 @@ async fn unfurl_url(input: &str) -> Option<Value> {
         url.set_host(Some("fxtwitter.com")).ok()?;
     }
     let response = fetch_public_url(url.as_str(), false).await?;
-    if !response.status().is_success()
-        || response
-            .headers()
-            .get(header::CONTENT_TYPE)?
-            .to_str()
-            .ok()?
-            .split(';')
-            .next()?
-            .trim()
-            .to_ascii_lowercase()
-            != "text/html"
-    {
-        return None;
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > 5 * 1024 * 1024)
-    {
+    if !acceptable_og_document_response(
+        response.status(),
+        response.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+        response.content_length(),
+    ) {
         return None;
     }
     let mut body = Vec::new();
@@ -12682,6 +12681,10 @@ mod tests {
         assert_eq!(tags.get("description").unwrap(), "A page");
         assert_eq!(tags.get("image").unwrap(), "https://example.com/p.png");
         assert!(super::public_web_url("file:///etc/passwd").is_none());
+        assert!(super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("text/html; charset=UTF-8"), None));
+        assert!(!super::acceptable_og_document_response(axum::http::StatusCode::CREATED, Some("text/html"), None));
+        assert!(!super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("image/jpeg"), None));
+        assert!(!super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("text/html"), Some(5 * 1024 * 1024 + 1)));
     }
     #[test]
     fn opengraph_metadata_removes_entity_encoded_markup() {
@@ -12691,6 +12694,8 @@ mod tests {
         assert_eq!(super::clean_og_text(tags.get("title").unwrap()), "Hey!");
         assert_eq!(super::clean_og_text(tags.get("description").unwrap()), "desc..");
         assert_eq!(super::clean_og_text("<img src='x' onerror='alert(1)'>"), "");
+        assert_eq!(super::clean_og_text("Hey!<script>alert('hi')</script>"), "Hey!alert('hi')");
+        assert_eq!(super::clean_og_text("Hello<script>alert('hi')</script>"), "Helloalert('hi')");
     }
     #[test]
     fn opengraph_attachment_content_survives_rich_text_sanitization() {
