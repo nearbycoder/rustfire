@@ -138,6 +138,7 @@ def check(port, cookie, database, rails, sample_path=None):
     assert mixed[0] == 200 and mixed[2], (mixed[0], len(mixed[2]))
     result = {
         "initial": first_status,
+        "etag": etag,
         "etag_conditional": by_etag[0],
         "date_conditional": by_date[0],
         "stale_date": stale[0],
@@ -150,6 +151,8 @@ def check(port, cookie, database, rails, sample_path=None):
         "initial_ids": ids(first_body),
         "before_bytes": pages["before"][1],
         "after_bytes": pages["after"][1],
+        "before_etag": pages["before"][0],
+        "after_etag": pages["after"][0],
         "before_ids": pages["before"][2],
         "after_ids": pages["after"][2],
     }

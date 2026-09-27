@@ -5496,23 +5496,25 @@ fn message_page_metadata(
 }
 fn message_page_validator<'a>(
     messages: impl IntoIterator<Item = (i64, &'a str, &'a str)>,
-    rid: i64,
-    before: Option<i64>,
-    after: Option<i64>,
-    json: bool,
 ) -> Result<(String, String, i64), StatusCode> {
-    let mut key = format!("room={rid};before={before:?};after={after:?};json={json};");
+    // Campfire's fresh_when receives an Array<Message>. Rails expands each
+    // record's versioned cache key, then appends the pinned messages/index
+    // template digest before hashing with SHA-256 and taking 32 hex digits.
+    const TEMPLATE_DIGEST: &str = "8686c9089c0ca2724d567e0bf0e90539";
+    let mut keys = Vec::new();
     let mut latest = i64::MIN;
-    for (id, created_at, updated_at) in messages {
-        latest = latest.max(
-            message_timestamp_ns(updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-        );
-        key.push_str(&format!("{id}:{created_at}:{updated_at};"));
+    for (id, _, updated_at) in messages {
+        let timestamp = message_timestamp_ns(updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        latest = latest.max(timestamp);
+        let version = chrono::DateTime::<Utc>::from_timestamp_nanos(timestamp)
+            .format("%Y%m%d%H%M%S%6f");
+        keys.push(format!("messages/{id}-{version}"));
     }
-    let digest = openssl::hash::hash(MessageDigest::md5(), key.as_bytes()).map_err(db_err)?;
+    keys.push(TEMPLATE_DIGEST.to_owned());
+    let digest = openssl::hash::hash(MessageDigest::sha256(), keys.join("/").as_bytes()).map_err(db_err)?;
     let etag = format!(
         "W/\"{}\"",
-        digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>()
     );
     let seconds = latest.div_euclid(1_000_000_000);
     let modified = httpdate::fmt_http_date(
@@ -5602,10 +5604,6 @@ async fn messages_index(
             metadata
                 .iter()
                 .map(|(id, created, updated)| (*id, created.as_str(), updated.as_str())),
-            rid,
-            q.before,
-            q.after,
-            false,
         )?;
         if message_page_fresh(&headers, &etag, modified_seconds) {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
@@ -5624,10 +5622,6 @@ async fn messages_index(
         messages.iter().map(|message| {
             (message.id, message.created_at.as_str(), message.updated_at.as_str())
         }),
-        rid,
-        q.before,
-        q.after,
-        false,
     )?;
     let html = messages
         .iter()

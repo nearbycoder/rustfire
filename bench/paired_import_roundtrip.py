@@ -5,6 +5,8 @@ Run after cargo build --release with the pinned Ruby bundle and Redis.
 
 import argparse
 import base64
+from datetime import datetime
+import hashlib
 import html
 import http.client
 import json
@@ -22,6 +24,25 @@ from paired_bot_admin import AvatarPreview, PNG, cleanup_campfire_uploads, multi
 from paired_attachment_mime import post as post_attachment
 from paired_direct_lookup import login_campfire, seed_campfire, wait_for_server
 from paired_room_shell import AGENT, assert_equal, measure_room_page, section
+
+
+MESSAGE_INDEX_TEMPLATE_DIGEST = "8686c9089c0ca2724d567e0bf0e90539"
+
+
+def campfire_page_etag(database, document):
+    ids = [int(value) for value in re.findall(rb'data-message-id=["\'](\d+)', document)]
+    assert ids
+    with sqlite3.connect(database) as db:
+        rows = db.execute(
+            f"SELECT id,updated_at FROM messages WHERE id IN ({','.join('?' for _ in ids)})", ids
+        ).fetchall()
+    by_id = {id: updated for id, updated in rows}
+    assert len(by_id) == len(ids)
+    keys = []
+    for id in ids:
+        stamp = datetime.fromisoformat(by_id[id].replace("Z", "+00:00"))
+        keys.append(f"messages/{id}-{stamp:%Y%m%d%H%M%S%f}")
+    return 'W/"' + hashlib.sha256(("/".join(keys) + "/" + MESSAGE_INDEX_TEMPLATE_DIGEST).encode()).hexdigest()[:32] + '"'
 
 
 def page(port, path, cookie, csrf):
@@ -183,6 +204,8 @@ def main():
                 source["after_page"] = page(camp_port, paths["after_page"], cookie, csrf)
                 source_cache = {name: check_paged_cache(camp_port, paths[name], cookie)
                     for name in ("older_page", "after_page")}
+                for name in source_cache:
+                    assert source_cache[name][0] == campfire_page_etag(camp_db, source[name]), (name, source_cache[name])
                 oldest_id = min(int(value) for value in re.findall(rb'data-message-id=["\'](\d+)', source["older_page"]))
                 assert paged_response(camp_port, f"/rooms/1/messages?before={oldest_id}", cookie)[0] == 204
             source_preview, _ = preview(camp_port, source["bot_edit"], cookie, csrf)
@@ -226,11 +249,8 @@ def main():
             assert source_attachment == target_attachment, (source_attachment, target_attachment)
             print("imported message attachment signed path and bytes match")
             if args.extra_messages == 39:
-                for name in source_cache:
-                    assert source_cache[name][1] == target_cache[name][1], (name, source_cache[name], target_cache[name])
-                    if source_cache[name][0] != target_cache[name][0]:
-                        print(f"{name} weak ETag digest differs across apps; each returns 304 for its own validators")
-                print("imported older/after Last-Modified and empty-page status match")
+                assert source_cache == target_cache, (source_cache, target_cache)
+                print("imported older/after ETag, Last-Modified, and empty-page status match")
             if args.sample_dir:
                 args.sample_dir.mkdir(parents=True, exist_ok=True)
                 for label, documents in (("campfire", source), ("rustfire", target)):
