@@ -7930,6 +7930,7 @@ async fn account_users_index(
 async fn account_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -7956,6 +7957,9 @@ async fn account_update(
         {
             let field_name = field.name().unwrap_or("").to_string();
             if field_name == "account[logo]" || field_name == "logo" {
+                if field_name == "account[logo]" {
+                    values.insert(field_name.clone(), String::new());
+                }
                 let content_type = field
                     .content_type()
                     .unwrap_or("application/octet-stream")
@@ -7974,7 +7978,7 @@ async fn account_update(
                     | "_method"
                     | "restrict_room_creation"
                     | "account[settings][restrict_room_creation_to_administrators]"
-            ) {
+            ) || field_name.starts_with("account[") {
                 values.insert(
                     field_name,
                     field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?,
@@ -7991,19 +7995,21 @@ async fn account_update(
     if tunneled_post && !matches!(f.get("_method").map(String::as_str), Some("patch" | "put")) {
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
+    if f.get("account").is_some_and(|value| !value.is_empty())
+        && !f.keys().any(|key| key.starts_with("account["))
+    {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
     let name = form_value(&f, "name", "account[name]");
     let restricted = form_value(
         &f,
         "restrict_room_creation",
         "account[settings][restrict_room_creation_to_administrators]",
     );
-    if name.is_none() && restricted.is_none() && logo.is_none() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    if let Some(name) = name {
-        if name.trim().is_empty() {
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
-        }
+    if !f.keys().any(|key| key.starts_with("account["))
+        && f.get("account").is_none_or(String::is_empty)
+    {
+        return Err(StatusCode::BAD_REQUEST);
     }
     let new_logo = if let Some((bytes, content_type)) = logo {
         let dir = std::path::PathBuf::from(
@@ -8031,7 +8037,7 @@ async fn account_update(
         if let Some(name) = name {
             tx.execute(
                 "UPDATE accounts SET name=?1,updated_at=?2",
-                params![name.trim(), now()],
+                params![name, now()],
             )
             .map_err(db_err)?;
         } else if new_logo.is_some() || restricted.is_some() {
@@ -8041,7 +8047,7 @@ async fn account_update(
         if let Some(restricted) = restricted {
             tx.execute(
                 "UPDATE account_settings SET restrict_room_creation=?1 WHERE id=1",
-                [matches!(restricted, "1" | "true" | "on")],
+                [!matches!(restricted, "" | "0" | "false" | "FALSE" | "f" | "F" | "off" | "OFF")],
             )
             .map_err(db_err)?;
         }
