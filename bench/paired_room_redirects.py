@@ -18,10 +18,12 @@ PATHS = (
     "/rooms/opens/2", "/rooms/closeds/2", "/rooms/directs/2",
     "/rooms/opens/3", "/rooms/closeds/3", "/rooms/directs/3",
     "/rooms/999", "/rooms/opens/999", "/rooms/directs/999",
+    "/rooms/new", "/rooms/abc", "/rooms/opens/abc", "/rooms/closeds/abc",
 )
 ANONYMOUS_PATHS = (
     "/rooms", "/rooms/opens", "/rooms/closeds", "/rooms/directs",
     "/rooms/1", "/rooms/999", "/rooms/opens/1", "/rooms/opens/999", "/rooms/directs/2",
+    "/rooms/new", "/rooms/abc", "/rooms/opens/abc", "/rooms/closeds/abc",
 )
 
 

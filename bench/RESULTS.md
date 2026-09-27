@@ -1310,3 +1310,9 @@ The paired first-run probe also checks the source's 4-4-4 alphanumeric join-code
 ## Touch boost form handoff
 
 `python bench/paired_touch_boost_browser.py` passed against pinned Campfire in a 390-by-844 Chromium viewport with touch capability injected before page scripts load. In both apps, clicking the message-menu custom boost action synchronously focused a temporary invisible input; after the asynchronous boost form loaded, the real input received focus, the temporary input was removed, and the form requested smooth centered scrolling. `python bench/paired_boost_draft_browser.py` still passed for the desktop draft and submit workflow. This checks DOM behavior under emulation, not whether a physical iOS or Android keyboard stays open.
+
+## Invalid room IDs and missing GET actions
+
+The expanded `python bench/paired_room_redirects.py` passed 16 signed-in and 13 anonymous room paths against pinned Campfire. Unknown text IDs such as `/rooms/abc` and `/rooms/opens/abc` redirect to the root after authentication, while `/rooms/new` returns 404 even for an anonymous request because Campfire has no `new` action there. Four direct-room namespace GETs still return 500 in the pinned source fixture and remain excluded.
+
+The expanded `python bench/paired_route_methods.py` passed 18 route and method cases. It now checks the missing room-message `new` action for signed-in and anonymous requests, a text user ID, and missing boost and push-subscription show actions. Each returns 404 without an `Allow` header in both apps. Rustfire previously returned a path-parser 400 for the first two signed-in paths and included `Allow` on the latter two. This compares status and `Allow`, not response bodies or the full route matrix.

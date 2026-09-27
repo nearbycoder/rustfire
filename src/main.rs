@@ -4576,8 +4576,18 @@ fn safe_inline_video(content_type: &str) -> bool {
 async fn room_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(rid): Path<i64>,
+    Path(room_id): Path<String>,
 ) -> AppResult {
+    let rid = match room_id.parse::<i64>() {
+        Ok(id) => id,
+        Err(_) => {
+            if room_id == "new" {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            user(&s, &headers)?;
+            return Ok(found_redirect("/"));
+        }
+    };
     room_show_with_target(s, headers, rid, None).await
 }
 async fn room_show_at(
@@ -6873,12 +6883,16 @@ fn update_room_values(
 async fn room_kind_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(rid): Path<i64>,
+    Path(room_id): Path<String>,
 ) -> AppResult {
     let u = match user(&s, &headers) {
         Ok(user) => user,
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
         Err(error) => return Err(error),
+    };
+    let rid = match room_id.parse::<i64>() {
+        Ok(id) => id,
+        Err(_) => return Ok(found_redirect("/")),
     };
     match room_for(&s, u.id, rid) {
         Ok(room) if room.kind != "Rooms::Direct" => {},
@@ -8844,9 +8858,10 @@ async fn avatar_delete_post(
 async fn user_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<i64>,
+    Path(user_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let id = user_id.parse::<i64>().map_err(|_| StatusCode::NOT_FOUND)?;
     let db = pool(&s)?;
     let (name, bio, email, role, status, updated_at): (String, String, String, i64, i64, String) = db
         .query_row(
@@ -11777,6 +11792,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .post(message_create)
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        .route("/rooms/{id}/messages/new", any(|| async { StatusCode::NOT_FOUND }))
         .route(
             "/rooms/{id}/messages/{mid}",
             get(message_show)
@@ -11883,7 +11899,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/users/me/push_subscriptions/{id}",
-            post(push_subscriptions_delete_post).delete(push_subscriptions_delete),
+            get(|| async { StatusCode::NOT_FOUND })
+                .post(push_subscriptions_delete_post)
+                .delete(push_subscriptions_delete),
         )
         .route(
             "/users/me/push_subscriptions/{id}/delete",
@@ -11915,7 +11933,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/users/{user_id}/push_subscriptions/{id}",
-            post(push_subscriptions_delete_post_scoped).delete(push_subscriptions_delete_scoped),
+            get(|| async { StatusCode::NOT_FOUND })
+                .post(push_subscriptions_delete_post_scoped)
+                .delete(push_subscriptions_delete_scoped),
         )
         .route(
             "/users/{user_id}/push_subscriptions/{id}/test_notifications",
@@ -11968,7 +11988,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/new", get(boost_new))
         .route(
             "/messages/{id}/boosts/{bid}",
-            delete(boost_delete).post(boost_delete_post_override),
+            get(|| async { StatusCode::NOT_FOUND })
+                .delete(boost_delete)
+                .post(boost_delete_post_override),
         )
         .route("/messages/{id}/boosts/{bid}/delete", post(boost_delete))
         .route("/attachments/{id}", get(attachment_get))

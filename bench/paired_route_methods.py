@@ -21,6 +21,14 @@ CASES = (
     ("health", "GET", "/up", False, 200),
     ("health POST", "POST", "/up", False, 404),
     ("edit styles DELETE", "DELETE", "/account/custom_styles/edit", True, 404),
+    ("message new action absent", "GET", "/rooms/1/messages/new", True, 404),
+    ("anonymous message new action absent", "GET", "/rooms/1/messages/new", False, 404),
+    ("invalid user ID", "GET", "/users/abc", True, 404),
+    ("boost show action absent", "GET", "/messages/1/boosts/1", True, 404),
+    ("anonymous boost show action absent", "GET", "/messages/1/boosts/1", False, 404),
+    ("push subscription new action absent", "GET", "/users/me/push_subscriptions/new", True, 404),
+    ("anonymous push subscription new action absent", "GET", "/users/me/push_subscriptions/new", False, 404),
+    ("scoped push subscription show action absent", "GET", "/users/1/push_subscriptions/1", True, 404),
 )
 
 
