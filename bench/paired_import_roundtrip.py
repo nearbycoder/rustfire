@@ -6,6 +6,7 @@ Run after cargo build --release with the pinned Ruby bundle and Redis.
 import argparse
 import base64
 import html
+import http.client
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,32 @@ def page(port, path, cookie, csrf):
     status, _, body = request(port, "GET", path, cookie, csrf, extra_headers={"User-Agent": AGENT})
     assert status == 200, (path, status)
     return body
+
+
+def paged_response(port, path, cookie, conditional=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    headers = {"Cookie": cookie, "User-Agent": AGENT, "Accept": "text/html"}
+    if conditional:
+        headers.update(conditional)
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        return response.status, {key.lower(): value for key, value in response.getheaders()}, response.read()
+    finally:
+        connection.close()
+
+
+def check_paged_cache(port, path, cookie):
+    status, headers, body = paged_response(port, path, cookie)
+    etag = headers.get("etag")
+    modified = headers.get("last-modified")
+    assert status == 200 and body and etag and etag.startswith('W/"') and modified, (path, status, headers)
+    conditional = paged_response(port, path, cookie, {"If-None-Match": etag})
+    assert conditional[0] == 304 and not conditional[2], (path, conditional[0], len(conditional[2]))
+    assert conditional[1].get("etag") == etag and conditional[1].get("last-modified") == modified
+    conditional = paged_response(port, path, cookie, {"If-Modified-Since": modified})
+    assert conditional[0] == 304 and not conditional[2], (path, conditional[0], len(conditional[2]))
+    return etag, modified
 
 
 def preview(port, document, cookie, csrf):
@@ -97,7 +124,7 @@ def main():
     parser.add_argument("--ruby", type=Path, default=Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=Path, default=Path("/tmp/rustfire-baseline/bundle"))
     parser.add_argument("--sample-dir", type=Path)
-    parser.add_argument("--extra-messages", type=int, default=0, help="additional rich messages after the initial text and file messages (0-38)")
+    parser.add_argument("--extra-messages", type=int, default=0, help="additional rich messages after the initial text and file messages (0-39)")
     parser.add_argument("--read-clients", type=int, nargs="*", default=[])
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--campfire-workers", type=int, default=22)
@@ -107,8 +134,8 @@ def main():
         parser.error("positive clients, seconds, and Campfire worker count are required")
     if args.report and not args.read_clients:
         parser.error("--report requires --read-clients")
-    if not 0 <= args.extra_messages <= 38:
-        parser.error("--extra-messages must be between 0 and 38")
+    if not 0 <= args.extra_messages <= 39:
+        parser.error("--extra-messages must be between 0 and 39")
     repository, ruby, bundle_path = args.campfire_repo.resolve(), args.ruby.resolve(), args.bundle_path.resolve()
     revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repository, text=True).strip()
     assert revision == "91d294f4a09f9bbe37f9548959bfcb43645678fb", revision
@@ -147,6 +174,17 @@ def main():
                 assert status == 200, (number, status)
             paths = {"bot_index": "/account/bots", "bot_edit": f"/account/bots/{bot_id}/edit", "room": "/rooms/1"}
             source = {name: page(camp_port, path, cookie, csrf) for name, path in paths.items()}
+            if args.extra_messages == 39:
+                visible_ids = [int(value) for value in re.findall(rb'data-message-id=["\'](\d+)', source["room"])]
+                assert len(visible_ids) == 40, visible_ids
+                paths["older_page"] = f"/rooms/1/messages?before={min(visible_ids)}"
+                paths["after_page"] = f"/rooms/1/messages?after={min(visible_ids)}"
+                source["older_page"] = page(camp_port, paths["older_page"], cookie, csrf)
+                source["after_page"] = page(camp_port, paths["after_page"], cookie, csrf)
+                source_cache = {name: check_paged_cache(camp_port, paths[name], cookie)
+                    for name in ("older_page", "after_page")}
+                oldest_id = min(int(value) for value in re.findall(rb'data-message-id=["\'](\d+)', source["older_page"]))
+                assert paged_response(camp_port, f"/rooms/1/messages?before={oldest_id}", cookie)[0] == 204
             source_preview, _ = preview(camp_port, source["bot_edit"], cookie, csrf)
             source_attachment = attachment(camp_port, source["room"], cookie, csrf)
         except Exception:
@@ -177,32 +215,44 @@ def main():
                 target = {name: page(rust_port, path, cookie, csrf) for name, path in paths.items()}
                 target_preview, _ = preview(rust_port, target["bot_edit"], cookie, csrf)
                 target_attachment = attachment(rust_port, target["room"], cookie, csrf)
+                if args.extra_messages == 39:
+                    target_cache = {name: check_paged_cache(rust_port, paths[name], cookie)
+                        for name in ("older_page", "after_page")}
+                    assert paged_response(rust_port, f"/rooms/1/messages?before={oldest_id}", cookie)[0] == 204
             finally:
                 stop_server(rust_process)
             assert source_preview == target_preview, (source_preview, target_preview)
             print("imported original avatar signed path and bytes match")
             assert source_attachment == target_attachment, (source_attachment, target_attachment)
             print("imported message attachment signed path and bytes match")
+            if args.extra_messages == 39:
+                for name in source_cache:
+                    assert source_cache[name][1] == target_cache[name][1], (name, source_cache[name], target_cache[name])
+                    if source_cache[name][0] != target_cache[name][0]:
+                        print(f"{name} weak ETag digest differs across apps; each returns 304 for its own validators")
+                print("imported older/after Last-Modified and empty-page status match")
             if args.sample_dir:
                 args.sample_dir.mkdir(parents=True, exist_ok=True)
                 for label, documents in (("campfire", source), ("rustfire", target)):
                     for name, document in documents.items():
                         (args.sample_dir / f"{label}-import-{name}.html").write_bytes(document)
             for name in paths:
-                for part in ("head", "body"):
+                for part in (("body",) if name.endswith("_page") else ("head", "body")):
                     options = {"normalize_times": True, "normalize_avatar_paths": True, "normalize_blob_paths": True,
-                        "normalize_text_origins": True, "ignore_csrf_inputs": name == "room"}
-                    assert_equal(f"imported {name} {part}", section(source[name], part, **options), section(target[name], part, **options))
+                        "normalize_text_origins": True, "ignore_csrf_inputs": name == "room" or name.endswith("_page")}
+                    original = source[name] if not name.endswith("_page") else b"<body>" + source[name] + b"</body>"
+                    imported = target[name] if not name.endswith("_page") else b"<body>" + target[name] + b"</body>"
+                    assert_equal(f"imported {name} {part}", section(original, part, **options), section(imported, part, **options))
             if args.read_clients:
                 trials = measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust_port,
-                    uploads, cookie, args.read_clients, args.seconds, args.campfire_workers, 2 + args.extra_messages)
+                    uploads, cookie, args.read_clients, args.seconds, args.campfire_workers, min(40, 2 + args.extra_messages))
                 if args.report:
                     args.report.parent.mkdir(parents=True, exist_ok=True)
                     args.report.write_text(json.dumps({
                         "source_revision": revision,
                         "rustfire_revision": subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
                         "fixture": f"imported Campfire account with {1 + args.extra_messages} rich messages, one text attachment, and one bot avatar",
-                        "rendered_messages": 2 + args.extra_messages,
+                        "rendered_messages": min(40, 2 + args.extra_messages),
                         "seconds": args.seconds,
                         "campfire_workers": args.campfire_workers,
                         "trials": trials,

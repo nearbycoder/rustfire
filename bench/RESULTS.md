@@ -45,6 +45,12 @@ The parity check ran before the timed reads. One Rustfire release process and Ca
 
 The [raw report](results/imported-room-40-reads.json) preserves per-order counts and latencies. The 32-client Campfire rate varied substantially by server order; the ranges retain that variation. These trials show a speed advantage for this imported, fully populated room-page workload. They do not establish a maximum user count, hours-long stability, equal raw HTML bytes, or a whole-app advantage at full feature parity.
 
+## Imported 41-message paging boundary
+
+`python bench/paired_import_roundtrip.py --extra-messages 39 --sample-dir /tmp/rustfire-import-41` imported 41 real Campfire messages to cross the 40-message room-page boundary. Both apps rendered the latest 40 messages in matching parsed room heads and bodies (148 and 7,499 tokens). The `before=` request returned the same single older message (179 parsed body tokens), and the `after=` request returned matching content (7,022 parsed body tokens). A request before the oldest message returned HTTP 204 in both apps. The source-signed bot avatar and message attachment paths and original bytes also matched after import.
+
+Both apps supplied weak ETags and the same Last-Modified value on the imported `before=` and `after=` responses. Each returned an empty HTTP 304 for its own `If-None-Match` and `If-Modified-Since` requests. The ETag digests **differ across apps**, so exact validator parity remains open. The raw paged HTML also differs: 9,499 versus 9,124 bytes for the older page and 371,359 versus 356,772 bytes for the `after=` page (Campfire versus Rustfire). This is a functional paging check, not a throughput or capacity measurement.
+
 `python bench/paired_sidebar_fanout.py --sockets 100 --rooms 10 --campfire-workers 22` passed in both server orders using the release build. Each app created ten open rooms with 51 memberships each and delivered all 1,000 expected, source-shaped sidebar events with no missed or unexpected events. The sampled payloads matched byte for byte. The measured ten-request interval was 50 ms for Rustfire versus 640 ms for Campfire with Rustfire first, and 56 ms versus 664 ms with Campfire first. This short same-host burst checks room creation and delivery at 100 sockets; it does not establish sustained or maximum capacity.
 
 ## Paired QR code response parity
