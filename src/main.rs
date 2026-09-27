@@ -7204,8 +7204,22 @@ fn fields(raw: &[u8]) -> (std::collections::HashMap<String, String>, Vec<i64>) {
     }
     (values, ids)
 }
+fn parameter_group_present(raw: &[u8], group: &str) -> bool {
+    form_urlencoded::parse(raw).any(|(key, _)| {
+        key.strip_prefix(group).is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('['))
+    })
+}
 fn user_ids_parameter_present(raw: &[u8]) -> bool {
-    form_urlencoded::parse(raw).any(|(key, _)| key == "user_ids" || key.starts_with("user_ids["))
+    parameter_group_present(raw, "user_ids")
+}
+fn room_form_fields(raw: &[u8], query: &[u8]) -> (HashMap<String, String>, Vec<i64>, bool) {
+    let room_input = if parameter_group_present(query, "room") { query } else { raw };
+    let ids_input = if user_ids_parameter_present(query) { query } else { raw };
+    (fields(room_input).0, fields(ids_input).1, user_ids_parameter_present(ids_input))
+}
+fn direct_user_ids_has_non_array_shape(raw: &[u8]) -> bool {
+    form_urlencoded::parse(raw).any(|(key, _)| key == "user_ids" ||
+        (key.starts_with("user_ids[") && !key.starts_with("user_ids[]")))
 }
 fn form_value<'a>(
     values: &'a HashMap<String, String>,
@@ -7229,7 +7243,7 @@ async fn create_room(
         return Err(StatusCode::NOT_FOUND);
     }
     ensure_room_creation_allowed(&s, &u)?;
-    let (values, user_ids) = fields(&raw);
+    let (values, user_ids, _) = room_form_fields(&raw, uri.query().unwrap_or("").as_bytes());
     if values.get("room").is_some_and(|value| !value.is_empty()) || values.contains_key("room[]") {
         return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
     }
@@ -7499,7 +7513,7 @@ async fn room_kind_update(
         Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
         Err(error) => return Err(error),
     }
-    let (values, user_ids) = fields(&raw);
+    let (values, user_ids, user_ids_present) = room_form_fields(&raw, uri.query().unwrap_or("").as_bytes());
     if values.get("room").is_some_and(|value| !value.is_empty()) || values.contains_key("room[]") {
         return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
     }
@@ -7507,7 +7521,7 @@ async fn room_kind_update(
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     let name = values.get("room[name]").map(String::as_str);
-    let retain_members_for_invalid_ids = user_ids.is_empty() && user_ids_parameter_present(&raw);
+    let retain_members_for_invalid_ids = user_ids.is_empty() && user_ids_present;
     update_room_values(&s, &u, rid, kind, name, user_ids, retain_members_for_invalid_ids)?;
     let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
         .unwrap_or("").split(',').next().unwrap_or("").trim();
@@ -7705,8 +7719,13 @@ async fn direct_create(
     RawForm(raw): RawForm,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let (_, mut ids) = fields(&raw);
-    ids.extend(fields(uri.query().unwrap_or("").as_bytes()).1);
+    let query = uri.query().unwrap_or("").as_bytes();
+    // Rails merges query parameters over form parameters before selecting users.
+    let selected_ids_input = if user_ids_parameter_present(query) { query } else { &raw };
+    if direct_user_ids_has_non_array_shape(selected_ids_input) {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
+    let (_, mut ids) = fields(selected_ids_input);
     ids.push(u.id);
     ids.sort_unstable();
     ids.dedup();

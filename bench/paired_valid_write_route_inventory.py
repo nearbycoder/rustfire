@@ -40,7 +40,8 @@ def counts(database):
 
 def request(port, database, cookie, csrf, method, path, accept, body=b"", content_type="application/x-www-form-urlencoded", user_id=1):
     before = counts(database)
-    update_room_id = 1 if path in ("/rooms/opens/1", "/rooms/closeds/1") and method in ("PATCH", "PUT") else None
+    route_path = urllib.parse.urlsplit(path).path
+    update_room_id = 1 if route_path in ("/rooms/opens/1", "/rooms/closeds/1") and method in ("PATCH", "PUT") else None
     if update_room_id is not None:
         with sqlite3.connect(database) as db:
             original_room_updated_at = db.execute("SELECT updated_at FROM rooms WHERE id=?", [update_room_id]).fetchone()[0]
@@ -59,14 +60,14 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
         redirect = target.path + ("?" + target.query if target.query else "") if target else None
         after = counts(database)
         involvement = None
-        if path == "/rooms/1/involvement":
+        if route_path == "/rooms/1/involvement":
             with sqlite3.connect(database) as db:
                 involvement = db.execute(
                     "SELECT involvement FROM memberships WHERE room_id=1 AND user_id=?", [user_id]
                 ).fetchone()
         room_state = None
-        if path in ("/rooms/opens", "/rooms/closeds", "/rooms/opens/1", "/rooms/closeds/1") and method in ("POST", "PATCH", "PUT"):
-            room_id = 2 if path in ("/rooms/opens", "/rooms/closeds") else 1
+        if route_path in ("/rooms/opens", "/rooms/closeds", "/rooms/directs", "/rooms/opens/1", "/rooms/closeds/1") and method in ("POST", "PATCH", "PUT"):
+            room_id = 2 if route_path in ("/rooms/opens", "/rooms/closeds", "/rooms/directs") else 1
             with sqlite3.connect(database) as db:
                 row = db.execute("SELECT name,type,updated_at FROM rooms WHERE id=?", [room_id]).fetchone()
                 members = tuple(user for (user,) in db.execute("SELECT user_id FROM memberships WHERE room_id=? ORDER BY user_id", [room_id]))
@@ -85,7 +86,7 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
         connection.close()
 
 
-def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=b"", content_type="application/x-www-form-urlencoded", role="admin"):
+def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=b"", content_type="application/x-www-form-urlencoded", role="admin", query=""):
     method, path, accept = case
     rust_token = "benchmark-member-session" if role == "member" else "benchmark-session"
     rust_csrf = "benchmark-member-csrf" if role == "member" else "benchmark-csrf"
@@ -111,8 +112,9 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
                 wait_for_server(camp_port, camp)
                 email = "member@example.invalid" if role == "member" else "benchmark@example.invalid"
                 camp_cookie, camp_csrf = login_campfire(camp_port, email=email)
-                rust_result = request(rust_port, rust_db, rust_cookie, rust_csrf, method, path, accept, body, content_type, user_id)
-                camp_result = request(camp_port, camp_db, camp_cookie, camp_csrf, method, path, accept, body, content_type, user_id)
+                request_path = path + ("?" + query if query else "")
+                rust_result = request(rust_port, rust_db, rust_cookie, rust_csrf, method, request_path, accept, body, content_type, user_id)
+                camp_result = request(camp_port, camp_db, camp_cookie, camp_csrf, method, request_path, accept, body, content_type, user_id)
                 if path == "/rooms/1/involvement":
                     rust_result = (
                         rust_result,
@@ -124,8 +126,8 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
                         request(camp_port, camp_db, camp_cookie, camp_csrf, "GET", path, accept, user_id=user_id),
                         request(camp_port, camp_db, camp_cookie, camp_csrf, "GET", "/users/me/profile", accept, user_id=user_id),
                     )
-                if body and path in ("/rooms/opens", "/rooms/closeds", "/rooms/opens/1", "/rooms/closeds/1"):
-                    room_id = 2 if path in ("/rooms/opens", "/rooms/closeds") else 1
+                if (body or query) and path in ("/rooms/opens", "/rooms/closeds", "/rooms/directs", "/rooms/opens/1", "/rooms/closeds/1"):
+                    room_id = 2 if path in ("/rooms/opens", "/rooms/closeds", "/rooms/directs") else 1
                     rust_result = (rust_result, request(rust_port, rust_db, rust_cookie, rust_csrf, "GET", f"/rooms/{room_id}", "text/html", user_id=user_id))
                     camp_result = (camp_result, request(camp_port, camp_db, camp_cookie, camp_csrf, "GET", f"/rooms/{room_id}", "text/html", user_id=user_id))
                 return rust_result, camp_result
@@ -148,6 +150,7 @@ def main():
     parser.add_argument("--show-source-log", action="store_true", help="print the Campfire server log for mismatches")
     parser.add_argument("--role", choices=("admin", "member"), default="admin")
     parser.add_argument("--body", default="", help="literal URL-encoded request body; defaults to an empty form")
+    parser.add_argument("--query", default="", help="literal URL-encoded query string to append to each selected route")
     args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-valid-write-routes-") as scratch:
@@ -180,7 +183,7 @@ def main():
         try:
             comparisons = []
             for index, case in enumerate(cases):
-                rust_result, camp_result = run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=args.body.encode(), role=args.role)
+                rust_result, camp_result = run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=args.body.encode(), role=args.role, query=args.query)
                 comparisons.append((case, rust_result, camp_result))
                 if rust_result != camp_result:
                     print(f"{case}: Rustfire {rust_result}, Campfire {camp_result}", flush=True)
