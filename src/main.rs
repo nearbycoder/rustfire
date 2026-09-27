@@ -5094,6 +5094,7 @@ fn rails_not_found_type(uri: &Uri, accept: &str) -> &'static str {
         Some("json") => "application/json; charset=UTF-8",
         Some("turbo_stream") if uri.path().contains("/avatar") => "text/vnd.turbo-stream.html; charset=UTF-8",
         Some(_) => "text/html; charset=UTF-8",
+        None if bot_api_path(uri.path()) => "application/json; charset=UTF-8",
         None if uri.path().contains("/avatar") && accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html") => "text/vnd.turbo-stream.html; charset=UTF-8",
         None if accept.split(',').next().unwrap_or("").trim().starts_with("application/json") => "application/json; charset=UTF-8",
         None => "text/html; charset=UTF-8",
@@ -8270,16 +8271,19 @@ async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -
 async fn custom_styles_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Form(f): Form<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let css = f
+    let Some(css) = f
         .get("account[custom_styles]")
         .or_else(|| f.get("custom_styles"))
-        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    else {
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+    };
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
     tx.execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css])
@@ -8298,6 +8302,7 @@ async fn custom_styles_update(
 async fn custom_styles_post_override(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     raw: Bytes,
 ) -> AppResult {
     let form_method = headers
@@ -8312,7 +8317,7 @@ async fn custom_styles_post_override(
             .map(str::to_owned)
     });
     match method.as_deref().map(str::to_ascii_uppercase).as_deref() {
-        Some("PATCH" | "PUT") => custom_styles_update(State(s), headers, Form(fields(&raw).0)).await,
+        Some("PATCH" | "PUT") => custom_styles_update(State(s), headers, OriginalUri(uri), Form(fields(&raw).0)).await,
         _ => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -8572,6 +8577,7 @@ async fn join_code_create(State(s): State<Arc<AppState>>, headers: HeaderMap) ->
 async fn user_role_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(id): Path<i64>,
     Form(f): Form<HashMap<String, String>>,
 ) -> AppResult {
@@ -8590,7 +8596,7 @@ async fn user_role_update(
         .map_err(db_err)?;
     prior.ok_or(StatusCode::NOT_FOUND)?;
     if !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     let role = if f.get("user[role]").is_some_and(|role| role == "administrator") {
         1
@@ -8607,6 +8613,7 @@ async fn user_role_update(
 async fn user_role_update_alias(
     state: State<Arc<AppState>>,
     headers: HeaderMap,
+    uri: OriginalUri,
     path: Path<i64>,
     Form(mut form): Form<HashMap<String, String>>,
 ) -> AppResult {
@@ -8615,16 +8622,17 @@ async fn user_role_update_alias(
             form.insert("user[role]".to_string(), role);
         }
     }
-    user_role_update(state, headers, path, Form(form)).await
+    user_role_update(state, headers, uri, path, Form(form)).await
 }
 async fn user_admin_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    uri: OriginalUri,
     Path(id): Path<i64>,
     Form(f): Form<HashMap<String, String>>,
 ) -> AppResult {
     match f.get("_method").map(String::as_str) {
-        Some("patch" | "put") => user_role_update(State(s), headers, Path(id), Form(f)).await,
+        Some("patch" | "put") => user_role_update(State(s), headers, uri, Path(id), Form(f)).await,
         Some("delete") => user_deactivate(State(s), headers, Path(id)).await,
         _ => Err(StatusCode::METHOD_NOT_ALLOWED),
     }
@@ -11665,9 +11673,18 @@ async fn bot_boost_delete(
     Path((rid, key, mid, raw_bid)): Path<(i64, String, i64, String)>,
 ) -> AppResult {
     let bid = path_record_id(&raw_bid)?;
+    let db = pool(&s)?;
+    let message_exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND room_id=?2)",
+        params![mid, rid],
+        |r| r.get(0),
+    ).map_err(db_err)?;
+    if !message_exists {
+        return Ok((StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")]).into_response());
+    }
     let bot = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, bot.id, rid)?;
-    let content: Option<String> = pool(&s)?
+    let content: Option<String> = db
         .query_row(
             "SELECT content FROM boosts WHERE id=?1 AND message_id=?2 AND booster_id=?3",
             params![bid, mid, bot.id],
@@ -11675,10 +11692,9 @@ async fn bot_boost_delete(
         )
         .optional()
         .map_err(db_err)?;
-    let db = pool(&s)?;
     let changed = db.execute("DELETE FROM boosts WHERE id=?1 AND message_id=?2 AND booster_id=?3 AND EXISTS(SELECT 1 FROM messages WHERE id=?2 AND room_id=?4)",params![bid,mid,bot.id,rid]).map_err(db_err)?;
     if changed == 0 {
-        return Err(StatusCode::NOT_FOUND);
+        return Ok((StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")]).into_response());
     }
     touch_message(&db, mid, rid)?;
     s.events.send(Event {
