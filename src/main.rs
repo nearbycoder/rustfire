@@ -2779,10 +2779,15 @@ fn unfurl_input(headers: &HeaderMap, body: &[u8]) -> Result<String, StatusCode> 
 async fn unfurl_link(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     body: axum::body::Bytes,
 ) -> AppResult {
     let _ = user(&s, &headers)?;
-    let url = unfurl_input(&headers, &body)?;
+    let url = match unfurl_input(&headers, &body) {
+        Ok(url) => url,
+        Err(StatusCode::BAD_REQUEST) => return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri)),
+        Err(error) => return Err(error),
+    };
     match unfurl_url(&url).await {
         Some(value) => Ok(Json(value).into_response()),
         None => Ok(StatusCode::NO_CONTENT.into_response()),
@@ -3922,6 +3927,7 @@ async fn session_post(
     State(s): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     RawForm(raw): RawForm,
 ) -> AppResult {
     let values = fields(&raw).0;
@@ -3931,21 +3937,29 @@ async fn session_post(
     let email_address = values
         .get("email_address")
         .cloned()
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .unwrap_or_default();
     let password = values
         .get("password")
         .cloned()
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    login_post(
+        .unwrap_or_default();
+    let response = login_post(
         State(s),
         ConnectInfo(addr),
-        headers,
+        headers.clone(),
         Form(Login {
             email_address,
             password,
         }),
     )
-    .await
+    .await?;
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS)
+        && !matches!(accept.split(',').next().unwrap_or("").trim(), "" | "text/html" | "*/*")
+    {
+        Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri))
+    } else {
+        Ok(response)
+    }
 }
 async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> AppResult {
     match user(&s, &headers) {
@@ -5216,19 +5230,32 @@ async fn sidebar_get(
 async fn involvement_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(room_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let rid = path_record_id(&room_id)?;
     let room = room_for(&s, u.id, rid)?;
+    if let Some(response) = reject_html_format(&headers, &uri) {
+        return Ok(response);
+    }
+    if requested_format(&uri).is_none()
+        && headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.split(',').next().unwrap_or("").trim() == "text/vnd.turbo-stream.html")
+    {
+        return Ok(not_acceptable_format(""));
+    }
     let db = pool(&s)?;
-    let current: String = db
+    let current: Option<String> = db
         .query_row(
             "SELECT involvement FROM memberships WHERE room_id=?1 AND user_id=?2",
             params![rid, u.id],
             |r| r.get(0),
         )
         .map_err(db_err)?;
+    let Some(current) = current else {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    };
     let frame = involvement_frame_html(
         rid,
         &room.kind,
@@ -5353,13 +5380,10 @@ struct PushSubscriptionInput {
     p256dh_key: String,
     auth_key: String,
 }
-#[derive(Deserialize)]
-struct PushSubscriptionEnvelope {
-    push_subscription: PushSubscriptionInput,
-}
 async fn push_subscriptions_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -5369,15 +5393,21 @@ async fn push_subscriptions_post(
         .unwrap_or("")
         .starts_with("application/json")
     {
-        Json::<PushSubscriptionEnvelope>::from_request(req, &s)
+        let Json(body) = Json::<Value>::from_request(req, &s)
             .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let Some(subscription) = body.get("push_subscription") else {
+            return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+        };
+        serde_json::from_value::<PushSubscriptionInput>(subscription.clone())
             .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?
-            .0
-            .push_subscription
     } else {
         let Form(values) = Form::<HashMap<String, String>>::from_request(req, &s)
             .await
             .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+        if !values.keys().any(|key| key.starts_with("push_subscription[") && key.ends_with(']')) {
+            return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+        }
         PushSubscriptionInput {
             endpoint: values
                 .get("push_subscription[endpoint]")
@@ -5524,16 +5554,13 @@ async fn involvement_post(
     let u = user(&s, &headers)?;
     let room = room_for(&s, u.id, rid)?;
     let submitted = fields(&raw).0;
-    let involvement = submitted
-        .get("involvement")
-        .or_else(|| query.get("involvement"))
-        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if !["everything", "mentions", "nothing", "invisible"].contains(&involvement.as_str()) {
+    let involvement = submitted.get("involvement").or_else(|| query.get("involvement"));
+    if involvement.is_some_and(|value| !["everything", "mentions", "nothing", "invisible"].contains(&value.as_str())) {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
-    let previous: String = tx
+    let previous: Option<String> = tx
         .query_row(
             "SELECT involvement FROM memberships WHERE room_id=?1 AND user_id=?2",
             params![rid, u.id],
@@ -5546,9 +5573,9 @@ async fn involvement_post(
     )
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
-    if room.kind != "Rooms::Direct" && (previous == "invisible") != (involvement == "invisible") {
+    if room.kind != "Rooms::Direct" && (previous.as_deref() == Some("invisible")) != (involvement.map(String::as_str) == Some("invisible")) {
         notify_room_lists(&s, [u.id]);
-        broadcast_user_room_visibility(&s, u.id, &room, involvement != "invisible");
+        broadcast_user_room_visibility(&s, u.id, &room, involvement.map(String::as_str) != Some("invisible"));
     }
     Ok(found_redirect(&public_url(
         &headers,
@@ -5882,15 +5909,6 @@ fn bot_message_json(
         "<div class=\"trix-content\">\n  {content}\n</div>\n"
     ));
     Ok(message)
-}
-#[derive(Deserialize)]
-struct PostMessage {
-    #[serde(rename = "message[body]")]
-    body: Option<String>,
-    #[serde(rename = "message[client_message_id]")]
-    client_id: Option<String>,
-    #[serde(rename = "message[format]")]
-    format: Option<String>,
 }
 struct Upload {
     filename: String,
@@ -6640,6 +6658,11 @@ async fn message_create(
     req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    match room_for(&s, u.id, rid) {
+        Ok(_) => {}
+        Err(StatusCode::NOT_FOUND) => return missing_message_room_response(&s, &headers, &uri, &u),
+        Err(error) => return Err(error),
+    }
     let csrf_header_valid = u.csrf_token.as_deref().is_some_and(|csrf| {
         headers.get("x-csrf-token").and_then(|value| value.to_str().ok()) == Some(csrf)
     });
@@ -6648,7 +6671,7 @@ async fn message_create(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .starts_with("multipart/form-data");
-    let (body, client_id, upload, rich) = if multipart_form {
+    let (body, client_id, upload, rich, message_seen) = if multipart_form {
         let mut multipart = Multipart::from_request(req, &s)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -6656,6 +6679,7 @@ async fn message_create(
         let mut client_id = None;
         let mut upload = None;
         let mut rich = true;
+        let mut message_seen = false;
         let mut form_csrf = None;
         while let Some(mut field) = multipart
             .next_field()
@@ -6663,6 +6687,7 @@ async fn message_create(
             .map_err(|_| StatusCode::BAD_REQUEST)?
         {
             let name = field.name().unwrap_or("").to_string();
+            message_seen |= name.starts_with("message[") && name.ends_with(']');
             if name == "message[attachment]" {
                 let filename = field.file_name().unwrap_or("attachment").to_string();
                 let content_type = field
@@ -6702,42 +6727,31 @@ async fn message_create(
         if !csrf_header_valid && form_csrf.as_deref() != u.csrf_token.as_deref() {
             return Ok(invalid_authenticity_response(&headers, &uri));
         }
-        (body, client_id, upload, rich)
+        (body, client_id, upload, rich, message_seen)
     } else {
-        let Form(f) = Form::<PostMessage>::from_request(req, &s)
+        let RawForm(raw) = RawForm::from_request(req, &s)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let f = fields(&raw).0;
+        if f.get("message").is_some_and(|value| !value.trim().is_empty())
+            && !f.keys().any(|name| name.starts_with("message[") && name.ends_with(']'))
+        {
+            return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+        }
         (
-            f.body.unwrap_or_default(),
-            f.client_id,
+            f.get("message[body]").cloned().unwrap_or_default(),
+            f.get("message[client_message_id]").cloned(),
             None,
-            matches!(f.format.as_deref(), None | Some("html")),
+            matches!(f.get("message[format]").map(String::as_str), None | Some("html")),
+            f.keys().any(|name| name.starts_with("message[") && name.ends_with(']')),
         )
     };
+    if !message_seen {
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+    }
     let m = match insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), true) {
         Ok(message) => message,
-        Err(StatusCode::NOT_FOUND) => {
-            let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM rooms WHERE id=?1)", [rid], |row| row.get(0)).map_err(db_err)?;
-            if !exists {
-                let requested_format = uri.path().rsplit_once('.').map(|(_, suffix)| suffix);
-                let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
-                    .unwrap_or("").split(',').next().unwrap_or("").trim();
-                if matches!(requested_format, None | Some("html"))
-                    && (accepted_type.is_empty() || accepted_type.starts_with("text/html") || accepted_type == "*/*")
-                {
-                    let has_logo: bool = pool(&s)?.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)
-                    ).map_err(db_err)?;
-                    let body = "<turbo-frame id=\"composer-frame\"><span class=\"composer__input input input--actor shake margin-block-end txt-negative txt-align-center\" style=\"--input-border-color: var(--color-negative)\"><span>This room was deleted.</span></span></turbo-frame>";
-                    return Ok(render_source_page_sections(
-                        "Campfire", body, "", "", "", if has_logo { "account-has-logo" } else { "" }, "", "", Some(&u),
-                        u.csrf_token.as_deref().unwrap_or("")
-                    ));
-                }
-                return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
-            }
-            return Err(StatusCode::NOT_FOUND);
-        }
+        Err(StatusCode::NOT_FOUND) => return missing_message_room_response(&s, &headers, &uri, &u),
         Err(error) => return Err(error),
     };
     if s.webhooks_enabled {
@@ -6771,6 +6785,28 @@ async fn message_create(
     } else {
         Ok(not_acceptable_format(if suffix == Some("json") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("application/json")) { "application/json" } else { "" }))
     }
+}
+fn missing_message_room_response(s: &AppState, headers: &HeaderMap, uri: &Uri, u: &User) -> AppResult {
+    let requested_format = uri.path().rsplit_once('.').map(|(_, suffix)| suffix);
+    let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+        .unwrap_or("").split(',').next().unwrap_or("").trim();
+    if matches!(requested_format, None | Some("html"))
+        && (accepted_type.is_empty() || accepted_type.starts_with("text/html") || accepted_type == "*/*")
+    {
+        deleted_room_composer_page(s, u)
+    } else {
+        Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, headers, uri))
+    }
+}
+fn deleted_room_composer_page(s: &AppState, u: &User) -> AppResult {
+    let has_logo: bool = pool(s)?.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)
+    ).map_err(db_err)?;
+    let body = "<turbo-frame id=\"composer-frame\"><span class=\"composer__input input input--actor shake margin-block-end txt-negative txt-align-center\" style=\"--input-border-color: var(--color-negative)\"><span>This room was deleted.</span></span></turbo-frame>";
+    Ok(render_source_page_sections(
+        "Campfire", body, "", "", "", if has_logo { "account-has-logo" } else { "" }, "", "", Some(u),
+        u.csrf_token.as_deref().unwrap_or("")
+    ))
 }
 async fn message_show(
     State(s): State<Arc<AppState>>,
@@ -7181,6 +7217,7 @@ fn form_value<'a>(
 async fn create_room(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(kind): Path<String>,
     RawForm(raw): RawForm,
 ) -> AppResult {
@@ -7190,6 +7227,9 @@ async fn create_room(
     }
     ensure_room_creation_allowed(&s, &u)?;
     let (values, user_ids) = fields(&raw);
+    if !values.keys().any(|key| key.starts_with("room[") && key.ends_with(']')) {
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+    }
     let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -7236,16 +7276,18 @@ async fn create_room(
 async fn create_open_room(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    uri: OriginalUri,
     RawForm(raw): RawForm,
 ) -> AppResult {
-    create_room(State(s), headers, Path("opens".to_string()), RawForm(raw)).await
+    create_room(State(s), headers, uri, Path("opens".to_string()), RawForm(raw)).await
 }
 async fn create_closed_room(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    uri: OriginalUri,
     RawForm(raw): RawForm,
 ) -> AppResult {
-    create_room(State(s), headers, Path("closeds".to_string()), RawForm(raw)).await
+    create_room(State(s), headers, uri, Path("closeds".to_string()), RawForm(raw)).await
 }
 async fn render_room_edit(s: Arc<AppState>, headers: HeaderMap, rid: i64, kind: &str) -> AppResult {
     let u = user(&s, &headers)?;
@@ -7446,6 +7488,9 @@ async fn room_kind_update(
         Err(error) => return Err(error),
     }
     let (values, user_ids) = fields(&raw);
+    if !values.keys().any(|key| key.starts_with("room[") && key.ends_with(']')) {
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+    }
     let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     update_room_values(&s, &u, rid, kind, name, user_ids)?;
     Ok(found_redirect(&format!("/rooms/{rid}")))
@@ -7480,18 +7525,12 @@ async fn room_kind_delete(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    Path(rid): Path<i64>,
+    Path(_rid): Path<i64>,
 ) -> AppResult {
-    let u = user(&s, &headers)?;
-    let room = match room_for(&s, u.id, rid) {
-        Ok(room) => room,
-        Err(StatusCode::NOT_FOUND) => return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri)),
-        Err(error) => return Err(error),
-    };
-    if room.kind == "Rooms::Direct" {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    room_delete(State(s), headers, Path(rid)).await
+    let _ = user(&s, &headers)?;
+    // The namespaced Rails controllers inherit destroy without the room
+    // loading callback, so destroy reaches an uninitialized @room.
+    Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri))
 }
 async fn direct_edit(
     State(s): State<Arc<AppState>>,
@@ -7789,17 +7828,17 @@ fn search_query(raw: &str) -> String {
         .replace_all(raw, " ")
         .into_owned()
 }
-#[derive(Deserialize)]
-struct SearchForm {
-    q: String,
-}
 async fn search_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Form(f): Form<SearchForm>,
+    OriginalUri(uri): OriginalUri,
+    Form(f): Form<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let query = search_query(&f.q);
+    let Some(raw_query) = f.get("q") else {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    };
+    let query = search_query(raw_query);
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
     tx.execute("INSERT INTO searches(user_id,query,created_at,updated_at) VALUES(?1,?2,?3,?3) ON CONFLICT(user_id,query) DO UPDATE SET updated_at=excluded.updated_at",params![u.id,query,now()]).map_err(db_err)?;
@@ -8892,7 +8931,7 @@ fn profile_membership_item(id: i64, name: &str, kind: &str, involvement: &str, c
         esc(name), esc(csrf)
     )
 }
-async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri) -> AppResult {
     let u = user(&s, &headers)?;
     let transfer = public_url(&headers, &transfer_link(&s, u.id)?);
     let transfer_qr = format!("/qr_code/{}", URL_SAFE.encode(transfer.as_bytes()));
@@ -8934,12 +8973,18 @@ async fn profile(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResul
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(db_err)?
     {
         let (rid, name, kind, involvement) = row.map_err(db_err)?;
+        if involvement.is_none() && headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+            .is_some_and(|accept| matches!(accept.split(',').next().unwrap_or("").trim(), "text/html" | "*/*" | ""))
+        {
+            return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+        }
+        let involvement = involvement.as_deref().unwrap_or("");
         let display = if kind == "Rooms::Direct" {
             db.query_row("SELECT group_concat(name, ', ') FROM (SELECT u.name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.room_id=?1 AND u.id!=?2 ORDER BY u.id)", params![rid,u.id], |r| r.get::<_,Option<String>>(0)).map_err(db_err)?.unwrap_or_else(||u.name.clone())
         } else {
@@ -9082,7 +9127,7 @@ async fn profile_post(
         fields(&raw).0
     };
     if f.is_empty() && avatar.is_none() {
-        return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")], "").into_response());
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     let name = form_value(&f, "name", "user[name]").unwrap_or(&u.name);
     let email = form_value(&f, "email_address", "user[email_address]");
@@ -9524,6 +9569,7 @@ async fn user_show(
 async fn user_ban(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(id): Path<i64>,
 ) -> AppResult {
     let admin = user(&s, &headers)?;
@@ -9556,7 +9602,7 @@ async fn user_ban(
     drop(ip_stmt);
     for ip in ips {
         if !ip.parse::<IpAddr>().map(public_ip).unwrap_or(false) {
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            return Ok(rails_error_response(StatusCode::UNPROCESSABLE_ENTITY, &headers, &uri));
         }
         tx.execute(
             "INSERT INTO bans(user_id,ip_address) VALUES(?1,?2)",
@@ -9586,6 +9632,7 @@ async fn user_ban(
 async fn user_ban_post_override(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    uri: OriginalUri,
     Path(id): Path<i64>,
     body: Bytes,
 ) -> AppResult {
@@ -9593,7 +9640,7 @@ async fn user_ban_post_override(
     if values.get("_method").map(String::as_str) == Some("delete") {
         user_unban(State(s), headers, Path(id)).await
     } else {
-        user_ban(State(s), headers, Path(id)).await
+        user_ban(State(s), headers, uri, Path(id)).await
     }
 }
 
@@ -10134,12 +10181,15 @@ async fn bot_fields(
     };
     Ok((f, avatar))
 }
-async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Request) -> AppResult {
+async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri, req: Request) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
     let (f, avatar) = bot_fields(&s, &headers, req).await?;
+    if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+    }
     let name = form_value(&f, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -10598,6 +10648,9 @@ async fn bot_messages_post(
             None,
         )
     };
+    if body.trim().is_empty() && attachment.is_none() {
+        return Ok((StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")]).into_response());
+    }
     let m = insert_message(&s, &u, rid, &body, None, attachment, true, Some(&headers), false)?;
     if s.webhooks_enabled {
         if let Err(error) = enqueue_webhooks(&s, &m) {
@@ -11611,11 +11664,6 @@ async fn bot_boost_create(
 ) -> AppResult {
     let bot = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, bot.id, rid)?;
-    let content = std::str::from_utf8(&body)
-        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-    if content.trim().is_empty() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
     let db = pool(&s)?;
     let client_message_id: Option<String> = db
         .query_row(
@@ -11625,7 +11673,14 @@ async fn bot_boost_create(
         )
         .optional()
         .map_err(db_err)?;
-    let client_message_id = client_message_id.ok_or(StatusCode::NOT_FOUND)?;
+    let Some(client_message_id) = client_message_id else {
+        return Ok((StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")]).into_response());
+    };
+    let content = std::str::from_utf8(&body)
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    if content.trim().is_empty() {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     let created = now();
     db.execute(
         "INSERT INTO boosts(id,message_id,booster_id,content,created_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM boosts))+1 FROM id_sequences WHERE name='boosts'),?1,?2,?3,?4)",
@@ -11673,6 +11728,8 @@ async fn bot_boost_delete(
     Path((rid, key, mid, raw_bid)): Path<(i64, String, i64, String)>,
 ) -> AppResult {
     let bid = path_record_id(&raw_bid)?;
+    let bot = bot_api_actor(&s, &headers, &key)?;
+    room_for(&s, bot.id, rid)?;
     let db = pool(&s)?;
     let message_exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND room_id=?2)",
@@ -11682,8 +11739,6 @@ async fn bot_boost_delete(
     if !message_exists {
         return Ok((StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")]).into_response());
     }
-    let bot = bot_api_actor(&s, &headers, &key)?;
-    room_for(&s, bot.id, rid)?;
     let content: Option<String> = db
         .query_row(
             "SELECT content FROM boosts WHERE id=?1 AND message_id=?2 AND booster_id=?3",
@@ -11920,7 +11975,7 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     } else {
         None
     };
-    let forbidden_page = application_controller && matches!(req.method(), &Method::GET | &Method::HEAD);
+    let forbidden_page = application_controller;
     let mut response = next.run(req).await;
     if native_navigation && response.status().is_success() {
         response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=0, private, must-revalidate"));
@@ -12004,6 +12059,19 @@ async fn missing_messages_get(State(s): State<Arc<AppState>>, headers: HeaderMap
         Ok(_) => Err(StatusCode::NOT_FOUND),
         Err(StatusCode::UNAUTHORIZED) => Ok(found_redirect("/session/new")),
         Err(error) => Err(error),
+    }
+}
+async fn missing_messages_create(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> AppResult {
+    let u = user(&s, &headers)?;
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if matches!(accept.split(',').next().unwrap_or("").trim(), "" | "text/html" | "*/*") {
+        deleted_room_composer_page(&s, &u)
+    } else {
+        Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri))
     }
 }
 async fn webmanifest(State(s): State<Arc<AppState>>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
@@ -12119,7 +12187,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS failed_webhook_jobs(job_id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,error TEXT NOT NULL,created_at TEXT NOT NULL,failed_at TEXT NOT NULL,retried_at TEXT);
         CREATE TABLE IF NOT EXISTS session_transfers(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY,name TEXT,type TEXT NOT NULL,creator_id INTEGER NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT NOT NULL DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
+        CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
         CREATE TABLE IF NOT EXISTS direct_room_sets(room_id INTEGER PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,member_ids TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_direct_room_sets_members ON direct_room_sets(member_ids);
         CREATE INDEX IF NOT EXISTS idx_rooms_type ON rooms(type);
@@ -12270,6 +12338,25 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if !has_connected_at {
         conn.execute("ALTER TABLE memberships ADD COLUMN connected_at TEXT", [])?;
+    }
+    let involvement_not_null: bool = conn.query_row(
+        "SELECT \"notnull\" FROM pragma_table_info('memberships') WHERE name='involvement'",
+        [],
+        |r| r.get(0),
+    )?;
+    if involvement_not_null {
+        let tx = conn.transaction()?;
+        tx.execute_batch("DROP TRIGGER IF EXISTS direct_room_sets_membership_delete;
+            CREATE TABLE memberships_new(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,connections INTEGER NOT NULL DEFAULT 0,connected_at TEXT,UNIQUE(room_id,user_id));
+            INSERT INTO memberships_new(id,room_id,user_id,involvement,unread_at,created_at,connections,connected_at)
+                SELECT id,room_id,user_id,involvement,unread_at,created_at,connections,connected_at FROM memberships;
+            DROP TABLE memberships;
+            ALTER TABLE memberships_new RENAME TO memberships;
+            CREATE INDEX idx_memberships_user ON memberships(user_id);
+            CREATE TRIGGER direct_room_sets_membership_delete AFTER DELETE ON memberships BEGIN
+                UPDATE direct_room_sets SET member_ids=COALESCE((SELECT group_concat(user_id,',') FROM (SELECT user_id FROM memberships WHERE room_id=old.room_id ORDER BY user_id)),'') WHERE room_id=old.room_id;
+            END;")?;
+        tx.commit()?;
     }
     let has_body_html: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='body_html')",
@@ -12877,7 +12964,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/new.html", get(boost_new))
         .route("/messages/{id}/boosts/new.json", get(boost_new))
         .route("/messages/{id}/boosts/new.turbo_stream", get(boost_new))
-        .route("/messages", get(missing_messages_get).post(missing_messages_get))
+        .route("/messages", get(missing_messages_get).post(missing_messages_create))
         .route("/messages/new", get(|| async { StatusCode::NOT_FOUND }))
         .route("/messages/new.html", get(|| async { StatusCode::NOT_FOUND }))
         .route("/messages/new.json", get(|| async { StatusCode::NOT_FOUND }))
@@ -13256,6 +13343,40 @@ mod tests {
         super::init_db(&db).unwrap();
         let name: Option<String> = db.get().unwrap().query_row("SELECT name FROM rooms WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(name, None);
+    }
+
+    #[test]
+    fn legacy_membership_involvement_migrates_to_nullable_without_losing_rows() {
+        let db = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .unwrap();
+        super::init_db(&db).unwrap();
+        {
+            let conn = db.get().unwrap();
+            conn.execute_batch("INSERT INTO users(id,name,created_at,updated_at) VALUES(1,'Test','2026-01-01','2026-01-01');
+                INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(1,'Room','Rooms::Open',1,'2026-01-01','2026-01-01');
+                DROP TRIGGER direct_room_sets_membership_delete;
+                DROP TABLE memberships;
+                CREATE TABLE memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT NOT NULL DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
+                INSERT INTO memberships VALUES(7,1,1,'everything',NULL,'2026-01-01');")
+                .unwrap();
+        }
+        super::init_db(&db).unwrap();
+        let conn = db.get().unwrap();
+        let preserved: (i64, String, i64) = conn.query_row(
+            "SELECT id,involvement,connections FROM memberships WHERE room_id=1 AND user_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(preserved, (7, "everything".to_string(), 0));
+        conn.execute("UPDATE memberships SET involvement=NULL WHERE id=7", []).unwrap();
+        let involvement: Option<String> = conn.query_row("SELECT involvement FROM memberships WHERE id=7", [], |r| r.get(0)).unwrap();
+        assert_eq!(involvement, None);
+        conn.execute("INSERT INTO direct_room_sets(room_id,member_ids) VALUES(1,'1')", []).unwrap();
+        conn.execute("DELETE FROM memberships WHERE id=7", []).unwrap();
+        let members: String = conn.query_row("SELECT member_ids FROM direct_room_sets WHERE room_id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(members, "");
     }
 
     #[test]
