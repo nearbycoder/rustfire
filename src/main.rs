@@ -3551,7 +3551,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
             .map_err(|_| StatusCode::BAD_REQUEST)?
         {
             let name = field.name().unwrap_or("").to_string();
-            if matches!(name.as_str(), "user[avatar]" | "avatar") {
+            if name == "user[avatar]" {
                 let content_type = field
                     .content_type()
                     .unwrap_or("application/octet-stream")
@@ -3560,10 +3560,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
                 if !bytes.is_empty() {
                     avatar = Some((bytes.to_vec(), sniff_upload_content_type(&bytes, &content_type).to_string()));
                 }
-            } else if matches!(
-                name.as_str(),
-                "name" | "user[name]" | "email_address" | "user[email_address]" | "password" | "user[password]"
-            ) {
+            } else if matches!(name.as_str(), "user[name]" | "user[email_address]" | "user[password]") {
                 values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
         }
@@ -3574,12 +3571,9 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         fields(&raw).0
     };
-    let name = form_value(&values, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_string();
-    let email = form_value(&values, "email_address", "user[email_address]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.trim().to_string();
-    let password = form_value(&values, "password", "user[password]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?.to_string();
-    if name.is_empty() || password.is_empty() || !email.contains('@') {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let name = values.get("user[name]").ok_or(StatusCode::BAD_REQUEST)?.to_string();
+    let email = values.get("user[email_address]").ok_or(StatusCode::BAD_REQUEST)?.to_string();
+    let password = values.get("user[password]").ok_or(StatusCode::BAD_REQUEST)?.to_string();
     Ok(SignupSubmission { name, email, password, avatar })
 }
 async fn first_run_get(State(s): State<Arc<AppState>>) -> AppResult {
@@ -8623,7 +8617,7 @@ async fn join_post(
     let tx = db.transaction().map_err(db_err)?;
     if let Err(error) = tx.execute(
         "INSERT INTO users(id,name,email_address,password_digest,role,status,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,?2,?3,0,0,?4,?4)",
-        params![name.trim(), email, pw, t],
+        params![name, email, pw, t],
     ) {
         drop(tx);
         let duplicate: bool = db

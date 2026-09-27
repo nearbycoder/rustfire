@@ -1,5 +1,6 @@
 """Compare first-run setup with a fresh pinned Campfire account."""
 
+import argparse
 import pathlib
 import re
 import shutil
@@ -72,7 +73,7 @@ def page_shell(page):
     return styles, body.group(1) if body else None, landmarks
 
 
-def check(port, database, campfire, image):
+def check(port, database, campfire, image, edge_inputs=False):
     opener = browser()
     assert fetch(opener, port, "/")[:2] == (302, "/session/new")
     assert fetch(opener, port, "/session/new")[:2] == (302, "/first_run")
@@ -83,7 +84,14 @@ def check(port, database, campfire, image):
         assert f'name="{field}"' in page, field
     token = re.search(r'name=[\'\"]authenticity_token[\'\"] value=[\'\"]([^\'\"]+)', page)
     assert token and token.group(1)
-    fields = {"authenticity_token": token.group(1), "user[name]": "First Admin", "user[email_address]": "first-admin@example.invalid", "user[password]": "initial-password"}
+    for invalid in ({}, {"name": "Flat Admin", "email_address": "flat@example.invalid", "password": "initial-password"}):
+        body = urllib.parse.urlencode({"authenticity_token": token.group(1), **invalid}).encode()
+        assert fetch(opener, port, "/first_run", body, "application/x-www-form-urlencoded") == (400, "", "")
+        with sqlite3.connect(database) as db:
+            assert db.execute("SELECT count(*) FROM accounts").fetchone()[0] == 0
+    name = "" if edge_inputs else "First Admin"
+    email = "invalid-email" if edge_inputs else "first-admin@example.invalid"
+    fields = {"authenticity_token": token.group(1), "user[name]": name, "user[email_address]": email, "user[password]": "initial-password"}
     content_type, body = multipart(fields, image)
     status, location, _ = fetch(opener, port, "/first_run", body, content_type)
     assert (status, location) == (302, "/"), (status, location)
@@ -99,7 +107,7 @@ def check(port, database, campfire, image):
     assert len(users) == len(rooms) == len(memberships) == avatar_count == 1
     uid, name, email, role = users[0]
     rid, room_name, kind, creator = rooms[0]
-    assert (name, email, role) == ("First Admin", "first-admin@example.invalid", 1)
+    assert (name, email, role) == (fields["user[name]"], fields["user[email_address]"], 1)
     assert (room_name, kind, creator, memberships) == ("All Talk", "Rooms::Open", uid, [(rid, uid)])
     assert fetch(opener, port, "/")[:2] == (302, f"/rooms/{rid}")
     status, _, room_page = fetch(opener, port, f"/rooms/{rid}")
@@ -110,6 +118,9 @@ def check(port, database, campfire, image):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--edge-inputs", action="store_true", help="check Campfire's blank name and non-email-shaped address")
+    args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-first-run-") as scratch:
         temp = pathlib.Path(scratch)
@@ -128,7 +139,7 @@ def main():
         try:
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": source_env["SECRET_KEY_BASE"], "RUSTFIRE_UPLOAD_DIR": str(temp / "uploads")})
             try:
-                rust_result = check(rust_port, rust_db, False, image)
+                rust_result = check(rust_port, rust_db, False, image, args.edge_inputs)
             finally:
                 stop_server(rust)
             vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
@@ -139,7 +150,7 @@ def main():
                 source = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=source_root, env=source_env, stdout=log, stderr=log)
                 try:
                     wait_for_server(source_port, source)
-                    source_result = check(source_port, source_db, True, image)
+                    source_result = check(source_port, source_db, True, image, args.edge_inputs)
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -158,7 +169,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired first-run account, administrator, room, avatar, and repeat redirect")
+    print("PASS paired first-run account, administrator, room, avatar, malformed inputs, and repeat redirect" + (" with blank name and invalid email" if args.edge_inputs else ""))
 
 
 if __name__ == "__main__":

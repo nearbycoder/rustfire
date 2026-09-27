@@ -600,7 +600,7 @@ def main():
             code, _, page = request(admin, base, "/account/bots")
             assert code == 200 and "href='/account/bots/new'" in page
             code, _, page = request(admin, base, "/account/bots/new")
-            assert code == 200 and "name='user[avatar]'" in page and "name='user[name]'" in page and "name='user[webhook_url]'" in page
+            assert code == 200 and all(f'name="user[{field}]"' in page for field in ("avatar", "name", "webhook_url"))
             anonymous_bot_status, anonymous_bot_url, _ = request(client(), base, "/account/bots/new")
             assert anonymous_bot_status == 200 and anonymous_bot_url.endswith("/session/new")
             code, _, page = request(admin, base, "/account/bots", {"name": "Robot"})
@@ -623,7 +623,7 @@ def main():
             with sqlite3.connect(f"{tmp}/test.db") as db:
                 assert db.execute("SELECT COUNT(*) FROM users WHERE name=''").fetchone()[0] == 0
             code, _, page = request(admin, base, "/account/bots/3/edit")
-            assert code == 200 and "Robot" in page and "name='user[avatar]'" in page
+            assert code == 200 and "Robot" in page and 'name="user[avatar]"' in page
             code, _, _ = request(admin, base, "/account/bots/3/avatar", data=avatar_body, method="POST", headers={"Content-Type":"multipart/form-data; boundary=avatar-test"})
             assert code == 200
             with admin.open(base+signed_avatar_url(3)) as res:

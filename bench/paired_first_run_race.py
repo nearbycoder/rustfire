@@ -1,6 +1,7 @@
 """Race five first-run requests against fresh Campfire and Rustfire databases."""
 
 import concurrent.futures
+import pathlib
 import re
 import shutil
 import sqlite3
