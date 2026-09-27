@@ -119,6 +119,7 @@ The importer currently stops if Campfire has unsupported or undecodable inline m
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior, remaining browser profiles, and actual cross-browser push delivery validation
+- Real iOS and Android soft-keyboard behavior; the boost handoff currently matches Campfire only in touch-capability-emulated Chromium
 - Remaining webhook response and failure edge cases, longer delivery tests and capacity sweeps, and JSON API compatibility
 - Remaining account/user administration and exact behavior for bans and profile/session-transfer edge cases
 - Remaining small interaction features

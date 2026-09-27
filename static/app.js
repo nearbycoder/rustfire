@@ -17,6 +17,21 @@ document.addEventListener('keydown',event=>{
 });
 const csrfToken=document.querySelector('meta[name="csrf-token"]')?.content||'';
 const currentUserId=document.querySelector('meta[name="current-user-id"]')?.content||document.body.dataset.userId||'';
+if('ontouchstart' in window&&navigator.maxTouchPoints>0){
+  document.addEventListener('click',event=>{
+    const action=event.target.closest('[data-action~="soft-keyboard#open"]');
+    const controller=action?.closest('[data-controller~="soft-keyboard"]');
+    if(!controller)return;
+    const input=document.createElement('input');
+    input.type='text';input.className='input--invisible';
+    input.addEventListener('focusout',()=>input.remove(),{once:true});
+    controller.append(input);input.focus();
+  });
+}
+const centerLoadedForm=root=>{
+  const element=root.querySelector('[data-controller~="scroll-into-view"]');
+  if(element)requestAnimationFrame(()=>element.scrollIntoView({behavior:'smooth',block:'center'}));
+};
 document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
 document.addEventListener('keydown',event=>{
   const form=event.target instanceof Element?event.target.closest('form[data-controller~="form"]'):null;
@@ -751,6 +766,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       if(!returned){alert('Could not open editor');return;}
       frame.replaceWith(returned);
       article.classList.add('editing');edit.closest('details').open=false;
+      centerLoadedForm(returned);
       article.querySelector('.composer--edit trix-editor')?.focus();return;
     }
     const cancel=e.target.closest('.message__edit-close-btn,[data-form-target="cancel"]');
@@ -775,6 +791,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       if(!frame.dataset.originalHtml)frame.dataset.originalHtml=frame.innerHTML;
       frame.innerHTML=returned.innerHTML;
       if(details)details.open=false;
+      centerLoadedForm(frame);
       frame.querySelector('[name="boost[content]"]')?.focus();
       return;
     }

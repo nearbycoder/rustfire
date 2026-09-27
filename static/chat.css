@@ -188,6 +188,8 @@ body:has(.app-shell)>header { display: none; }
 .custom-boost-form input { min-width: 0; flex: 1; border: 1px solid var(--chat-border); border-radius: 7px; padding: 6px; background: var(--chat-bg); color: var(--chat-text); }
 .custom-boost-form button { border: 0; border-radius: 7px; padding: 6px 10px; background: var(--chat-bubble); color: var(--chat-text); cursor: pointer; }
 .boost__form { display: flex; align-items: center; margin: 0; }
+.input--invisible { background: transparent; width: 5px; height: 5px; border: 0; opacity: .1; }
+.input--invisible:focus { outline: none; }
 .boost__form-label { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .boost__form .boost__avatar { width: 22px; height: 22px; margin: 0; }
 .boost__form .boost__avatar a,.boost__form .boost__avatar img { display: block; width: 22px; height: 22px; }
