@@ -3,6 +3,7 @@
 Run after cargo build --release with the pinned Ruby bundle and Redis.
 """
 
+import argparse
 import base64
 import concurrent.futures
 import hashlib
@@ -24,7 +25,6 @@ DATA = b"paired direct upload\n"
 CHECKSUM = base64.b64encode(hashlib.md5(DATA).digest()).decode()
 PAYLOAD = json.dumps({"blob": {"filename": "paired-upload.txt", "byte_size": len(DATA),
                                "checksum": CHECKSUM, "content_type": "text/plain"}}).encode()
-LARGE_DATA = b"R" * (25 * 1024 * 1024 + 1)
 
 
 def raw_request(port, method, path, body=b"", headers=None):
@@ -149,7 +149,7 @@ def missing_mime_case(port, cookie, csrf, database, upload_root, campfire):
     return path, observed
 
 
-def workflow(port, cookie, csrf, database, upload_root, campfire):
+def workflow(port, cookie, csrf, database, upload_root, campfire, large_data, large_mib):
     anonymous = raw_request(port, "POST", "/rails/active_storage/direct_uploads", PAYLOAD,
                             {"Content-Type": "application/json"})
     assert anonymous[0] == 422, ("anonymous metadata without CSRF context", anonymous[0])
@@ -183,6 +183,9 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
     headers = {"Cookie": cookie, "Content-Type": "text/plain"}
     assert raw_request(port, "PUT", upload_path, b"incorrect", headers)[0] == 422
     assert raw_request(port, "PUT", upload_path, b"x" * len(DATA), headers)[0] == 422
+    if not campfire:
+        assert not (upload_root / metadata["key"]).exists(), "Rejected upload was published"
+        assert not list(upload_root.glob(f"{metadata['key']}.upload-*")), "Rejected upload left temporary files"
     assert raw_request(port, "PUT", upload_path, DATA, headers)[0] == 204
     blob_path = f"/rails/active_storage/blobs/redirect/{metadata['signed_id']}/paired-upload.txt"
     status, location, _ = raw_request(port, "GET", blob_path)
@@ -239,7 +242,7 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
         ("  report:Q%$|?*.txt  ", "text/plain", b"an unsafe filename\n"),
         ("dir\\report/2026.txt", "text/plain", b"separators in filename\n"),
         ("bidirectional\u202eview.txt", "text/plain", b"direction override in filename\n"),
-        ("over-25-mib.bin", "application/octet-stream", LARGE_DATA),
+        (f"over-{large_mib}-mib.bin", "application/octet-stream", large_data),
     ):
         extra_path, observations = mime_case(port, cookie, csrf, database, upload_root, campfire,
                                               filename, content_type, data)
@@ -288,6 +291,13 @@ def metadata_boundaries(port, cookie, csrf):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--large-mib", type=int, default=25,
+                        help="binary upload size in MiB, plus one byte (default: 25)")
+    args = parser.parse_args()
+    if args.large_mib < 1:
+        parser.error("--large-mib must be positive")
+    large_data = b"R" * (args.large_mib * 1024 * 1024 + 1)
     repo = pathlib.Path("/tmp/once-campfire-reference")
     ruby = pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby")
     bundle = pathlib.Path("/tmp/rustfire-baseline/bundle")
@@ -302,7 +312,7 @@ def main():
         rust_uploads = temp / "rust-uploads"
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(rust_uploads)})
         try:
-            rust_files, rust_proxy = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, rust_uploads, False)
+            rust_files, rust_proxy = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, rust_uploads, False, large_data, args.large_mib)
             concurrent_metadata(rust_port, "session_token=benchmark-session", "benchmark-csrf")
             rust_boundaries = metadata_boundaries(rust_port, "session_token=benchmark-session", "benchmark-csrf")
         finally:
@@ -314,7 +324,7 @@ def main():
         try:
             wait_for_server(camp_port, camp)
             cookie, csrf = login_campfire(camp_port)
-            camp_files, camp_proxy = workflow(camp_port, cookie, csrf, camp_db, repo / "storage/files", True)
+            camp_files, camp_proxy = workflow(camp_port, cookie, csrf, camp_db, repo / "storage/files", True, large_data, args.large_mib)
             concurrent_metadata(camp_port, cookie, csrf)
             camp_boundaries = metadata_boundaries(camp_port, cookie, csrf)
         except Exception:
@@ -340,7 +350,7 @@ def main():
                 assert rust_observation == camp_observation, (rust_name, rust_observation, camp_observation)
         assert rust_proxy[-1] == camp_proxy[-1], ("missing MIME download", rust_proxy[-1], camp_proxy[-1])
         assert rust_boundaries == camp_boundaries, (rust_boundaries, camp_boundaries)
-        print("PASS matched direct-upload metadata boundaries, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
+        print(f"PASS matched direct-upload metadata boundaries, {args.large_mib} MiB plus one byte upload, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
 
 
 if __name__ == "__main__":

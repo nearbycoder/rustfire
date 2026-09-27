@@ -48,7 +48,7 @@ use std::{
     },
     time::{Duration as StdDuration, UNIX_EPOCH},
 };
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::io::ReaderStream;
 use tower_http::{compression::{CompressionLayer, predicate::{Predicate, SizeAbove}}, services::ServeDir};
@@ -9973,11 +9973,17 @@ async fn direct_upload_create(
         "direct_upload":{"url":public_url(&headers,&format!("/rails/active_storage/disk/{upload_token}")),"headers":{"Content-Type":content_type}}
     })).into_response())
 }
+struct UploadTemporaryFile(std::path::PathBuf);
+impl Drop for UploadTemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 async fn direct_upload_put(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(token): Path<String>,
-    body: Bytes,
+    body: Body,
 ) -> AppResult {
     user(&s, &headers)?;
     let data = disk_token_data(&s.blob_signing_key, &token, "blob_token").ok_or(StatusCode::NOT_FOUND)?;
@@ -9986,8 +9992,7 @@ async fn direct_upload_put(
     let expected_length = data.get("content_length").and_then(Value::as_i64).ok_or(StatusCode::NOT_FOUND)?;
     let checksum = data.get("checksum").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
     if headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) != content_type
-        || body.len() as i64 != expected_length
-        || STANDARD.encode(openssl::hash::hash(MessageDigest::md5(), &body).map_err(db_err)?.as_ref()) != checksum {
+        || expected_length < 0 {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM direct_upload_blobs WHERE storage_key=?1 AND content_type=?2 AND content_type_is_null=?3 AND byte_size=?4 AND checksum=?5)",params![storage_key,content_type.unwrap_or(""),content_type.is_none(),expected_length,checksum],|r|r.get(0)).map_err(db_err)?;
@@ -9996,11 +10001,30 @@ async fn direct_upload_put(
     tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
     let target = std::path::Path::new(&dir).join(storage_key);
     let temporary = std::path::Path::new(&dir).join(format!("{storage_key}.upload-{}", Uuid::new_v4()));
-    tokio::fs::write(&temporary, &body).await.map_err(db_err)?;
-    if let Err(error) = tokio::fs::rename(&temporary, &target).await {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(db_err(error));
+    let _cleanup = UploadTemporaryFile(temporary.clone());
+    let mut file = tokio::fs::File::create(&temporary).await.map_err(db_err)?;
+    let mut digest = openssl::hash::Hasher::new(MessageDigest::md5()).map_err(db_err)?;
+    let mut count = 0_i64;
+    let mut stream = body.into_data_stream();
+    let upload_result: Result<(), StatusCode> = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| StatusCode::BAD_REQUEST)?;
+            count = count.checked_add(chunk.len() as i64).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+            if count > expected_length { return Err(StatusCode::UNPROCESSABLE_ENTITY); }
+            digest.update(&chunk).map_err(db_err)?;
+            file.write_all(&chunk).await.map_err(db_err)?;
+        }
+        file.flush().await.map_err(db_err)?;
+        if count != expected_length || STANDARD.encode(digest.finish().map_err(db_err)?.as_ref()) != checksum {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        Ok(())
+    }.await;
+    drop(file);
+    if let Err(error) = upload_result {
+        return Err(error);
     }
+    tokio::fs::rename(&temporary, &target).await.map_err(db_err)?;
     pool(&s)?.execute("UPDATE direct_upload_blobs SET uploaded=1 WHERE storage_key=?1",[storage_key]).map_err(db_err)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
