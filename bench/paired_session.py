@@ -104,7 +104,16 @@ def check(port, database):
     status, _, sign_in_page = request(opener, port, "/session/new")
     assert status == 200
     assert request(opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "benchmark-password"}, token(sign_in_page))[:2] == (302, "/rooms/1")
-    return original_shape, original_icons, page, rejected
+    rate_opener = browser()
+    status, _, rate_page = request(rate_opener, port, "/session/new")
+    assert status == 200
+    for _ in range(7):
+        status, _, rate_page = request(rate_opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "wrong-password"}, token(rate_page))
+        assert status == 401, status
+    status, _, limited = request(rate_opener, port, "/session", "POST", {"email_address": "benchmark@example.invalid", "password": "wrong-password"}, token(rate_page))
+    assert status == 429 and "Too many requests or unauthorized." in limited, (status, limited[:250])
+    assert section(limited.encode(), "main-content") == section(rejected.encode(), "main-content")
+    return original_shape, original_icons, page, rejected, limited
 
 
 def main():
@@ -163,6 +172,7 @@ def main():
                 camp_rejected = section(camp_shape[3].encode(), target)
                 differences = [(index, left, right) for index, (left, right) in enumerate(zip(rust_rejected, camp_rejected)) if left != right]
                 assert not differences and len(rust_rejected) == len(camp_rejected), ("rejected", target, len(rust_rejected), len(camp_rejected), differences[:8])
+                assert section(rust_shape[4].encode(), target) == section(camp_shape[4].encode(), target), ("rate-limited", target)
             for page in (rust_shape[3], camp_shape[3]):
                 assert page.index('class="flash"') < page.index('id="main-content"'), "rejection flash must precede main"
             rust_flash = section(rust_shape[3].replace('<div class="flash"', '<div id="session-flash" class="flash"', 1).encode(), "session-flash")
@@ -175,7 +185,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS paired sign-in page sections, rejection flash, device push removal on sign-out, and return to a requested room")
+    print("PASS paired sign-in page sections, rejection and rate-limit flashes, device push removal on sign-out, and return to a requested room")
 
 
 if __name__ == "__main__":
