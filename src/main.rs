@@ -3391,12 +3391,16 @@ async fn reject_banned_ip(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let message_upload = request.method() == Method::POST
-                    && content_type.starts_with("multipart/form-data")
-                    && path.strip_prefix("/rooms/")
-                        .and_then(|rest| rest.strip_suffix("/messages"))
-                        .is_some_and(|room_id| room_id.parse::<i64>().is_ok());
-                // The message handler validates the form field as it streams the
+                let message_upload = content_type.starts_with("multipart/form-data")
+                    && path.strip_prefix("/rooms/").is_some_and(|rest| {
+                        (request.method() == Method::POST
+                            && rest.strip_suffix("/messages")
+                                .is_some_and(|room_id| room_id.parse::<i64>().is_ok()))
+                            || (matches!(request.method(), &Method::POST | &Method::PATCH | &Method::PUT)
+                                && rest.split_once("/messages/").is_some_and(|(room_id, message_id)|
+                                    room_id.parse::<i64>().is_ok() && message_id.parse::<i64>().is_ok()))
+                    });
+                // Message handlers validate the form field while streaming the
                 // attachment, so large uploads do not need a buffered copy here.
                 if !message_upload {
                     let (parts, body) = request.into_parts();
@@ -7047,6 +7051,17 @@ async fn parse_message_update_request(
         Ok((values, None))
     }
 }
+fn message_update_csrf_error(
+    s: &Arc<AppState>, headers: &HeaderMap, uri: &Uri, values: &HashMap<String, String>,
+) -> Result<Option<Response>, StatusCode> {
+    let u = user(s, headers)?;
+    let expected = u.csrf_token.as_deref();
+    let valid = expected.is_some_and(|token| {
+        headers.get("x-csrf-token").and_then(|value| value.to_str().ok()) == Some(token)
+            || values.get("authenticity_token").map(String::as_str) == Some(token)
+    });
+    Ok((!valid).then(|| invalid_authenticity_response(headers, uri)))
+}
 async fn message_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -7056,6 +7071,9 @@ async fn message_update(
 ) -> AppResult {
     let (rid, mid, db) = authorized_message_edit(&s, &headers, &room_id, &message_id)?;
     let (body_fields, upload) = parse_message_update_request(&s, req).await?;
+    if let Some(response) = message_update_csrf_error(&s, &headers, &uri, &body_fields)? {
+        return Ok(response);
+    }
     message_update_values(&s, &headers, &uri, rid, mid, db, body_fields, upload)
 }
 fn message_update_values(
@@ -7238,6 +7256,9 @@ async fn message_post_override(
     req: Request,
 ) -> AppResult {
     let (form, upload) = parse_message_update_request(&s, req).await?;
+    if let Some(response) = message_update_csrf_error(&s, &headers, &uri, &form)? {
+        return Ok(response);
+    }
     match form.get("_method").map(String::as_str) {
         Some("patch" | "put") => {
             let (rid, mid, db) = authorized_message_edit(&s, &headers, &room_id, &message_id)?;
@@ -13061,7 +13082,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .post(message_post_override)
                 .patch(message_update)
                 .put(message_update)
-                .delete(message_delete),
+                .delete(message_delete)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/rooms/{id}/messages/{mid}/edit", get(message_edit))
         .route("/rooms/{id}/messages/{mid}/edit.html", get(message_edit))

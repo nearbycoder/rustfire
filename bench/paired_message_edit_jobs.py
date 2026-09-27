@@ -26,6 +26,7 @@ CASES = (
     ("text", "new.txt", "text/plain", b"replacement text\n"),
     ("JPEG", "moon.jpg", "image/jpeg", IMAGE.read_bytes()),
     ("QuickTime", "alpha-centuri.mov", "video/quicktime", VIDEO.read_bytes()),
+    ("malformed JPEG", "notes.txt", "image/jpeg", b"A plain text attachment.\n"),
 )
 
 

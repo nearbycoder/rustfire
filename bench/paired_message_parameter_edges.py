@@ -238,10 +238,22 @@ def main():
     selected.add_argument("--edit-multipart-only", action="store_true", help="check only message edit multipart cases")
     selected.add_argument("--edit-post-only", action="store_true", help="check only URL-encoded POST method-override edits")
     selected.add_argument("--edit-multipart-post-only", action="store_true", help="check only multipart POST method-override edits")
+    selected.add_argument("--edit-large", action="store_true", help="check a 129 MiB plus one byte multipart attachment edit")
     parser.add_argument("--label", help="run only a named case from the selected group")
     parser.add_argument("--edit-stream", action="store_true", help="also compare one signed room replacement event per edit")
+    parser.add_argument("--large-post", action="store_true", help="use a POST patch override with --edit-large")
+    parser.add_argument("--form-csrf-only", action="store_true", help="authenticate a large edit with only its multipart form field")
+    parser.add_argument("--invalid-form-csrf", action="store_true", help="submit a wrong multipart token with --edit-large --form-csrf-only")
     args = parser.parse_args()
-    if args.edit_stream and not (args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only):
+    if args.large_post and not args.edit_large:
+        parser.error("--large-post requires --edit-large")
+    if args.form_csrf_only and not args.edit_large:
+        parser.error("--form-csrf-only requires --edit-large")
+    if args.invalid_form_csrf and not args.form_csrf_only:
+        parser.error("--invalid-form-csrf requires --form-csrf-only")
+    if args.invalid_form_csrf and args.edit_stream:
+        parser.error("an invalid form token emits no edit stream")
+    if args.edit_stream and not (args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only or args.edit_large):
         parser.error("--edit-stream requires an edit case group")
     ordinary = tuple((label, body, accept, "", "application/x-www-form-urlencoded") for label, body, accept in FORMS)
     query = tuple((label, body, accept, query, "application/x-www-form-urlencoded") for label, body, accept, query in QUERY_FORMS)
@@ -253,7 +265,18 @@ def main():
     edit_post = tuple((label, body, "text/html", query, "application/x-www-form-urlencoded") for label, body, query in EDIT_POST_FORMS)
     edit_multipart_post = tuple((label, *multipart_body(parts), query) for label, parts, query in EDIT_MULTIPART_POST_FORMS)
     edit_multipart_post = tuple((label, body, "text/html", query, content_type) for label, body, content_type, query in edit_multipart_post)
-    forms = edit_multipart_post if args.edit_multipart_post_only else edit_post if args.edit_post_only else edit_multipart if args.edit_multipart_only else edit if args.edit_query_only else multipart if args.multipart_query_only else query if args.query_only else ordinary + query + multipart
+    large_body_factory = None
+    if args.edit_large:
+        large_parts = (("_method", "patch"),) if args.large_post else ()
+        large_attachment = ("message[attachment]", b"x" * (129 * 1024 * 1024 + 1), "large.txt", "text/plain")
+        if args.form_csrf_only:
+            large_body_factory = lambda token: multipart_body(large_parts + (("authenticity_token", "wrong-token" if args.invalid_form_csrf else token), large_attachment))[0]
+            large_body, large_content_type = multipart_body(large_parts + (("authenticity_token", "placeholder"),))
+        else:
+            large_body, large_content_type = multipart_body(large_parts + (large_attachment,))
+        forms = ((("POST " if args.large_post else "") + "edit multipart 129 MiB text", large_body, "text/html", "", large_content_type),)
+    else:
+        forms = edit_multipart_post if args.edit_multipart_post_only else edit_post if args.edit_post_only else edit_multipart if args.edit_multipart_only else edit if args.edit_query_only else multipart if args.multipart_query_only else query if args.query_only else ordinary + query + multipart
     if args.label:
         forms = tuple(form for form in forms if form[0] == args.label)
         assert forms, args.label
@@ -263,9 +286,9 @@ def main():
         rust_base, camp_base = temp / "rust-base.sqlite3", temp / "camp-base.sqlite3"
         seed_rustfire(rust_base, free_port(), [])
         base_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_base, [], free_port(), temp)
-        if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only:
+        if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only or args.edit_large:
             seed_boost_message(rust_base, camp_base)
-        if args.edit_multipart_only or args.edit_multipart_post_only:
+        if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large:
             seed_existing_attachment(rust_base, camp_base)
         with sqlite3.connect(camp_base) as db:
             db.execute("DELETE FROM sessions")
@@ -276,14 +299,14 @@ def main():
         try:
             mismatches = []
             for index, (label, body, accept, query, content_type) in enumerate(forms):
-                if args.edit_multipart_only or args.edit_multipart_post_only:
+                if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large:
                     rust_old = temp / f"rust-uploads-{index}" / OLD_RUST_STORED
                     rust_old.parent.mkdir(parents=True, exist_ok=True)
                     rust_old.write_bytes(OLD_FILE)
                     camp_old = checkout / "storage/files" / OLD_CAMP_KEY[:2] / OLD_CAMP_KEY[2:4] / OLD_CAMP_KEY
                     camp_old.parent.mkdir(parents=True, exist_ok=True)
                     camp_old.write_bytes(OLD_FILE)
-                method, path = ("POST" if args.edit_post_only or args.edit_multipart_post_only else "PATCH", "/rooms/1/messages/1") if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only else ("POST", "/rooms/1/messages")
+                method, path = ("POST" if args.edit_post_only or args.edit_multipart_post_only or args.large_post else "PATCH", "/rooms/1/messages/1") if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only or args.edit_large else ("POST", "/rooms/1/messages")
                 preview_kind = "image" if label in ("edit multipart image", "POST multipart image") else "video" if label == "edit multipart video" else "malformed" if label in ("edit multipart malformed JPEG", "POST multipart malformed JPEG") else None
                 stream_expected = args.edit_stream and label != "edit query scalar"
                 stream_target = "presentation_message_edge-1" if label == "edit query client ID" else "presentation_message_boost-fixture"
@@ -303,7 +326,7 @@ def main():
                             raise AssertionError((label, "socket capture not ready", marker, output, error))
 
                 def inspect_after(rust_port, rust_cookie, camp_port, camp_cookie):
-                    if args.edit_multipart_only or args.edit_multipart_post_only:
+                    if (args.edit_multipart_only or args.edit_multipart_post_only) and not args.edit_large:
                         assert rust_old.exists() and camp_old.exists(), (label, "old attachment purged before the queued job")
                     preview = replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, preview_kind) if preview_kind else (None, None)
                     if not stream_expected:
@@ -319,24 +342,25 @@ def main():
                     rust_result, camp_result = run_case(
                         (method, path, accept), index, temp,
                         rust_base, camp_base, checkout, base_env, redis_port, body=body, query=query,
-                        content_type=content_type,
+                        content_type=content_type, body_factory=large_body_factory,
+                        send_csrf_header=not args.form_csrf_only,
                         before_request=start_captures if stream_expected else None,
-                        after_request=inspect_after if preview_kind or stream_expected or args.edit_multipart_only or args.edit_multipart_post_only else None,
+                        after_request=inspect_after if preview_kind or stream_expected or args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large else None,
                     )
                 finally:
                     for capture in captures:
                         if capture.poll() is None:
                             capture.kill()
                             capture.communicate()
-                rust_files = temp / f"rust-uploads-{index}" if args.edit_multipart_only or args.edit_multipart_post_only else None
-                camp_files = checkout / "storage/files" if args.edit_multipart_only or args.edit_multipart_post_only else None
+                rust_files = temp / f"rust-uploads-{index}" if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large else None
+                camp_files = checkout / "storage/files" if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large else None
                 rust_saved = saved_message(temp / f"rust-{index}.sqlite3", False, rust_files)
                 camp_saved = saved_message(temp / f"camp-{index}.sqlite3", True, camp_files)
-                if args.edit_multipart_only or args.edit_multipart_post_only:
-                    replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "edit multipart malformed JPEG", "POST multipart patch file", "POST multipart put file only", "POST multipart image", "POST multipart malformed JPEG")
+                if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large:
+                    replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "edit multipart malformed JPEG", "POST multipart patch file", "POST multipart put file only", "POST multipart image", "POST multipart malformed JPEG", "edit multipart 129 MiB text", "POST edit multipart 129 MiB text")
                     if not replaced:
                         assert rust_old.exists(), (label, "retained old Rustfire attachment")
-                if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only:
+                if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only or args.edit_large:
                     rust_saved = (rust_saved, message_updated_at(temp / f"rust-{index}.sqlite3") != message_updated_at(rust_base))
                     camp_saved = (camp_saved, message_updated_at(temp / f"camp-{index}.sqlite3") != message_updated_at(camp_base))
                 if (rust_result, rust_saved) != (camp_result, camp_saved):

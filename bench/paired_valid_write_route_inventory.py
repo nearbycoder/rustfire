@@ -38,7 +38,7 @@ def counts(database):
         return tuple(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES)
 
 
-def request(port, database, cookie, csrf, method, path, accept, body=b"", content_type="application/x-www-form-urlencoded", user_id=1):
+def request(port, database, cookie, csrf, method, path, accept, body=b"", content_type="application/x-www-form-urlencoded", user_id=1, send_csrf_header=True):
     before = counts(database)
     route_path = urllib.parse.urlsplit(path).path
     update_room_id = 1 if route_path in ("/rooms/opens/1", "/rooms/closeds/1") and method in ("PATCH", "PUT") else None
@@ -47,12 +47,14 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
             original_room_updated_at = db.execute("SELECT updated_at FROM rooms WHERE id=?", [update_room_id]).fetchone()[0]
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
-        connection.request(method, path, body=body, headers={
+        headers = {
             "Cookie": cookie,
             "Accept": accept,
             "Content-Type": content_type,
-            "X-CSRF-Token": csrf,
-        })
+        }
+        if send_csrf_header:
+            headers["X-CSRF-Token"] = csrf
+        connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         body = response.read()
         location = response.getheader("Location")
@@ -86,7 +88,7 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
         connection.close()
 
 
-def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=b"", content_type="application/x-www-form-urlencoded", role="admin", query="", before_request=None, after_request=None):
+def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=b"", content_type="application/x-www-form-urlencoded", role="admin", query="", before_request=None, after_request=None, body_factory=None, send_csrf_header=True):
     method, path, accept = case
     rust_token = "benchmark-member-session" if role == "member" else "benchmark-session"
     rust_csrf = "benchmark-member-csrf" if role == "member" else "benchmark-csrf"
@@ -115,8 +117,12 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
                 request_path = path + ("?" + query if query else "")
                 if before_request is not None:
                     before_request(rust_port, rust_cookie, camp_port, camp_cookie)
-                rust_result = request(rust_port, rust_db, rust_cookie, rust_csrf, method, request_path, accept, body, content_type, user_id)
-                camp_result = request(camp_port, camp_db, camp_cookie, camp_csrf, method, request_path, accept, body, content_type, user_id)
+                rust_body = body_factory(rust_csrf) if body_factory is not None else body
+                rust_result = request(rust_port, rust_db, rust_cookie, rust_csrf, method, request_path, accept, rust_body, content_type, user_id, send_csrf_header)
+                del rust_body
+                camp_body = body_factory(camp_csrf) if body_factory is not None else body
+                camp_result = request(camp_port, camp_db, camp_cookie, camp_csrf, method, request_path, accept, camp_body, content_type, user_id, send_csrf_header)
+                del camp_body
                 if after_request is not None:
                     rust_extra, camp_extra = after_request(rust_port, rust_cookie, camp_port, camp_cookie)
                     rust_result = (rust_result, rust_extra)
