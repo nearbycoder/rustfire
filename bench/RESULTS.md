@@ -118,9 +118,9 @@ Rustfire served **1.97–2.84×** as many checked reads per second in these shor
 | 320 | Rustfire first | 15.731 s | 2.027 s | 7.76× | 320 / 320 |
 | 320 | Campfire first | 15.673 s | 2.002 s | 7.83× | 320 / 320 |
 
-Rustfire's completion time grew less from 80 to 320 bots under these worker settings. The first 80-bot reverse-order sample was slower for Rustfire than its repeat, so retain the individual trial times when comparing results. This does not identify either app's maximum supported bot count or establish sustained delivery, failure/retry parity, or whole-app scale. Reproduce with `python bench/paired_webhook_burst.py --bots 80 --campfire-workers 8` and `--bots 320 --campfire-workers 8`, repeating each with `--campfire-first`.
+Rustfire's completion time grew less from 80 to 320 bots under these worker settings. The first 80-bot reverse-order sample was slower for Rustfire than its repeat, so retain the individual trial times when comparing results. This does not identify either app's maximum supported bot count or establish sustained delivery or whole-app scale. Reproduce with `python bench/paired_webhook_burst.py --bots 80 --campfire-workers 8` and `--bots 320 --campfire-workers 8`, repeating each with `--campfire-first`.
 
-`bench/paired_webhook_failures.py` separately checked two failure paths. A receiver that waited beyond seven seconds produced the same timeout bot reply and normalized message list in both apps. A refused local connection produced no bot reply in either app; Campfire retained one failed Resque job and Rustfire retained one failed SQLite job. This behavioral check was not timed and does not establish retry parity or cover other network failures.
+`bench/paired_webhook_failures.py` separately checked two failure paths. A receiver that waited beyond seven seconds produced the same timeout bot reply and normalized message list in both apps. A refused local connection produced no bot reply in either app; Campfire retained one failed Resque job and Rustfire retained one failed SQLite job. Manually requeuing those failed jobs delivered the same outgoing JSON in both apps, preserved each historical failure, and set `retried_at`. This behavioral check was not timed and does not cover other network errors or repeated retries under load.
 
 ## Turbo route format parity
 

@@ -1,6 +1,7 @@
 """Compare webhook timeout and refused-connection behavior with Campfire."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 import os
 import pathlib
 import queue
@@ -11,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from direct_lookup import free_port, start_server, stop_server
+from direct_lookup import ROOT, free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REDIS_CLI, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis, wait_for_worker
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_mention_webhook import bot_index, bot_sgid, seed_bot
@@ -36,6 +37,18 @@ class SlowReceiver(BaseHTTPRequestHandler):
         pass
 
 
+class FastReceiver(BaseHTTPRequestHandler):
+    received = queue.Queue()
+
+    def do_POST(self):
+        self.received.put(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        self.send_response(204)
+        self.end_headers()
+
+    def log_message(self, *_):
+        pass
+
+
 def wait_for(predicate, label, timeout=15):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -51,11 +64,47 @@ def failed_jobs(redis_port):
     return int(result.stdout.strip())
 
 
+def failed_record(redis_port):
+    result = subprocess.run([str(REDIS_CLI), "-p", str(redis_port), "LINDEX", "resque:failed", "0"], check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
 def rust_job_counts(database):
     with sqlite3.connect(database) as db:
         queued = db.execute("SELECT COUNT(*) FROM webhook_jobs").fetchone()[0]
         failed = db.execute("SELECT bot_id,message_id,error FROM failed_webhook_jobs").fetchall()
     return queued, failed
+
+
+def retry_failed_job(database, campfire, refused_port, redis_port=None, checkout=None, camp_env=None):
+    receiver = ThreadingHTTPServer(("127.0.0.1", refused_port), FastReceiver)
+    thread = threading.Thread(target=receiver.serve_forever, daemon=True)
+    thread.start()
+    try:
+        if campfire:
+            assert failed_record(redis_port).get("retried_at") is None
+            command = [str(RUBY), str(RUBY.parent / "bundle"), "exec", "rails", "runner", "Resque::Failure.requeue(0)"]
+            subprocess.run(command, cwd=checkout, env=camp_env, check=True, capture_output=True, text=True)
+        else:
+            env = dict(os.environ, RUSTFIRE_DB=str(database))
+            command = [str(ROOT / "target/release/rustfire"), "webhook-jobs"]
+            listed = json.loads(subprocess.run([*command, "list"], env=env, check=True, capture_output=True, text=True).stdout)
+            assert len(listed) == 1 and listed[0]["retried_at"] is None, listed
+            subprocess.run([*command, "retry", str(listed[0]["job_id"])], env=env, check=True, capture_output=True, text=True)
+        payload = FastReceiver.received.get(timeout=15)
+        if campfire:
+            wait_for(lambda: failed_record(redis_port).get("retried_at"), "retried Resque record")
+            assert failed_jobs(redis_port) == 1
+        else:
+            wait_for(lambda: rust_job_counts(database)[0] == 0, "retried webhook queue drain")
+            env = dict(os.environ, RUSTFIRE_DB=str(database))
+            listed = json.loads(subprocess.run([str(ROOT / "target/release/rustfire"), "webhook-jobs", "list"], env=env, check=True, capture_output=True, text=True).stdout)
+            assert len(listed) == 1 and listed[0]["retried_at"], listed
+        return payload
+    finally:
+        receiver.shutdown()
+        receiver.server_close()
+        thread.join(timeout=5)
 
 
 def workflow(port, cookie, csrf, database, campfire, refused_port, redis_port=None):
@@ -105,6 +154,7 @@ def main():
                 rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "0"})
                 try:
                     rust_result = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False, refused_port)
+                    rust_retried = retry_failed_job(rust_db, False, refused_port)
                 finally:
                     stop_server(rust)
                 with open(temp / "puma.log", "w+") as puma_log, open(temp / "worker.log", "w+") as worker_log:
@@ -115,6 +165,7 @@ def main():
                         wait_for_worker(redis_port, worker)
                         cookie, csrf = login_campfire(camp_port)
                         camp_result = workflow(camp_port, cookie, csrf, camp_db, True, refused_port, redis_port)
+                        camp_retried = retry_failed_job(camp_db, True, refused_port, redis_port, checkout, camp_env)
                     finally:
                         stop_server(camp)
                         if worker.poll() is None:
@@ -128,8 +179,9 @@ def main():
         receiver.shutdown()
         receiver.server_close()
     assert rust_result == camp_result, (rust_result, camp_result)
+    assert rust_retried == camp_retried, (rust_retried, camp_retried)
     assert rust_result[1][-1]["body"]["plain_text"] == "Failed to respond within 7 seconds"
-    print("PASS timeout reply and refused-connection state match Campfire; both retain one failed job record")
+    print("PASS timeout reply, refused-connection failure, and manual failed-job retry match Campfire")
 
 
 if __name__ == "__main__":

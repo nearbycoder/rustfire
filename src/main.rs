@@ -9168,6 +9168,63 @@ async fn run_webhook_jobs(s: Arc<AppState>) {
         }
     }
 }
+fn ensure_failed_webhook_retry_column(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('failed_webhook_jobs') WHERE name='retried_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute("ALTER TABLE failed_webhook_jobs ADD COLUMN retried_at TEXT", [])?;
+    }
+    Ok(())
+}
+fn webhook_jobs_cli(db_path: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use rusqlite::OpenFlags;
+    let mut conn = rusqlite::Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    ensure_failed_webhook_retry_column(&conn)?;
+    match args {
+        [command] if command == "list" => {
+            let mut stmt = conn.prepare("SELECT job_id,bot_id,message_id,error,created_at,failed_at,retried_at FROM failed_webhook_jobs ORDER BY job_id")?;
+            let failures = stmt.query_map([], |row| {
+                Ok(json!({"job_id":row.get::<_,i64>(0)?,"bot_id":row.get::<_,i64>(1)?,"message_id":row.get::<_,i64>(2)?,"error":row.get::<_,String>(3)?,"created_at":row.get::<_,String>(4)?,"failed_at":row.get::<_,String>(5)?,"retried_at":row.get::<_,Option<String>>(6)?}))
+            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            println!("{}", serde_json::to_string_pretty(&failures)?);
+        }
+        [command, id] if command == "retry" => {
+            let id: i64 = id.parse()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let (bot_id, message_id): (i64, i64) = tx.query_row(
+                "SELECT bot_id,message_id FROM failed_webhook_jobs WHERE job_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let retried_at = now();
+            tx.execute("INSERT INTO webhook_jobs(bot_id,message_id,created_at) VALUES(?1,?2,?3)", params![bot_id,message_id,&retried_at])?;
+            tx.execute("UPDATE failed_webhook_jobs SET retried_at=?2 WHERE job_id=?1", params![id,&retried_at])?;
+            tx.commit()?;
+            println!("Requeued failed webhook job {id}");
+        }
+        [command] if command == "retry-all" => {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let failures = {
+                let mut stmt = tx.prepare("SELECT job_id,bot_id,message_id FROM failed_webhook_jobs ORDER BY job_id")?;
+                stmt.query_map([], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let retried_at = now();
+            for (id, bot_id, message_id) in &failures {
+                tx.execute("INSERT INTO webhook_jobs(bot_id,message_id,created_at) VALUES(?1,?2,?3)", params![bot_id,message_id,&retried_at])?;
+                tx.execute("UPDATE failed_webhook_jobs SET retried_at=?2 WHERE job_id=?1", params![id,&retried_at])?;
+            }
+            tx.commit()?;
+            println!("Requeued {} failed webhook jobs", failures.len());
+        }
+        _ => return Err("usage: rustfire webhook-jobs list|retry <job-id>|retry-all".into()),
+    }
+    Ok(())
+}
 async fn user_unban(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -11213,7 +11270,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX IF NOT EXISTS idx_background_jobs_kind ON background_jobs(kind,id);
         CREATE TABLE IF NOT EXISTS webhook_jobs(id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,created_at TEXT NOT NULL,claimed_at INTEGER);
         CREATE INDEX IF NOT EXISTS idx_webhook_jobs_claim ON webhook_jobs(claimed_at,id);
-        CREATE TABLE IF NOT EXISTS failed_webhook_jobs(job_id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,error TEXT NOT NULL,created_at TEXT NOT NULL,failed_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS failed_webhook_jobs(job_id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,error TEXT NOT NULL,created_at TEXT NOT NULL,failed_at TEXT NOT NULL,retried_at TEXT);
         CREATE TABLE IF NOT EXISTS session_transfers(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY,name TEXT,type TEXT NOT NULL,creator_id INTEGER NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT NOT NULL DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
@@ -11244,6 +11301,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
+    ensure_failed_webhook_retry_column(&conn)?;
     let direct_upload_null_flag: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('direct_upload_blobs') WHERE name='content_type_is_null')",
         [],
@@ -11556,6 +11614,10 @@ fn render_imported_rich_text(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = env::var("RUSTFIRE_DB").unwrap_or_else(|_| "data/rustfire.db".into());
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "webhook-jobs") {
+        return webhook_jobs_cli(&db_path, &arguments[1..]);
+    }
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -11566,11 +11628,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let db = Pool::builder().max_size(32).build(manager)?;
     init_db(&db)?;
-    let command = env::args().nth(1);
-    if command.as_deref() == Some("--init-db") {
+    let command = arguments.first().map(String::as_str);
+    if command == Some("--init-db") {
         return Ok(());
     }
-    if command.as_deref() == Some("--import-campfire-vapid") {
+    if command == Some("--import-campfire-vapid") {
         import_campfire_vapid_key(std::path::Path::new(&db_path))?;
         return Ok(());
     }
