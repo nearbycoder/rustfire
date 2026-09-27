@@ -98,7 +98,14 @@ def check_app(name, port, database, admin_cookie, admin_csrf, session, screensho
     assert after_boost["draft"] == "Hey!", (name, "boost cleared draft", after_boost)
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT content FROM boosts WHERE message_id=1").fetchall() == [("Morning",)]
-    return initial, after_edit, after_boost
+
+    browser(session, "eval", "document.querySelector('#message_boost-fixture form.boost__form button[type=submit]').click()")
+    submitted = wait_for_state(session, lambda state: "Hey!" in state["boosts"] and state["draft"] is None)
+    assert json.loads(browser(session, "eval", "location.pathname")) == "/rooms/1", (name, "boost left room")
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT content FROM boosts WHERE message_id=1 ORDER BY id").fetchall() == [("Morning",), ("Hey!",)]
+    assert not browser(session, "errors").strip(), (name, browser(session, "errors"))
+    return initial, after_edit, after_boost, submitted
 
 
 def main():
@@ -144,7 +151,7 @@ def main():
             redis.wait(timeout=10)
             redis_log.close()
     assert rust_result == camp_result, (rust_result, camp_result)
-    print("PASS paired browser draft boost survives live message edit and another user's boost")
+    print("PASS paired browser draft boost survives live edits and submits inline")
 
 
 if __name__ == "__main__":

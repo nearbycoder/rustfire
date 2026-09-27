@@ -823,12 +823,14 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       else alert('Could not boost message');
       return;
     }
-    const form=e.target.closest('.custom-boost-form');if(!form)return;
+    const form=e.target.closest('form.boost__form,form.custom-boost-form');if(!form)return;
     e.preventDefault();
     const response=await fetch(form.action,{method:'POST',body:new URLSearchParams(new FormData(form)),headers:{'X-CSRF-Token':csrfToken}});
     if(response.ok){
-      form.reset();const frame=form.closest('turbo-frame');
-      if(frame?.dataset.originalHtml){frame.innerHTML=frame.dataset.originalHtml;delete frame.dataset.originalHtml;}
+      const target=document.getElementById(form.dataset.turboFrame);
+      const updated=new DOMParser().parseFromString(await response.text(),'text/html').getElementById(form.dataset.turboFrame);
+      if(target&&updated){target.replaceWith(updated);decorateOwn();}
+      else{form.reset();const frame=form.closest('turbo-frame');if(frame?.dataset.originalHtml){frame.innerHTML=frame.dataset.originalHtml;delete frame.dataset.originalHtml;}}
     }
     else alert('Could not boost message');
   });
