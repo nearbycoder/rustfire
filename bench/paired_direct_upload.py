@@ -132,10 +132,7 @@ def missing_mime_case(port, cookie, csrf, database, upload_root, campfire):
     redirect_status, redirect_location, _ = raw_request(port, "GET", proxy_path.replace("/blobs/proxy/", "/blobs/redirect/", 1))
     assert redirect_status == 302, ("missing MIME redirect", redirect_status)
     disk_status, disk_headers, disk_body = read_response(port, path_from_url(redirect_location))
-    if campfire:
-        assert disk_status == 500, ("source missing MIME disk error", disk_status)
-    else:
-        assert (disk_status, disk_body) == (200, data), ("Rustfire missing MIME disk", disk_status, disk_body[:100])
+    assert disk_status == 500, ("missing MIME disk error", disk_status)
     with sqlite3.connect(database) as db:
         if campfire:
             stored = db.execute("SELECT key FROM active_storage_blobs WHERE id=?", [metadata["id"]]).fetchone()[0]
@@ -146,7 +143,7 @@ def missing_mime_case(port, cookie, csrf, database, upload_root, campfire):
     assert path.read_bytes() == data
     observed = tuple((key, proxy_headers.get(key)) for key in
                      ("content-type", "content-disposition", "x-content-type-options"))
-    return path, observed
+    return path, (observed, disk_headers.get("content-type"), disk_body)
 
 
 def workflow(port, cookie, csrf, database, upload_root, campfire, large_data, large_mib):
@@ -350,7 +347,7 @@ def main():
                 assert rust_observation == camp_observation, (rust_name, rust_observation, camp_observation)
         assert rust_proxy[-1] == camp_proxy[-1], ("missing MIME download", rust_proxy[-1], camp_proxy[-1])
         assert rust_boundaries == camp_boundaries, (rust_boundaries, camp_boundaries)
-        print(f"PASS matched direct-upload metadata boundaries, {args.large_mib} MiB plus one byte upload, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
+        print(f"PASS matched direct-upload metadata boundaries, {args.large_mib} MiB plus one byte upload, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads, and missing-MIME disk error body")
 
 
 if __name__ == "__main__":

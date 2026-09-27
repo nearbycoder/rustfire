@@ -10934,14 +10934,22 @@ async fn direct_upload_put(
 async fn direct_upload_disk_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path((token, _filename)): Path<(String, String)>,
 ) -> AppResult {
     let data = disk_token_data(&s.blob_signing_key, &token, "blob_key").ok_or(StatusCode::NOT_FOUND)?;
     let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
-    let row: Option<(String,String,bool)> = pool(&s)?.query_row("SELECT filename,content_type,uploaded FROM direct_upload_blobs WHERE storage_key=?1",[storage_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_err)?;
+    let row: Option<(String,String,bool,bool)> = pool(&s)?.query_row("SELECT filename,content_type,uploaded,content_type_is_null FROM direct_upload_blobs WHERE storage_key=?1",[storage_key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?;
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
-    if let Some((raw_filename, content_type, uploaded)) = row {
+    if let Some((raw_filename, content_type, uploaded, content_type_is_null)) = row {
         if !uploaded { return Err(StatusCode::NOT_FOUND); }
+        if content_type_is_null {
+            let mut response = rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri);
+            if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"text/html")) {
+                response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=UTF-8"));
+            }
+            return Ok(response);
+        }
         let actual_filename = rails_sanitized_filename(&raw_filename);
         let inline = data.get("disposition").and_then(Value::as_str).is_some_and(|value| value.starts_with("inline;"));
         let (served_type, allowed_inline) = active_storage_serving(&content_type, if inline { None } else { Some("attachment") });
