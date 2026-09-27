@@ -2156,6 +2156,20 @@ fn found_redirect(path: &str) -> Response {
         .insert(header::LOCATION, path.parse().unwrap());
     response
 }
+fn path_record_id(value: &str) -> Result<i64, StatusCode> {
+    let value = value.trim_start();
+    let sign_len = usize::from(value.starts_with('+') || value.starts_with('-'));
+    let digit_len = value.as_bytes()[sign_len..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digit_len == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    value[..sign_len + digit_len]
+        .parse()
+        .map_err(|_| StatusCode::NOT_FOUND)
+}
 fn csrf_forms(html: &str, token: &str) -> String {
     fn tag_end(tag: &str) -> Option<usize> {
         let mut quote = None;
@@ -4578,7 +4592,7 @@ async fn room_show(
     headers: HeaderMap,
     Path(room_id): Path<String>,
 ) -> AppResult {
-    let rid = match room_id.parse::<i64>() {
+    let rid = match path_record_id(&room_id) {
         Ok(id) => id,
         Err(_) => {
             if room_id == "new" {
@@ -4791,10 +4805,11 @@ async fn room_refresh(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    Path(rid): Path<i64>,
+    Path(room_id): Path<String>,
     Query(q): Query<RefreshQuery>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
     let room = room_for(&s, u.id, rid)?;
     let accept = headers
         .get(header::ACCEPT)
@@ -4880,9 +4895,10 @@ async fn sidebar_get(
 async fn involvement_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(rid): Path<i64>,
+    Path(room_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
     let room = room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
     let current: String = db
@@ -5337,10 +5353,11 @@ fn message_page_fresh(headers: &HeaderMap, etag: &str, modified_seconds: i64) ->
 async fn messages_index(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(rid): Path<i64>,
+    Path(room_id): Path<String>,
     Query(q): Query<Paging>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
     room_for(&s, u.id, rid)?;
     if let Some(cursor) = q.after.or(q.before) {
         let found: bool = pool(&s)?
@@ -6264,9 +6281,11 @@ async fn message_create(
 async fn message_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, mid)): Path<(i64, i64)>,
+    Path((room_id, message_id)): Path<(String, String)>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
+    let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let m = message_by_id(&s, rid, mid)?;
     Ok(if headers.get("x-rustfire-fragment").is_some() {
@@ -6291,9 +6310,11 @@ async fn message_show(
 async fn message_edit(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, mid)): Path<(i64, i64)>,
+    Path((room_id, message_id)): Path<(String, String)>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
+    let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
     let row: Option<(i64, String, Option<String>, String)> = db
@@ -6478,7 +6499,7 @@ async fn message_update(
         .unwrap_or("")
         .contains("json")
     {
-        message_show(State(s), headers, Path((rid, mid))).await
+        Ok(Json(message_json(&s, &updated_message, Some(&headers))?).into_response())
     } else {
         Ok(found_redirect(&format!("/rooms/{rid}/messages/{mid}")))
     }
@@ -6890,7 +6911,7 @@ async fn room_kind_show(
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
         Err(error) => return Err(error),
     };
-    let rid = match room_id.parse::<i64>() {
+    let rid = match path_record_id(&room_id) {
         Ok(id) => id,
         Err(_) => return Ok(found_redirect("/")),
     };
@@ -8861,7 +8882,7 @@ async fn user_show(
     Path(user_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let id = user_id.parse::<i64>().map_err(|_| StatusCode::NOT_FOUND)?;
+    let id = path_record_id(&user_id)?;
     let db = pool(&s)?;
     let (name, bio, email, role, status, updated_at): (String, String, String, i64, i64, String) = db
         .query_row(
@@ -10767,9 +10788,10 @@ async fn boost_create(
 async fn boosts_index(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(mid): Path<i64>,
+    Path(message_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let mid = path_record_id(&message_id)?;
     let db = pool(&s)?;
     let rid: Option<i64> = db
         .query_row("SELECT room_id FROM messages WHERE id=?1", [mid], |r| {
@@ -10786,9 +10808,10 @@ async fn boosts_index(
 async fn boost_new(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(mid): Path<i64>,
+    Path(message_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let mid = path_record_id(&message_id)?;
     let db = pool(&s)?;
     let target: Option<(i64, String)> = db
         .query_row(
