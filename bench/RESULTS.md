@@ -1,5 +1,18 @@
 # Preliminary Rustfire measurements
 
+## Current 8,000-socket rich-text browser-channel comparison
+
+At Rustfire commit `562ddcf`, the paired four-room, four-user workload ran for 30 measured seconds with 64 checked HTML readers, three rich posts per second per room, and 2,000 authenticated sockets per room subscribed to eight browser channels. Campfire used 22 Puma workers and isolated Redis; Rustfire used one release process. Both apps ran serially in each server order on the same 32-logical-CPU host as the load clients. Socket setup preceded the timed interval. The command was `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 3 --sockets-per-room 2000 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources`, repeated with `--rustfire-first`.
+
+| Server order | Rustfire reads/s / p95 | Campfire reads/s / p95 | Rustfire write p95 / last write | Campfire write p95 / last write | Peak PSS, Rustfire / Campfire |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 2,298 / 48.9 ms | 323 / 708.0 ms | 38.5 ms / 29.21 s | 642.8 ms / **36.49 s** | 1,276 / 5,786 MiB |
+| Rustfire first | 2,098 / 57.2 ms | 203 / 914.9 ms | 64.7 ms / 29.23 s | 663.8 ms / **34.08 s** | 1,282 / 6,018 MiB |
+
+Rustfire met the 30-second writer deadline in both orders; Campfire missed it by 4.08–6.49 seconds, although both saved all 360 posts. Each app delivered all **720,000 message appends**, **720,000 unread events**, and **2,004,000 presence read events** per run to the 8,000 sockets, with no missed or unexpected socket events or early socket closes. All 1,440 paired append structures matched. Rustfire had zero checked read errors; Campfire had zero when first and three when second. The strict paired command exited nonzero in both orders because of Campfire's missed deadline, and the second order also missed the read-error gate. The [Campfire-first report](results/rich-browser-8k-2026-09-27-camp-first.json) and [Rustfire-first report](results/rich-browser-8k-2026-09-27-rust-first.json) retain the counts, latencies, resources, and gate outcomes.
+
+This demonstrates Rustfire meeting the tested write deadline at 8,000 sockets while Campfire did not on this host and configuration. It does not locate either app's maximum connection count or establish hours-long stability, separate-generator capacity, or a whole-app performance advantage at complete feature parity. The load generators and unrelated host processes shared the server machine; the two Campfire read rates also varied substantially between orders.
+
 ## Current 400-socket rich-text browser-channel comparison
 
 On the release build at commit `6a3bbd3`, the four-room, four-user 30-second rich-text mix was rerun in both server orders with 64 checked readers, three posts per second per room, and 100 authenticated sockets per room on eight source-shaped browser channels. Both apps saved all 360 posts within the deadline, delivered all **36,000 message appends and 36,000 unread events**, and emitted all **5,200 expected presence read events** during setup. The harness compared 1,440 paired append structures and every timed read's status, media type, and message count. Both orders had zero checked read errors, missing events, or early socket closes.
