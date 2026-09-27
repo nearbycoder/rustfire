@@ -13,6 +13,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
@@ -32,13 +33,15 @@ CASES = {
     "search": "/searches?q=constellation",
 }
 MEMBER_CASES = {**CASES, "hidden": "/rooms/4"}
+AFTER_POST_CASES = {name: CASES[name] for name in ("private", "sidebar", "search")}
+AFTER_POST_CLIENT_ID = "import-graph-after-post"
 
 
 def seed_graph(database):
     rooms = ((2, "Private Plans", "Rooms::Closed", 1, STAMP, STAMP),
         (3, None, "Rooms::Direct", 1, STAMP, STAMP),
         (4, "Hidden Archive", "Rooms::Closed", 2, STAMP, STAMP))
-    memberships = ((2, 1, "mentions", STAMP, STAMP, STAMP),
+    memberships = ((2, 1, "everything", None, STAMP, STAMP),
         (2, 2, "everything", None, STAMP, STAMP),
         (3, 1, "everything", STAMP, STAMP, STAMP),
         (3, 2, "everything", None, STAMP, STAMP),
@@ -105,6 +108,37 @@ def compare(source, target, label, expected_search_ids):
                 section(target[name], part, **options))
 
 
+def post_after_import(port, cookie, csrf):
+    body = urllib.parse.urlencode({
+        "message[body]": "constellation after import",
+        "message[client_message_id]": AFTER_POST_CLIENT_ID,
+        "authenticity_token": csrf,
+    }).encode()
+    status, location, response = request(port, "POST", "/rooms/2/messages", cookie, csrf,
+        body=body, content_type="application/x-www-form-urlencoded",
+        extra_headers={"Accept": "text/vnd.turbo-stream.html, text/html"})
+    assert status == 200 and location is None and b"constellation after import" in response, (status, location, response[:300])
+    return response
+
+
+def post_state(database):
+    with sqlite3.connect(database) as db:
+        message = db.execute("SELECT id,room_id,creator_id,client_message_id FROM messages WHERE client_message_id=?",
+            (AFTER_POST_CLIENT_ID,)).fetchone()
+        assert message is not None and message[0] > 5 and message[1:] == (2, 2, AFTER_POST_CLIENT_ID), message
+        memberships = db.execute("SELECT user_id,unread_at IS NOT NULL FROM memberships WHERE room_id=2 ORDER BY user_id").fetchall()
+        assert memberships == [(1, 1), (2, 0)], memberships
+        search_text = db.execute("SELECT body FROM message_search_index WHERE rowid=?", (message[0],)).fetchone()
+        assert search_text == ("constellation after import",), search_text
+        return message, memberships, search_text
+
+
+def csrf_from_page(page):
+    match = re.search(rb'<meta name=["\']csrf-token["\'] content=["\']([^"\']+)', page)
+    assert match, "Rendered CSRF token missing"
+    return match.group(1).decode()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campfire-repo", type=Path, default=Path("/tmp/once-campfire-reference"))
@@ -169,19 +203,51 @@ def main():
             try:
                 target, target_redirect = capture(rust_port, cookie, csrf, CASES, inaccessible_room=4)
                 member_target, _ = capture(rust_port, member_cookie, member_csrf, MEMBER_CASES)
+                with (temp / "puma-after-import.log").open("w+") as log:
+                    camp = subprocess.Popen((str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"),
+                        cwd=repository, env=environment, stdout=log, stderr=log)
+                    try:
+                        wait_for_server(camp_port, camp)
+                        source_post_stream = post_after_import(camp_port, member_cookie, member_csrf)
+                        target_post_stream = post_after_import(rust_port, member_cookie, csrf_from_page(member_target["private"]))
+                        source_post, _ = capture(camp_port, cookie, csrf, AFTER_POST_CASES)
+                        target_post, _ = capture(rust_port, cookie, csrf, AFTER_POST_CASES)
+                        member_source_post, _ = capture(camp_port, member_cookie, member_csrf, AFTER_POST_CASES)
+                        member_target_post, _ = capture(rust_port, member_cookie, member_csrf, AFTER_POST_CASES)
+                    except Exception:
+                        log.flush()
+                        log.seek(0)
+                        print(log.read()[-3000:])
+                        raise
+                    finally:
+                        stop_server(camp)
             finally:
                 stop_server(rust)
             assert source_redirect == f"http://127.0.0.1:{camp_port}/", source_redirect
             assert target_redirect == f"http://127.0.0.1:{rust_port}/", target_redirect
             if args.sample_dir:
                 args.sample_dir.mkdir(parents=True, exist_ok=True)
+                (args.sample_dir / "campfire-after-post.turbo-stream.html").write_bytes(source_post_stream)
+                (args.sample_dir / "rustfire-after-post.turbo-stream.html").write_bytes(target_post_stream)
                 for label, documents in (("campfire", source), ("rustfire", target),
-                    ("campfire-member", member_source), ("rustfire-member", member_target)):
+                    ("campfire-member", member_source), ("rustfire-member", member_target),
+                    ("campfire-after-post", source_post), ("rustfire-after-post", target_post),
+                    ("campfire-member-after-post", member_source_post),
+                    ("rustfire-member-after-post", member_target_post)):
                     for name, body in documents.items():
                         (args.sample_dir / f"{label}-{name}.html").write_bytes(body)
             compare(source, target, "administrator", [b"1", b"2", b"3"])
             compare(member_source, member_target, "member", [b"1", b"2", b"3", b"4"])
-            print("PASS imported administrator and member room pages, boost, sidebar, search, and inaccessible room redirect")
+            source_state = post_state(source_db)
+            assert source_state == post_state(target_db)
+            options = dict(normalize_times=True, normalize_avatar_paths=True,
+                normalize_blob_paths=True, normalize_text_origins=True, ignore_csrf_inputs=True)
+            assert_equal("post-import Turbo response", section(b"<body>" + source_post_stream + b"</body>", "body", **options),
+                section(b"<body>" + target_post_stream + b"</body>", "body", **options))
+            posted_id = str(source_state[0][0]).encode()
+            compare(source_post, target_post, "administrator after post", [b"1", b"2", b"3", posted_id])
+            compare(member_source_post, member_target_post, "member after post", [b"1", b"2", b"3", b"4", posted_id])
+            print("PASS imported administrator and member pages, search, access, and post-import message write")
         finally:
             redis.terminate()
             redis.wait(timeout=10)
