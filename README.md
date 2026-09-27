@@ -66,6 +66,8 @@ Imported user and bot avatar originals are stored in the avatar directory used b
 
 `python bench/paired_large_import.py` separately seeds 16,230 messages in a disposable Campfire database, imports it, and checks every message page against Campfire. All 406 pages match in ordered IDs, exact ETag and Last-Modified headers, and parsed body structure after generated-value normalization. This covers a large single-room history; the wider migration and full-app capacity remain to be established.
 
+On that 16,230-message fixture, five-second checked latest-page trials in both server orders measured **2.53–3.01×** Rustfire throughput for full HTML reads and **10.11–13.49×** for conditional 304 reads at 32 and 128 clients, with zero errors. See [the paired report](bench/results/large-import-message-reads.json). These sampled reads do not establish sustained or whole-app capacity.
+
 With `--extra-messages 38`, the same probe imports and compares a full 40-message room page. Its complete parsed head and body match Campfire after generated-value normalization; the sampled raw HTML documents differ in size.
 
 With the same import fixture, ten-second checked room-page reads at 32, 128, and 256 clients in both server orders measured **2.62–3.35×** Rustfire throughput with lower p95 latency and zero read errors in either app. See [the raw results](bench/results/imported-room-reads.json). This sampled workload does not prove sustained or whole-app superiority.
