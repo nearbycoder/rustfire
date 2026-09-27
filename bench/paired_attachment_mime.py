@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import urllib.request
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
@@ -16,7 +17,7 @@ from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, w
 from paired_link_preview import Presentation
 
 
-def cases(large_mib=None):
+def cases(large_mib=None, extended_dir=None):
     files = REPOSITORY / "test/fixtures/files"
     fixtures = [
         ("jpeg-as-text", "moon.jpg", "text/plain", (files / "moon.jpg").read_bytes()),
@@ -24,6 +25,12 @@ def cases(large_mib=None):
         ("bmp-as-jpeg", "pixel.bmp", "image/jpeg", (files / "pixel.bmp").read_bytes()),
         ("mov-as-text", "alpha-centuri.mov", "text/plain", (files / "alpha-centuri.mov").read_bytes()),
     ]
+    if extended_dir is not None:
+        for format in ("gif", "webp", "tiff"):
+            converted = extended_dir / f"moon.{format}"
+            subprocess.run(["vips", "copy", str(files / "moon.jpg"), str(converted)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            fixtures.append((f"{format}-as-text", converted.name, "text/plain", converted.read_bytes()))
     if large_mib is not None:
         fixtures.append(("large-file", "large.bin", "application/octet-stream",
                          b"R" * (large_mib * 1024 * 1024 + 1)))
@@ -94,6 +101,20 @@ def presentation(payload, name):
     return tokens
 
 
+def image_preview(port, cookie, payload, name):
+    parsed = Presentation(name)
+    parsed.feed(payload.decode())
+    images = [dict(item[1])["src"] for item in parsed.structure
+              if isinstance(item, tuple) and item[0] == "img" and
+              "message__attachment" in dict(item[1]).get("class", "").split()]
+    assert len(images) == 1, (name, images)
+    assert images[0].startswith("/rails/active_storage/representations/redirect/"), (name, images[0])
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{images[0]}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.status == 200, (name, response.status)
+        return response.headers.get_content_type(), hashlib.sha256(response.read()).hexdigest()
+
+
 def malformed_state(database, campfire, upload_dir):
     with sqlite3.connect(database) as db:
         if campfire:
@@ -115,14 +136,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--large-mib", type=int,
                         help="also upload a binary message attachment of this many MiB plus one byte")
+    parser.add_argument("--extended-images", action="store_true",
+                        help="also upload generated GIF, WebP, and TIFF images labeled text/plain")
     args = parser.parse_args()
     if args.large_mib is not None and args.large_mib < 1:
         parser.error("--large-mib must be positive")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip()
     assert revision == REVISION, revision
-    fixtures = cases(args.large_mib)
     with tempfile.TemporaryDirectory(prefix="paired-attachment-mime-") as scratch:
         temp = pathlib.Path(scratch)
+        fixtures = cases(args.large_mib, temp if args.extended_images else None)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
@@ -139,6 +162,9 @@ def main():
             try:
                 rust_payloads = [post(rust_port, "session_token=benchmark-session", "benchmark-csrf", case)[1] for case in fixtures]
                 rust_types = saved(rust_db, False, temp / "uploads", fixtures)
+                rust_previews = {name: image_preview(rust_port, "session_token=benchmark-session", payload, name)
+                                 for (name, _, _, _), payload in zip(fixtures, rust_payloads)
+                                 if name in {"gif-as-text", "webp-as-text", "tiff-as-text"}}
                 rust_bad = post(rust_port, "session_token=benchmark-session", "benchmark-csrf", ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                 rust_bad_row = malformed_state(rust_db, False, temp / "uploads")
                 assert not list((temp / "uploads").glob("message-upload-*")), "Rustfire left staged composer files"
@@ -151,6 +177,9 @@ def main():
                     cookie, csrf = login_campfire(camp_port)
                     camp_payloads = [post(camp_port, cookie, csrf, case)[1] for case in fixtures]
                     camp_types = saved(camp_db, True, REPOSITORY / "storage/files", fixtures)
+                    camp_previews = {name: image_preview(camp_port, cookie, payload, name)
+                                     for (name, _, _, _), payload in zip(fixtures, camp_payloads)
+                                     if name in {"gif-as-text", "webp-as-text", "tiff-as-text"}}
                     camp_bad = post(camp_port, cookie, csrf, ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                     camp_bad_row = malformed_state(camp_db, True, REPOSITORY / "storage/files")
                 except Exception:
@@ -161,6 +190,7 @@ def main():
                 finally:
                     stop_server(camp)
             assert rust_types == camp_types, (rust_types, camp_types)
+            assert rust_previews == camp_previews, (rust_previews, camp_previews)
             assert rust_bad == camp_bad == 500, (rust_bad, camp_bad)
             assert rust_bad_row == camp_bad_row, (rust_bad_row, camp_bad_row)
             for case, rust_payload, camp_payload in zip(fixtures, rust_payloads, camp_payloads):
@@ -168,7 +198,8 @@ def main():
                 camp = presentation(camp_payload, case[0])
                 assert rust == camp, (case[0], next(((i,left,right) for i,(left,right) in enumerate(zip(rust,camp)) if left!=right), (len(rust),len(camp))))
             large_note = f", {args.large_mib} MiB plus one byte file" if args.large_mib else ""
-            print(f"PASS paired message attachment types, saved original bytes, Turbo responses, malformed image failure{large_note}")
+            image_note = ", generated GIF/WebP/TIFF" if args.extended_images else ""
+            print(f"PASS paired message attachment types, saved original bytes, Turbo responses, malformed image failure{image_note}{large_note}")
         finally:
             redis.terminate()
             redis.wait(timeout=10)

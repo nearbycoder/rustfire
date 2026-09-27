@@ -4380,7 +4380,7 @@ fn sound_presentation(body: &str) -> Option<String> {
 fn safe_inline_image(content_type: &str) -> bool {
     matches!(
         content_type,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif"
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/tiff"
     )
 }
 fn variable_avatar_image(content_type: &str) -> bool {
