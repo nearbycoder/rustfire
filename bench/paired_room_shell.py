@@ -165,6 +165,24 @@ def assert_head_runtime_metadata(source, target):
     assert assets(source) == assets(target), "Campfire asset graph differs"
 
 
+def assert_browser_assets(source_page, camp_port, camp_cookie, rust_port, rust_cookie):
+    """Check every stylesheet and import-map module used by the source room page."""
+    head = source_page.split(b"</head>", 1)[0]
+    import_map = re.search(rb'<script type="importmap" data-turbo-track="reload">(.*?)</script>', head, re.S)
+    assert import_map, "Missing source import map"
+    modules = json.loads(import_map.group(1))["imports"].values()
+    styles = (value.decode() for value in re.findall(rb'<link rel="stylesheet" href="([^"]+)" data-turbo-track="reload"\s*/?>', head))
+    paths = sorted(set(modules) | set(styles))
+    assert all(path.startswith("/assets/") for path in paths), paths
+    for path in paths:
+        original = raw_get(camp_port, path, camp_cookie)
+        target = raw_get(rust_port, path, rust_cookie)
+        assert original[0] == target[0] == 200 and original[2] == target[2], (path, original[0], target[0], len(original[2]), len(target[2]))
+        for name in ("content-type", "cache-control"):
+            assert original[1].get(name) == target[1].get(name), (path, name, original[1].get(name), target[1].get(name))
+    return len(paths)
+
+
 def message_template(page):
     match = re.search(rb'<script type="text/template" data-messages-target="template">(.*?)</script>', page, re.S)
     assert match, "Missing optimistic-message template"
@@ -452,14 +470,11 @@ def main():
                 wait_for_server(camp_port, camp)
                 camp_cookie, camp_csrf = login_campfire(camp_port)
                 for label, path in (("original", "/rooms/1"), ("direct", "/rooms/2"), ("private", "/rooms/3")):
-                    _, target = compare_room(label, path, camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
+                    source, target = compare_room(label, path, camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
                     assert 'class="sidebar admin"' in target.decode()
-                for asset in ("/assets/application-b6b3795e.js", "/assets/controllers/composer_controller-cd7e7ff3.js"):
-                    source_status, source_headers, source_body = raw_get(camp_port, asset, camp_cookie)
-                    target_status, target_headers, target_body = raw_get(rust_port, asset, "session_token=benchmark-session")
-                    assert source_status == target_status == 200 and source_body == target_body, (asset, source_status, target_status)
-                    for name in ("content-type", "cache-control"):
-                        assert source_headers.get(name) == target_headers.get(name), (asset, name, source_headers.get(name), target_headers.get(name))
+                    if label == "original":
+                        asset_count = assert_browser_assets(source, camp_port, camp_cookie, rust_port, "session_token=benchmark-session")
+                        print(f"PASS {asset_count} source stylesheet and import-map asset responses")
                 post_message(camp_port, camp_cookie, camp_csrf)
                 post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf")
                 compare_room("original with message", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True)

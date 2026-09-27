@@ -64,6 +64,14 @@ CASES = [
     ("invisible-block", "<div>Before<div hidden>Hidden</div>After</div>"),
     ("soft-hyphen", "<div>One&shy;Two</div>"),
     ("unicode-lines", "<div>Line one\u2028Line two\u2029Line three</div>"),
+    ("paste-inline-aliases", "<div>Before<b>Bold</b><i>Italic</i><u>Underline</u><s>Strike</s>After</div>"),
+    ("paste-font", "<div>Before<font face='Arial' color='red'>Styled <b>text</b></font>After</div>"),
+    ("paste-styled-span", "<div><span style='color: red; position: fixed' class='pasted' id='inserted'>Pasted</span></div>"),
+    ("protocol-relative-link", "<div><a href='//example.com/path?x=1&amp;y=2'>Relative host</a></div>"),
+    ("fragment-link", "<div><a href='#message_123'>Earlier message</a></div>"),
+    ("nested-paste-list", "<blockquote><div>Quoted <b>start</b></div><ul><li>First</li><li>Second <i>end</i></li></ul></blockquote>"),
+    ("paste-image-srcset", "<div>Before<img src='https://example.com/a.png' srcset='https://example.com/b.png 2x' width='20' height='30' alt='A'>After</div>"),
+    ("paste-line-separators", "<div>First<br>Second\r\nThird\tFourth</div>"),
 ]
 
 
