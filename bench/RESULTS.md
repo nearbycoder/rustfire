@@ -1482,3 +1482,16 @@ Rustfire served 2.65–3.11× as many checked room reads in these two short, sam
 ## Room and message document metadata
 
 `python bench/paired_room_shell.py --sample-dir /tmp/rustfire-room-head-parity` passed against the pinned Campfire checkout and the current Rustfire release build. The probe now compares every ordered head meta tag after normalizing the generated CSRF token, with both disposable fixtures using the same VAPID key. It checks body classes on standalone message detail and edit pages before and after uploading an account logo. Rustfire no longer emits an extra charset meta tag, and those message pages now add Campfire's `account-has-logo` class. Parsed room sections and message content matched for original, direct, and private rooms and the sampled plain, rich, text, JPEG, MP4, PDF, and unsafe-filename messages. These checks cover sampled pages; complete document serialization, other routes, and browser states remain open.
+
+## Complete parsed room and message documents
+
+`python bench/paired_room_shell.py --sample-dir /tmp/rustfire-full-dom-parity` now compares the complete parsed `<head>` and `<body>` in addition to the existing component checks. It found an extra legacy Trix script on Rustfire room pages; the pinned Campfire frontend no longer loads that script. The probe then passed for original, direct, and private rooms; plain, rich, text-file, JPEG, MP4, PDF, and unsafe-filename messages; standalone message show/edit pages; and an account logo upload. The comparator normalizes generated CSRF tokens, local origins, timestamps, signed blob paths, versioned logo URLs, and the product name. It omits hidden CSRF inputs in the later cached message fragments because the pinned Campfire fixture emits them inconsistently. This establishes parsed markup parity for the sampled documents, not byte-identical HTML or other page states. Raw original-room responses were 38,800 bytes from Campfire and 36,618 bytes from Rustfire.
+
+The paired Chromium composer probe passed after removing the extra script: file previews, removal, dropping, and browser sends matched Campfire. Two five-second, 32-client warm room-read runs passed with zero checked errors. Their timed client checked status, media type, and one-message room content; it did not parse every timed response.
+
+| Server order | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| :--- | ---: | ---: |
+| Campfire first | 3,229.6 / 12.26 ms | 1,205.6 / 59.46 ms |
+| Rustfire first | 3,389.6 / 11.88 ms | 1,178.2 / 59.87 ms |
+
+Rustfire served 2.68–2.88× as many checked reads per second under this sampled workload. These runs do not establish sustained capacity or full-app speed at feature parity.

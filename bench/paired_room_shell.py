@@ -1,8 +1,8 @@
-"""Compare the room page shell against pinned Campfire on disposable fixtures.
+"""Compare room and message documents against pinned Campfire on disposable fixtures.
 
-The probe deliberately covers the navigation, composer footer, initial sidebar
-frame, rendered message area, and parsed optimistic-message template. It does
-not claim full page or browser-behavior parity.
+The probe compares parsed body markup, generated head metadata, referenced
+browser assets, and the optimistic-message template. It does not claim full
+byte-level document or browser-behavior parity.
 Run after ``cargo build --release``.
 """
 
@@ -44,7 +44,7 @@ class Section(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
-        if self.depth == 0 and values.get("id") == self.target:
+        if self.depth == 0 and (values.get("id") == self.target or tag == self.target and self.target in {"head", "body"}):
             self.depth = 1
         elif self.depth and tag not in VOID:
             self.depth += 1
@@ -54,6 +54,8 @@ class Section(HTMLParser):
             normalized = []
             for key, value in attrs:
                 if key == "value" and values.get("name") == "authenticity_token":
+                    value = "<csrf>"
+                elif key == "content" and values.get("name") == "csrf-token":
                     value = "<csrf>"
                 elif self.normalize_times and key in {"data-refresh-room-loaded-at-value", "data-message-timestamp", "data-message-updated-at", "data-sort-value", "datetime"}:
                     assert value, (key, value)
@@ -65,6 +67,9 @@ class Section(HTMLParser):
                     if key in {"href", "data-lightbox-url-value"} and value.startswith("/qr_code/"):
                         value = "<origin-specific-qr>"
                     if key == "src" and value.startswith("/account/logo?v="):
+                        assert value.split("?v=", 1)[1].isdigit(), value
+                        value = "<versioned-logo>"
+                    if key == "href" and value.startswith("/account/logo?v="):
                         assert value.split("?v=", 1)[1].isdigit(), value
                         value = "<versioned-logo>"
                     value = value.replace("Campfire", "Rustfire")
@@ -79,7 +84,7 @@ class Section(HTMLParser):
     def handle_data(self, data):
         if self.depth and data.strip():
             text = " ".join(data.split()).replace("Campfire", "Rustfire")
-            if self.target == "message-area" and "$messageClasses$" in text:
+            if self.target in {"message-area", "body"} and "$messageClasses$" in text:
                 text = "<message-template>"
             self.tokens.append(("text", text))
 
@@ -360,6 +365,7 @@ def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sa
     source = get_room(camp_port, camp_cookie, path)
     target = get_room(rust_port, rust_cookie, path)
     assert_head_runtime_metadata(source, target)
+    assert_equal(f"{label} complete head", section(source, "head"), section(target, "head"))
     if sample_dir:
         sample_dir.mkdir(parents=True, exist_ok=True)
         stem = label.replace(" ", "-")
@@ -367,6 +373,7 @@ def compare_room(label, path, camp_port, camp_cookie, rust_port, rust_cookie, sa
         (sample_dir / f"rustfire-{stem}.html").write_bytes(target)
     for part in ("nav", "footer", "sidebar", "message-area"):
         assert_equal(f"{label} {part}", section(source, part, normalize_times, ignore_csrf_inputs, normalize_blob_paths), section(target, part, normalize_times, ignore_csrf_inputs, normalize_blob_paths))
+    assert_equal(f"{label} complete body", section(source, "body", True, ignore_csrf_inputs, normalize_blob_paths), section(target, "body", True, ignore_csrf_inputs, normalize_blob_paths))
     assert_equal(f"{label} message template", message_template(source), message_template(target))
     assert f'name="current-room-id" content="{path.rsplit("/", 1)[-1]}"' in target.decode()
     return source, target
@@ -381,8 +388,10 @@ def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, 
         (sample_dir / f"campfire-message-{label}-{message_id}.html").write_bytes(source)
         (sample_dir / f"rustfire-message-{label}-{message_id}.html").write_bytes(target)
     assert_head_runtime_metadata(source, target)
+    assert_equal(f"message {message_id} {label} complete head", section(source, "head"), section(target, "head"))
     for part in ("nav", "footer", "sidebar", "main-content"):
         assert_equal(f"message {message_id} {label} {part}", section(source, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths), section(target, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths))
+    assert_equal(f"message {message_id} {label} complete body", section(source, "body", True, ignore_csrf_inputs, normalize_blob_paths), section(target, "body", True, ignore_csrf_inputs, normalize_blob_paths))
     source_body_class = re.search(r'<body class="([^"]*)"', source.decode()).group(1)
     target_body_class = re.search(r'<body class="([^"]*)"', target.decode()).group(1)
     assert source_body_class == target_body_class, ("message body class", source_body_class, target_body_class)

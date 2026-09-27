@@ -4915,7 +4915,8 @@ async fn room_show_with_target(
     content.push_str(&format!("</div><turbo-cable-stream-source channel=\"RoomMessagesChannel\" signed-stream-name=\"{}\"></turbo-cable-stream-source><button class=\"message-area__return-to-latest btn\" data-action=\"messages#returnToLatest\" data-messages-target=\"latest\" hidden=\"hidden\"><img aria-hidden=\"true\" src=\"/assets/arrow-down-3f174d76.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Jump to newest message</span></button></div>", esc(&stream_token)));
     let footer = room_composer_footer(rid, &u, &headers);
     let sidebar_frame = "<turbo-frame data-turbo-permanent=\"true\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-action=\"presence:present@window-&gt;rooms-list#read read-rooms:read-&gt;rooms-list#read turbo:frame-load-&gt;rooms-list#loaded refresh-room:visible@window-&gt;turbo-frame#reload\" id=\"user_sidebar\" src=\"/users/me/sidebar\" target=\"_top\"></turbo-frame>";
-    let head = format!("<meta name=\"turbo-cache-control\" content=\"no-preview\"><meta name=\"current-room-id\" content=\"{rid}\"><script defer src=\"/static/trix.js\"></script>");
+    let legacy_trix = if use_campfire_frontend() { "" } else { "<script defer src=\"/static/trix.js\"></script>" };
+    let head = format!("<meta name=\"turbo-cache-control\" content=\"no-preview\"><meta name=\"current-room-id\" content=\"{rid}\">{legacy_trix}");
     let mut response = render_source_page_sections(&room.name, &content, &nav, &footer, sidebar_frame, "sidebar", if has_logo { "account-has-logo" } else { "" }, &head, Some(&u), u.csrf_token.as_deref().unwrap_or(""));
     response.headers_mut().append(
         header::SET_COOKIE,
