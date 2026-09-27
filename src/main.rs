@@ -7195,7 +7195,7 @@ fn fields(raw: &[u8]) -> (std::collections::HashMap<String, String>, Vec<i64>) {
     let mut ids = Vec::new();
     for (k, v) in form_urlencoded::parse(raw) {
         if k == "user_ids" || k == "user_ids[]" {
-            if let Ok(id) = v.parse() {
+            if let Ok(id) = path_record_id(&v) {
                 ids.push(id)
             }
         } else {
@@ -7203,6 +7203,9 @@ fn fields(raw: &[u8]) -> (std::collections::HashMap<String, String>, Vec<i64>) {
         }
     }
     (values, ids)
+}
+fn user_ids_parameter_present(raw: &[u8]) -> bool {
+    form_urlencoded::parse(raw).any(|(key, _)| key == "user_ids" || key.starts_with("user_ids["))
 }
 fn form_value<'a>(
     values: &'a HashMap<String, String>,
@@ -7340,7 +7343,7 @@ async fn room_update(
     let (values, user_ids) = fields(&raw);
     let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let kind = form_value(&values, "kind", "room[kind]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    update_room_values(&s, &u, rid, kind, Some(name), user_ids)?;
+    update_room_values(&s, &u, rid, kind, Some(name), user_ids, false)?;
     Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
 }
 fn update_room_values(
@@ -7350,6 +7353,7 @@ fn update_room_values(
     kind: &str,
     name: Option<&str>,
     user_ids: Vec<i64>,
+    retain_members_for_invalid_ids: bool,
 ) -> Result<(), StatusCode> {
     let r = room_for(s, u.id, rid)?;
     if !can_admin(u, &r) || r.kind == "Rooms::Direct" {
@@ -7414,7 +7418,7 @@ fn update_room_values(
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(db_err)?
             };
-            for id in current.into_iter().filter(|id| !desired.contains(id)) {
+            for id in current.into_iter().filter(|id| !retain_members_for_invalid_ids && !desired.contains(id)) {
                 tx.execute(
                     "DELETE FROM memberships WHERE room_id=?1 AND user_id=?2",
                     params![rid, id],
@@ -7503,7 +7507,8 @@ async fn room_kind_update(
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     let name = values.get("room[name]").map(String::as_str);
-    update_room_values(&s, &u, rid, kind, name, user_ids)?;
+    let retain_members_for_invalid_ids = user_ids.is_empty() && user_ids_parameter_present(&raw);
+    update_room_values(&s, &u, rid, kind, name, user_ids, retain_members_for_invalid_ids)?;
     let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
         .unwrap_or("").split(',').next().unwrap_or("").trim();
     if kind == "closeds" && matches!(accepted_type, "application/json" | "text/vnd.turbo-stream.html") {
