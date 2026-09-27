@@ -10305,14 +10305,14 @@ async fn bot_messages_get(
     Path((rid, key)): Path<(i64, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult {
-    if uri.path().ends_with(".html") {
-        let mut params = HashMap::new();
-        if let Some(before) = q.get("before") { params.insert("before".to_string(), before.clone()); }
-        if let Some(after) = q.get("after") { params.insert("after".to_string(), after.clone()); }
-        return messages_index(State(s), headers, OriginalUri(uri), Path(rid.to_string()), Query(params)).await;
-    }
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
+    let html_format = uri.path().ends_with(".html");
+    if uri.path().ends_with(".xml") {
+        return Ok((StatusCode::NOT_ACCEPTABLE,
+            [(header::CONTENT_TYPE, "application/xml; charset=UTF-8")],
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hash>\n  <status type=\"integer\">406</status>\n  <error>Not Acceptable</error>\n</hash>\n").into_response());
+    }
     let before_value = q.get("before").filter(|value| !value.trim().is_empty());
     let after_value = q.get("after").filter(|value| !value.trim().is_empty());
     let (before, after) = if let Some(value) = before_value {
@@ -10338,7 +10338,7 @@ async fn bot_messages_get(
             return Ok(bot_pagination_not_found(&headers, &uri));
         }
     }
-    let messages = message_list_with_room_name(&s, rid, 40, before, after, false)?;
+    let messages = message_list_with_room_name(&s, rid, 40, before, after, html_format)?;
     let db = pool(&s)?;
     let count: i64 = db
         .query_row(
@@ -10347,16 +10347,17 @@ async fn bot_messages_get(
             |r| r.get(0),
         )
         .map_err(db_err)?;
-    let body = messages
-        .iter()
-        .map(|m| bot_message_json(&s, m, &headers, &db))
-        .collect::<Result<Vec<_>, _>>()?;
-    let json = serde_json::to_string(&body)
-        .map_err(db_err)?
-        .replace('&', "\\u0026")
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e");
-    let mut r = ([(header::CONTENT_TYPE, "application/json; charset=utf-8")], json).into_response();
+    let mut r = if html_format {
+        let html = messages.iter().map(|message| message_html(&s, message, Some(&headers))).collect::<String>();
+        let csrf = u.csrf_token.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        Html(csrf_forms(&html, &csrf)).into_response()
+    } else {
+        let body = messages.iter().map(|message| bot_message_json(&s, message, &headers, &db))
+            .collect::<Result<Vec<_>, _>>()?;
+        let json = serde_json::to_string(&body).map_err(db_err)?
+            .replace('&', "\\u0026").replace('<', "\\u003c").replace('>', "\\u003e");
+        ([(header::CONTENT_TYPE, "application/json; charset=utf-8")], json).into_response()
+    };
     r.headers_mut()
         .insert("x-total-count", count.to_string().parse().unwrap());
     if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
@@ -12751,7 +12752,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok::<Response, std::convert::Infallible>(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
             };
             let native_navigation = native_navigation_path(base);
-            if (!native_navigation && !matches!(suffix, "html" | "json" | "turbo_stream"))
+            let bot_message_list = base.starts_with("/rooms/") && base.ends_with("/messages")
+                && base.matches('/').count() == 4;
+            if (!native_navigation && !matches!(suffix, "html" | "json" | "turbo_stream")
+                && !(bot_message_list && suffix == "xml"))
                 || !matches!(request.method(), &Method::GET | &Method::HEAD)
             {
                 return Ok(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
