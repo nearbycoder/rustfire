@@ -1,4 +1,4 @@
-"""Compare a large imported four-room history and optional paired mixed reads.
+"""Compare a large imported four-room history, search, and paired read rates.
 
 Requires the pinned Campfire checkout, bundled Ruby, Redis, Go, and a release
 Rustfire build. The source database is copied into a disposable fixture.

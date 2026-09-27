@@ -81,6 +81,19 @@ One Rustfire release process and Campfire's 22 Puma workers then served seven us
 
 The [raw report](results/large-graph-import-reads.json) retains each order and exact counts. This adds a multiroom, two-user imported read workload at roughly the size of the single-room history above. It does not measure concurrent writes, attachments, socket fanout, CPU or memory, hours of steady load, or a maximum connection count. The apps still send different raw HTML byte counts per page, and this result does not establish whole-app speed at full feature parity.
 
+## Large imported multiroom search
+
+`python bench/paired_large_graph_import.py --messages-per-room 4000 --search-clients 32 128 --read-seconds 5 --campfire-workers 22 --search-report bench/results/large-graph-import-search-reads.json` repeated the 16,000-message, four-room import with a matching source and imported VAPID key. All 700 message pages still matched. Four search pages then matched in complete parsed head and body: broad searches returned the newest 100 visible messages for each user; the administrator's search for room 4 returned none, while the member's returned that private room's newest 100. The parsed body token counts were **17,815**, **88**, **17,812**, and **17,818** respectively.
+
+The three nonempty search targets were then read in both server orders, with 22 Campfire Puma workers, one Rustfire release process, and the Go client on the same 32-logical-CPU host. Each connection warmed twice outside its five-second trial. Every measured 200 response matched its target's HTML media type, 100 message roots, CSRF-field count, and newest-message text marker. All eight trials had zero checked errors.
+
+| Clients | Rustfire reads/s | Campfire reads/s | Rustfire / Campfire | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 563–568 | 313–326 | 1.75–1.80× | 154.68–154.82 ms | 216.99–227.10 ms |
+| 128 | 408–415 | 279–293 | 1.41–1.46× | 499.73–511.18 ms | 768.15–801.33 ms |
+
+The [raw search report](results/large-graph-import-search-reads.json) retains each order and exact counts. This is a short, read-only search workload with three result-heavy queries; it does not establish sustained search capacity, mixed write or socket behavior, CPU or memory efficiency, or whole-app superiority at complete feature parity.
+
 ## Imported multi-room account graph
 
 `python bench/paired_import_graph.py` seeded a disposable pinned Campfire account with four rooms: open, private, direct, and a private room inaccessible to the signed-in administrator but visible to a second member. It added five rich-text messages, a boost, two equally timestamped recent searches, visible and unread memberships, and one push subscription so the imported account retains Campfire's VAPID key. After offline import, the source and Rustfire had identical saved room, membership, message, boost, and search rows. The administrator's search results included the three reachable messages and excluded the hidden room's message; the member's results included all four matching messages.
