@@ -1157,29 +1157,80 @@ fn image_format(content_type: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+fn jpeg_dimensions(input: &std::path::Path) -> Option<(i64, i64)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(input).ok()?;
+    let mut marker = [0u8; 2];
+    file.read_exact(&mut marker).ok()?;
+    if marker != [0xff, 0xd8] {
+        return None;
+    }
+    loop {
+        file.read_exact(&mut marker[..1]).ok()?;
+        if marker[0] != 0xff {
+            return None;
+        }
+        loop {
+            file.read_exact(&mut marker[1..]).ok()?;
+            if marker[1] != 0xff {
+                break;
+            }
+        }
+        let code = marker[1];
+        if code == 0xd9 || code == 0xda || code == 0x00 {
+            return None;
+        }
+        if code == 0x01 || (0xd0..=0xd8).contains(&code) {
+            continue;
+        }
+        file.read_exact(&mut marker).ok()?;
+        let length = u16::from_be_bytes(marker);
+        if length < 2 {
+            return None;
+        }
+        if matches!(code, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            if length < 8 {
+                return None;
+            }
+            let mut frame = [0u8; 5];
+            file.read_exact(&mut frame).ok()?;
+            let height = u16::from_be_bytes([frame[1], frame[2]]) as i64;
+            let width = u16::from_be_bytes([frame[3], frame[4]]) as i64;
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+        file.seek(SeekFrom::Current(i64::from(length - 2))).ok()?;
+    }
+}
 fn analyze_image_and_thumbnail(
     input: &std::path::Path,
     stored: &str,
     kind: &str,
     format: &str,
 ) -> (Option<i64>, Option<i64>) {
-    let dimensions = std::process::Command::new("vipsheader")
-        .arg("-a")
-        .arg(input)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let dimension = |field: &str| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix(field))
-                    .and_then(|value| value.trim().parse::<i64>().ok())
-                    .filter(|value| *value > 0)
-            };
-            (dimension("width:"), dimension("height:"))
-        })
-        .unwrap_or((None, None));
+    let dimensions = (format == "jpg")
+        .then(|| jpeg_dimensions(input))
+        .flatten()
+        .map(|(width, height)| (Some(width), Some(height)))
+        .unwrap_or_else(|| {
+            std::process::Command::new("vipsheader")
+                .arg("-a")
+                .arg(input)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let dimension = |field: &str| {
+                        text.lines()
+                            .find_map(|line| line.strip_prefix(field))
+                            .and_then(|value| value.trim().parse::<i64>().ok())
+                            .filter(|value| *value > 0)
+                    };
+                    (dimension("width:"), dimension("height:"))
+                })
+                .unwrap_or((None, None))
+        });
     let cache = input
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -11763,6 +11814,21 @@ mod tests {
         assert_eq!(indexed, "report-Q-.txt");
     }
 
+    #[test]
+    fn jpeg_frame_dimensions_skip_metadata_segments() {
+        let path = std::env::temp_dir().join(format!("rustfire-jpeg-frame-{}", uuid::Uuid::new_v4()));
+        let jpeg = [
+            0xff, 0xd8, // Start of image
+            0xff, 0xe0, 0x00, 0x04, 0x12, 0x34, // APP0 metadata
+            0xff, 0xc0, 0x00, 0x11, 0x08, 0x08, 0x70, 0x0f, 0x00, // SOF0: 3840 x 2160
+            0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+        ];
+        std::fs::write(&path, jpeg).unwrap();
+        assert_eq!(super::jpeg_dimensions(&path), Some((3840, 2160)));
+        std::fs::write(&path, &jpeg[..8]).unwrap();
+        assert_eq!(super::jpeg_dimensions(&path), None);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn existing_direct_upload_table_gains_nullable_mime_marker() {
         let db = r2d2::Pool::builder()

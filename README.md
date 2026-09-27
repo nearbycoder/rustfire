@@ -128,6 +128,8 @@ A separate 30-second JPEG upload/read trial with 100 signed room sockets, 64 che
 
 At 120 JPEG uploads in 30 seconds under the same readers and sockets, Rustfire initially missed the writer deadline in both orders. Reading image dimensions with one `vipsheader` process instead of two brought both paired orders within the deadline while retaining matching media and page output. Rustfire served 1.78–1.89× as many checked reads in the repeated trials. One writer finished only 0.04 seconds before the deadline, so this sampled rate has little margin.
 
+At 100 JPEG uploads in 20 seconds, Rustfire missed the writer deadline in both server orders. Reading ordinary JPEG dimensions from their frame header removed the remaining metadata process and preserved the checked media output, but only one of two post-change server orders met the deadline. Both apps saved every file and delivered every socket event; this mixed result leaves 5 uploads/s under concurrent reads and sockets as an open performance target.
+
 A paired generic-file composer benchmark warmed each client connection, then checked every response and stored file in 8 MiB upload bursts at 4, 16, and 64 clients in both server orders. Rustfire completed 11.23–25.99× as many uploads per second in these short trials. No sockets subscribed, and the bursts do not establish sustained upload capacity or full side-effect parity; see `bench/RESULTS.md` for the measurements and limits.
 
 ## Checks
