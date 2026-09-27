@@ -1,5 +1,16 @@
 # Preliminary Rustfire measurements
 
+## Room-page read check after query-format parity
+
+After the 3,348-case GET format sweep passed across three roles, `python bench/paired_room_shell.py --read-clients 32 --seconds 5 --campfire-workers 22` ran in both server orders on the release build. The probe checked every successful room-page read and matched the sampled parsed page sections before timing. Each app had zero read errors.
+
+| Server order | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| :--- | ---: | ---: |
+| Campfire first | 3,482.6 / 11.22 ms | 1,302.6 / 50.50 ms |
+| Rustfire first | 3,606.5 / 10.82 ms | 1,203.8 / 57.93 ms |
+
+Rustfire served 2.67–3.00× as many checked reads in these short one-message-room trials. This verifies the routing change did not erase the advantage at this sampled load; it does not establish full HTML equality, sustained capacity, or whole-app superiority.
+
 ## Room creation after preserving imported ID high-water marks
 
 After Rustfire began retaining Campfire's deleted-user and deleted-room ID high-water marks, `python tests/import_campfire.py` imported a fixture whose highest live user and room IDs were 3 and 1 but whose saved sequences were 40 and 50. Creating a bot and open room through Rustfire's HTTP routes then assigned IDs 41 and 51. The 46 Rust unit tests and paired first-run and bot-administration probes passed with the changed allocator.

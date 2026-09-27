@@ -6,7 +6,7 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{any, delete, get, patch, post},
@@ -4598,7 +4598,7 @@ async fn room_show(
             return Ok(found_redirect("/"));
         }
     };
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         let u = user(&s, &headers)?;
         room_for(&s, u.id, rid)?;
         return Ok(response);
@@ -4613,7 +4613,7 @@ async fn room_show_at(
 ) -> AppResult {
     let rid = path_record_id(&room_id)?;
     let mid = path_record_id(&message_id)?;
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         let u = user(&s, &headers)?;
         room_for(&s, u.id, rid)?;
         return Ok(response);
@@ -4806,15 +4806,33 @@ fn not_acceptable_format(accept: &str) -> Response {
             .into_response()
     }
 }
-fn reject_html_format(headers: &HeaderMap, path: &str) -> Option<Response> {
-    if let Some((_, format)) = path.rsplit('/').next().unwrap_or("").rsplit_once('.') {
-        if !format.is_empty() && !format.bytes().all(|byte| byte.is_ascii_digit()) {
-            return (format != "html").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
+fn requested_format(uri: &Uri) -> Option<std::borrow::Cow<'_, str>> {
+    if let Some((_, suffix)) = uri.path().rsplit('/').next().unwrap_or("").rsplit_once('.') {
+        if !suffix.is_empty() && !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Some(std::borrow::Cow::Borrowed(suffix));
         }
+    }
+    uri.query().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "format")
+            .map(|(_, value)| value)
+    })
+}
+fn reject_html_format(headers: &HeaderMap, uri: &Uri) -> Option<Response> {
+    if let Some(format) = requested_format(uri) {
+        return (format != "html").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
     }
     let requested = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let first = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
     matches!(first, "application/json" | "application/*").then(|| not_acceptable_format("application/json"))
+}
+fn reject_turbo_only_format(headers: &HeaderMap, uri: &Uri) -> Option<Response> {
+    if let Some(format) = requested_format(uri) {
+        return (format != "turbo_stream").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
+    }
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    (!accept.contains("text/vnd.turbo-stream.html") && !accept.contains("*/*"))
+        .then(|| not_acceptable_format(accept))
 }
 #[derive(Deserialize)]
 struct RefreshQuery {
@@ -4830,15 +4848,8 @@ async fn room_refresh(
     let u = user(&s, &headers)?;
     let rid = path_record_id(&room_id)?;
     let room = room_for(&s, u.id, rid)?;
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if !uri.path().ends_with(".turbo_stream")
-        && !accept.contains("text/vnd.turbo-stream.html")
-        && !accept.contains("*/*")
-    {
-        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else if uri.path().ends_with(".html") { "" } else { accept }));
+    if let Some(response) = reject_turbo_only_format(&headers, &uri) {
+        return Ok(response);
     }
     let since = q.since.as_deref().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
     let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
@@ -5418,7 +5429,7 @@ async fn messages_index(
     if messages.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     let (etag, modified, _) = message_page_validator(
@@ -6299,7 +6310,7 @@ async fn message_show(
     let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let m = message_by_id(&s, rid, mid)?;
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     Ok(if headers.get("x-rustfire-fragment").is_some() {
@@ -6337,7 +6348,7 @@ async fn message_edit(
     if !is_admin(&u) && creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     let source = esc(&body_source.unwrap_or(body));
@@ -7198,7 +7209,7 @@ async fn search_get(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     let raw_query = q.get("q").cloned().unwrap_or_default();
@@ -7368,7 +7379,7 @@ fn account_next_page_container(page: i64) -> String {
 }
 async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri) -> AppResult {
     let u = user(&s, &headers)?;
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
@@ -7511,15 +7522,8 @@ async fn account_users_index(
     Query(query): Query<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if !uri.path().ends_with(".turbo_stream")
-        && !accept.contains("text/vnd.turbo-stream.html")
-        && !accept.contains("*/*")
-    {
-        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else if uri.path().ends_with(".html") { "" } else { accept }));
+    if let Some(response) = reject_turbo_only_format(&headers, &uri) {
+        return Ok(response);
     }
     let page = query
         .get("page")
@@ -8916,7 +8920,7 @@ async fn user_show(
         .optional()
         .map_err(db_err)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     let has_logo: bool = db
@@ -9316,9 +9320,9 @@ async fn autocomplete(
 ) -> AppResult {
     let _autocomplete_slot = s.autocomplete_slots.acquire().await.map_err(db_err)?;
     let u = user(&s, &headers)?;
-    let format = uri.path().rsplit_once('.').map(|(_, suffix)| suffix);
+    let format = requested_format(&uri);
     let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
-    if matches!(format, Some("html" | "turbo_stream"))
+    if format.as_deref().is_some_and(|value| value != "json")
         || (format.is_none() && !accept.split(',').any(|part| {
             matches!(part.trim().split(';').next(), Some("application/json" | "application/*" | "*/*"))
         }))
@@ -9480,7 +9484,7 @@ async fn bot_new(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     Ok(render(
@@ -10863,7 +10867,7 @@ async fn boost_new(
         .map_err(db_err)?;
     let (rid, client_id) = target.ok_or(StatusCode::NOT_FOUND)?;
     room_for(&s, u.id, rid)?;
-    if let Some(response) = reject_html_format(&headers, uri.path()) {
+    if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
     let frame_id = format!("new_boost_message_{client_id}");
@@ -11208,16 +11212,21 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     let format_negotiated = matches!(path,
         "/autocompletable/users" | "/webmanifest" | "/webmanifest.json" |
         "/service-worker" | "/service-worker.js");
-    let original_path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or(path);
-    let explicit_format = original_path.rsplit('/').next().unwrap_or("").rsplit_once('.')
-        .is_some_and(|(_, suffix)| matches!(suffix, "html" | "json" | "turbo_stream"));
+    let original_uri = req.extensions().get::<OriginalUri>().map(|uri| &uri.0).unwrap_or_else(|| req.uri());
+    let explicit_format = requested_format(original_uri);
     let requested = req.headers().get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let first_format = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
-    let rejected_format = if !explicit_format && matches!(req.method(), &Method::GET | &Method::HEAD) {
-        match first_format {
-            "application/json" | "application/*" => Some("application/json"),
-            "text/vnd.turbo-stream.html" => Some(""),
-            _ => None,
+    let rejected_format = if matches!(req.method(), &Method::GET | &Method::HEAD) {
+        match explicit_format.as_deref() {
+            Some("html") => None,
+            Some("json") => Some("application/json"),
+            Some("turbo_stream") => Some(""),
+            Some(_) => None,
+            None => match first_format {
+                "application/json" | "application/*" => Some("application/json"),
+                "text/vnd.turbo-stream.html" => Some(""),
+                _ => None,
+            },
         }
     } else {
         None

@@ -1,4 +1,4 @@
-"""Compare authenticated GET status and media type across common Rails formats.
+"""Compare GET status and media type across common Rails formats and roles.
 
 Run after cargo build --release. Both applications use disposable databases,
 and Campfire runs from the pinned source in an isolated checkout and Redis.
@@ -32,6 +32,10 @@ PATHS = (
 )
 SUFFIXES = ("", ".html", ".json", ".turbo_stream")
 ACCEPTS = ("text/html", "application/json", "text/vnd.turbo-stream.html", "*/*")
+MIXED_PATHS = (
+    "/session/new", "/account/users", "/autocompletable/users", "/rooms/1",
+    "/rooms/1/refresh", "/rooms/1/messages/1", "/account/logo", "/searches",
+)
 
 
 def request(port, path, cookie, accept, compare_406_bodies, compare_error_bodies, compare_redirects):
@@ -57,6 +61,8 @@ def request(port, path, cookie, accept, compare_406_bodies, compare_error_bodies
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--all-accepts", action="store_true", help="compare HTML, JSON, Turbo, and wildcard Accept headers")
+    parser.add_argument("--query-formats", action="store_true", help="request ?format=html, json, and turbo_stream instead of path suffixes")
+    parser.add_argument("--mixed-formats", action="store_true", help="combine format suffixes and conflicting ?format= values on selected paths")
     parser.add_argument("--compare-406-bodies", action="store_true", help="also compare Not Acceptable response bodies")
     parser.add_argument("--compare-error-bodies", action="store_true", help="also compare forbidden and Not Acceptable response bodies")
     parser.add_argument("--compare-redirects", action="store_true", help="also compare redirect path and query")
@@ -79,7 +85,13 @@ def main():
         redis, redis_log = start_redis(temp, redis_port)
         # Pinned Campfire routes /rooms/:id/settings to a missing controller and
         # returns 500 for all four formats, so it is not a usable parity case.
-        paths = [path + suffix for path in PATHS for suffix in (SUFFIXES if path != "/" else ("",))]
+        if args.mixed_formats:
+            paths = [f"{path}.{suffix}?format={query}" for path in MIXED_PATHS
+                     for suffix in ("html", "json", "turbo_stream") for query in ("html", "json", "turbo_stream")]
+        elif args.query_formats:
+            paths = [f"{path}?format={format_name}" for path in PATHS for format_name in ("html", "json", "turbo_stream")]
+        else:
+            paths = [path + suffix for path in PATHS for suffix in (SUFFIXES if path != "/" else ("",))]
         accepts = ACCEPTS if args.all_accepts else ("text/html",)
         cases = [(path, accept) for path in paths for accept in accepts]
         try:
