@@ -54,7 +54,7 @@ def attachment(port, document, cookie, csrf):
 
 
 def measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust_port,
-        uploads, cookie, clients_list, seconds, campfire_workers):
+        uploads, cookie, clients_list, seconds, campfire_workers, message_count):
     binary = temp / "checked_get"
     subprocess.run(("go", "build", "-o", str(binary), "bench/checked_get.go"), check=True)
     trials = []
@@ -69,7 +69,7 @@ def measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust
                             cwd=repository, env=trial_env, stdout=log, stderr=log)
                         try:
                             wait_for_server(camp_port, process)
-                            report = measure_room_page(binary, camp_port, cookie, clients, seconds, messages=2)
+                            report = measure_room_page(binary, camp_port, cookie, clients, seconds, messages=message_count)
                         except Exception:
                             log.flush()
                             log.seek(0)
@@ -83,7 +83,7 @@ def measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust
                         "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"],
                     })
                     try:
-                        report = measure_room_page(binary, rust_port, cookie, clients, seconds, messages=2)
+                        report = measure_room_page(binary, rust_port, cookie, clients, seconds, messages=message_count)
                     finally:
                         stop_server(process)
                 trials.append({"clients": clients, "order": list(order), "app": name, **report})
@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--ruby", type=Path, default=Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=Path, default=Path("/tmp/rustfire-baseline/bundle"))
     parser.add_argument("--sample-dir", type=Path)
+    parser.add_argument("--extra-messages", type=int, default=0, help="additional rich messages after the initial text and file messages (0-38)")
     parser.add_argument("--read-clients", type=int, nargs="*", default=[])
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--campfire-workers", type=int, default=22)
@@ -106,6 +107,8 @@ def main():
         parser.error("positive clients, seconds, and Campfire worker count are required")
     if args.report and not args.read_clients:
         parser.error("--report requires --read-clients")
+    if not 0 <= args.extra_messages <= 38:
+        parser.error("--extra-messages must be between 0 and 38")
     repository, ruby, bundle_path = args.campfire_repo.resolve(), args.ruby.resolve(), args.bundle_path.resolve()
     revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repository, text=True).strip()
     assert revision == "91d294f4a09f9bbe37f9548959bfcb43645678fb", revision
@@ -137,6 +140,11 @@ def main():
             assert status == 200, status
             post_attachment(camp_port, cookie, csrf,
                 ("import-text", "notes.txt", "text/plain", b"Imported attachment\n"))
+            for number in range(args.extra_messages):
+                rich = urllib.parse.urlencode({"message[body]": f"<div>Imported item {number:02d} <strong>bold</strong></div>"}).encode()
+                status, _, _ = request(camp_port, "POST", "/rooms/1/messages", cookie, csrf, rich,
+                    "application/x-www-form-urlencoded", {"Accept": "text/vnd.turbo-stream.html"})
+                assert status == 200, (number, status)
             paths = {"bot_index": "/account/bots", "bot_edit": f"/account/bots/{bot_id}/edit", "room": "/rooms/1"}
             source = {name: page(camp_port, path, cookie, csrf) for name, path in paths.items()}
             source_preview, _ = preview(camp_port, source["bot_edit"], cookie, csrf)
@@ -187,13 +195,14 @@ def main():
                     assert_equal(f"imported {name} {part}", section(source[name], part, **options), section(target[name], part, **options))
             if args.read_clients:
                 trials = measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust_port,
-                    uploads, cookie, args.read_clients, args.seconds, args.campfire_workers)
+                    uploads, cookie, args.read_clients, args.seconds, args.campfire_workers, 2 + args.extra_messages)
                 if args.report:
                     args.report.parent.mkdir(parents=True, exist_ok=True)
                     args.report.write_text(json.dumps({
                         "source_revision": revision,
                         "rustfire_revision": subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
-                        "fixture": "imported Campfire account with one rich message, one text attachment, and one bot avatar",
+                        "fixture": f"imported Campfire account with {1 + args.extra_messages} rich messages, one text attachment, and one bot avatar",
+                        "rendered_messages": 2 + args.extra_messages,
                         "seconds": args.seconds,
                         "campfire_workers": args.campfire_workers,
                         "trials": trials,

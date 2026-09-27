@@ -64,7 +64,11 @@ Imported user and bot avatar originals are stored in the avatar directory used b
 
 `python bench/paired_import_roundtrip.py` creates a disposable bot, rich-text message, and file attachment in pinned Campfire, imports the stopped account, and compares the rendered bot list, bot editor, and room page with Rustfire. The sampled signed avatar and attachment paths and original bytes match; complete parsed page structure matches after normalizing generated values. This is a repeatable sample, not a full migration validation.
 
+With `--extra-messages 38`, the same probe imports and compares a full 40-message room page. Its complete parsed head and body match Campfire after generated-value normalization; the sampled raw HTML documents differ in size.
+
 With the same import fixture, ten-second checked room-page reads at 32, 128, and 256 clients in both server orders measured **2.62–3.35×** Rustfire throughput with lower p95 latency and zero read errors in either app. See [the raw results](bench/results/imported-room-reads.json). This sampled workload does not prove sustained or whole-app superiority.
+
+On the imported 40-message room, the same ten-second, both-order sweep measured **3.06–4.55×** Rustfire throughput with lower p95 latency and zero checked errors in either app. See [the 40-message results](bench/results/imported-room-40-reads.json). This is a sampled room read, not a maximum-scale or full-app claim.
 
 If Campfire has push subscriptions, also set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to its original VAPID keys before import. The importer verifies the pair and creates Rustfire's key file so those subscriptions retain the same application server key.
 

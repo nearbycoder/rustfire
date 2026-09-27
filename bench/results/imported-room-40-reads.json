@@ -1,0 +1,190 @@
+{
+  "source_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "rustfire_revision": "ecba52d495a68620a82bba492f9f96e6226c995f",
+  "fixture": "imported Campfire account with 39 rich messages, one text attachment, and one bot avatar",
+  "rendered_messages": 40,
+  "seconds": 10.0,
+  "campfire_workers": 22,
+  "trials": [
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.035380436,
+      "successes": 4908,
+      "errors": 0,
+      "rps": 489.0696502539647,
+      "median_ms": 51.285514,
+      "p95_ms": 168.527122,
+      "p99_ms": 286.169729
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.008089821,
+      "successes": 22285,
+      "errors": 0,
+      "rps": 2226.6986406576134,
+      "median_ms": 15.530128,
+      "p95_ms": 21.379633,
+      "p99_ms": 23.212679
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.006759276,
+      "successes": 22789,
+      "errors": 0,
+      "rps": 2277.360669068622,
+      "median_ms": 15.229327,
+      "p95_ms": 20.579058,
+      "p99_ms": 22.018846
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.047118445,
+      "successes": 7478,
+      "errors": 0,
+      "rps": 744.2930070881631,
+      "median_ms": 28.690277,
+      "p95_ms": 93.745442,
+      "p99_ms": 188.475936
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.120514824,
+      "successes": 7286,
+      "errors": 0,
+      "rps": 719.9238503877122,
+      "median_ms": 166.647619,
+      "p95_ms": 349.620821,
+      "p99_ms": 441.237759
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.042731916,
+      "successes": 26166,
+      "errors": 0,
+      "rps": 2605.466343108546,
+      "median_ms": 48.360934,
+      "p95_ms": 76.509278,
+      "p99_ms": 88.8868
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.044573555,
+      "successes": 26480,
+      "errors": 0,
+      "rps": 2636.2492996846795,
+      "median_ms": 47.972307,
+      "p95_ms": 74.76241,
+      "p99_ms": 87.476924
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.171183555,
+      "successes": 7127,
+      "errors": 0,
+      "rps": 700.7050813173531,
+      "median_ms": 152.171256,
+      "p95_ms": 389.015039,
+      "p99_ms": 480.728779
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.352848735,
+      "successes": 6890,
+      "errors": 0,
+      "rps": 665.5173060441706,
+      "median_ms": 376.475917,
+      "p95_ms": 593.954499,
+      "p99_ms": 709.386377
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.088632709,
+      "successes": 26625,
+      "errors": 0,
+      "rps": 2639.1088632107717,
+      "median_ms": 94.924888,
+      "p95_ms": 161.602321,
+      "p99_ms": 200.375222
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 10.093064953,
+      "successes": 26626,
+      "errors": 0,
+      "rps": 2638.049009293837,
+      "median_ms": 95.004206,
+      "p95_ms": 161.846886,
+      "p99_ms": 199.17264
+    },
+    {
+      "clients": 256,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 10.353687216,
+      "successes": 6837,
+      "errors": 0,
+      "rps": 660.3444606124945,
+      "median_ms": 383.008031,
+      "p95_ms": 574.338363,
+      "p99_ms": 721.838397
+    }
+  ]
+}
