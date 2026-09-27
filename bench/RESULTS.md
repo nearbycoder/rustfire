@@ -68,6 +68,19 @@ This is a deterministic, seeded history rather than a production account. It exe
 
 The [raw paired report](results/large-import-message-reads.json) retains both orders and exact counts. This is a short, single-room, same-host read workload. It shows faster checked message-page reads at this database size, not maximum sustained capacity, mixed traffic, or a whole-app advantage at full feature parity. The full 200 HTML bodies differ in serialization and raw size despite matching parsed content.
 
+## Large imported multiroom history
+
+`python bench/paired_large_graph_import.py --messages-per-room 4000 --read-clients 32 128 --read-seconds 5 --campfire-workers 22 --report bench/results/large-graph-import-reads.json` seeded 16,000 distinct-time messages across an open room, two private rooms, and a direct room. Two users authored the messages; the administrator could reach three rooms and the member all four. Every one of the **700** reachable message pages matched its ordered IDs, exact ETag and Last-Modified values, and complete parsed body after generated-value normalization. The stopped database imported in **0.78 seconds** on this local run.
+
+One Rustfire release process and Campfire's 22 Puma workers then served seven user-room latest-page targets in both server orders, with a local Go client. Each connection warmed twice outside the five-second trial. Every measured 200 response matched its target's ETag, Last-Modified, HTML media type, 40 message roots, and 320 hidden CSRF fields; all eight trials had zero checked errors.
+
+| Clients | Rustfire reads/s | Campfire reads/s | Rustfire / Campfire | Rustfire p95 | Campfire p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 2,755–2,769 | 1,248–1,315 | 2.10–2.22× | 17.94–18.00 ms | 45.12–47.87 ms |
+| 128 | 2,861–2,871 | 1,146–1,175 | 2.44–2.50× | 69.74–69.92 ms | 187.01–217.19 ms |
+
+The [raw report](results/large-graph-import-reads.json) retains each order and exact counts. This adds a multiroom, two-user imported read workload at roughly the size of the single-room history above. It does not measure concurrent writes, attachments, socket fanout, CPU or memory, hours of steady load, or a maximum connection count. The apps still send different raw HTML byte counts per page, and this result does not establish whole-app speed at full feature parity.
+
 ## Imported multi-room account graph
 
 `python bench/paired_import_graph.py` seeded a disposable pinned Campfire account with four rooms: open, private, direct, and a private room inaccessible to the signed-in administrator but visible to a second member. It added five rich-text messages, a boost, two equally timestamped recent searches, visible and unread memberships, and one push subscription so the imported account retains Campfire's VAPID key. After offline import, the source and Rustfire had identical saved room, membership, message, boost, and search rows. The administrator's search results included the three reachable messages and excluded the hidden room's message; the member's results included all four matching messages.

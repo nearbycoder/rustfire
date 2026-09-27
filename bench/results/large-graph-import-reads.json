@@ -1,0 +1,160 @@
+{
+  "source_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "rustfire_revision": "7aa3e8a2d48a76bd104646f59743efcd9e066895",
+  "fixture": {
+    "rooms": 4,
+    "users": 2,
+    "messages_per_room": 4000,
+    "total_messages": 16000,
+    "targets": 7,
+    "pages_checked": 700
+  },
+  "seconds": 5.0,
+  "campfire_workers": 22,
+  "trials": [
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "server": "Campfire",
+      "result": {
+        "clients": 32,
+        "seconds": 5.015751945,
+        "successes": 6594,
+        "errors": 0,
+        "rps": 1314.6583149059618,
+        "median_ms": 19.772839,
+        "p95_ms": 45.120745,
+        "p99_ms": 81.998762
+      }
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "server": "Rustfire",
+      "result": {
+        "clients": 32,
+        "seconds": 5.007000285,
+        "successes": 13795,
+        "errors": 0,
+        "rps": 2755.1426432563103,
+        "median_ms": 11.980228,
+        "p95_ms": 17.995612,
+        "p99_ms": 19.545977
+      }
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "server": "Rustfire",
+      "result": {
+        "clients": 32,
+        "seconds": 5.006385276,
+        "successes": 13862,
+        "errors": 0,
+        "rps": 2768.86400782072,
+        "median_ms": 11.974079,
+        "p95_ms": 17.941004,
+        "p99_ms": 19.567156
+      }
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "server": "Campfire",
+      "result": {
+        "clients": 32,
+        "seconds": 5.013633019,
+        "successes": 6258,
+        "errors": 0,
+        "rps": 1248.1966622375955,
+        "median_ms": 24.166461,
+        "p95_ms": 47.874816,
+        "p99_ms": 87.188753
+      }
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "server": "Campfire",
+      "result": {
+        "clients": 128,
+        "seconds": 5.063815439,
+        "successes": 5950,
+        "errors": 0,
+        "rps": 1175.0033293423119,
+        "median_ms": 93.690114,
+        "p95_ms": 187.008639,
+        "p99_ms": 265.481999
+      }
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "server": "Rustfire",
+      "result": {
+        "clients": 128,
+        "seconds": 5.040069418,
+        "successes": 14468,
+        "errors": 0,
+        "rps": 2870.595382740024,
+        "median_ms": 43.599463,
+        "p95_ms": 69.921211,
+        "p99_ms": 83.909972
+      }
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "server": "Rustfire",
+      "result": {
+        "clients": 128,
+        "seconds": 5.036373496,
+        "successes": 14410,
+        "errors": 0,
+        "rps": 2861.185734426714,
+        "median_ms": 44.011431,
+        "p95_ms": 69.741147,
+        "p99_ms": 83.421357
+      }
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "server": "Campfire",
+      "result": {
+        "clients": 128,
+        "seconds": 5.05460324,
+        "successes": 5791,
+        "errors": 0,
+        "rps": 1145.688340911205,
+        "median_ms": 94.459235,
+        "p95_ms": 217.187401,
+        "p99_ms": 269.662916
+      }
+    }
+  ]
+}
