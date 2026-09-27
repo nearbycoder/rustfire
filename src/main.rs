@@ -5922,6 +5922,65 @@ impl Drop for UploadTemporaryFile {
         let _ = std::fs::remove_file(&self.0);
     }
 }
+fn replace_message_attachment(db: &rusqlite::Connection, mid: i64, mut file: Upload, t: &str) -> Result<(), StatusCode> {
+    let prefix = if let Some(temporary) = &file.temporary {
+        let mut source = std::fs::File::open(&temporary.0).map_err(db_err)?;
+        let mut prefix = vec![0; 16];
+        let size = std::io::Read::read(&mut source, &mut prefix).map_err(db_err)?;
+        prefix.truncate(size);
+        prefix
+    } else {
+        file.bytes.iter().copied().take(16).collect()
+    };
+    file.content_type = sniff_upload_content_type(&prefix, &file.content_type).to_string();
+    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+    std::fs::create_dir_all(&dir).map_err(db_err)?;
+    let stored = Uuid::new_v4().to_string();
+    let input = std::path::Path::new(&dir).join(&stored);
+    if let Some(temporary) = &file.temporary {
+        std::fs::rename(&temporary.0, &input).map_err(db_err)?;
+    } else {
+        std::fs::write(&input, &file.bytes).map_err(db_err)?;
+    }
+    let (width, height, processing_failed) = if let Some(format) = image_format(&file.content_type) {
+        let (width, height) = analyze_image_and_thumbnail(&input, &stored, "thumb", format);
+        let failed = width.is_none() || height.is_none() || !std::path::Path::new(&dir)
+            .join("variants").join(format!("{stored}-thumb.{format}")).is_file();
+        (width.map(|value| value as f64), height.map(|value| value as f64), failed)
+    } else if safe_inline_video(&file.content_type) {
+        let (width, height) = analyze_video_and_poster(&input, &stored);
+        let failed = width.is_none() || height.is_none() || !std::path::Path::new(&dir)
+            .join("variants").join(format!("{stored}-poster.webp")).is_file();
+        (width, height, failed)
+    } else {
+        (None, None, false)
+    };
+    let previous: Option<String> = db.query_row(
+        "SELECT stored_name FROM attachments WHERE message_id=?1", [mid], |row| row.get(0)
+    ).optional().map_err(db_err)?;
+    db.execute("DELETE FROM attachments WHERE message_id=?1", [mid]).map_err(db_err)?;
+    db.execute(
+        "INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![mid, file.filename, file.content_type, stored, t, width, height],
+    ).map_err(db_err)?;
+    if let Some(previous) = previous {
+        let referenced: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE stored_name=?1 UNION SELECT 1 FROM inline_blobs WHERE stored_name=?1)",
+            [&previous], |row| row.get(0),
+        ).map_err(db_err)?;
+        if !referenced {
+            remove_attachment_files(&previous);
+        }
+    }
+    let plain: String = db.query_row("SELECT body FROM messages WHERE id=?1", [mid], |row| row.get(0)).map_err(db_err)?;
+    if plain.is_empty() {
+        refresh_file_only_search_entry(db, mid)?;
+    }
+    if processing_failed {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Ok(())
+}
 fn insert_message(
     s: &Arc<AppState>,
     u: &User,
@@ -6919,32 +6978,86 @@ async fn message_edit(
         u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
+fn authorized_message_edit(
+    s: &Arc<AppState>, headers: &HeaderMap, room_id: &str, message_id: &str,
+) -> Result<(i64, i64, r2d2::PooledConnection<SqliteConnectionManager>), StatusCode> {
+    let u = user(s, headers)?;
+    let rid = path_record_id(room_id)?;
+    let mid = path_record_id(message_id)?;
+    room_for(s, u.id, rid)?;
+    let db = pool(s)?;
+    let creator: Option<i64> = db.query_row(
+        "SELECT creator_id FROM messages WHERE id=?1 AND room_id=?2",
+        params![mid, rid], |row| row.get(0),
+    ).optional().map_err(db_err)?;
+    let creator = creator.ok_or(StatusCode::NOT_FOUND)?;
+    if !is_admin(&u) && creator != u.id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok((rid, mid, db))
+}
+async fn parse_message_update_request(
+    s: &Arc<AppState>, req: Request,
+) -> Result<(HashMap<String, String>, Option<Upload>), StatusCode> {
+    let multipart_form = req.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
+        .unwrap_or("").starts_with("multipart/form-data");
+    if multipart_form {
+        let mut multipart = Multipart::from_request(req, s).await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut values = HashMap::new();
+        let mut upload = None;
+        while let Some(mut field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+            let name = field.name().unwrap_or("").to_owned();
+            if name == "message[attachment]" {
+                values.insert(name.clone(), String::new());
+                let filename = field.file_name().unwrap_or("attachment").to_owned();
+                let content_type = field.content_type().unwrap_or("application/octet-stream").to_owned();
+                let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+                tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
+                let temporary = std::path::Path::new(&dir).join(format!("message-edit-upload-{}", Uuid::new_v4()));
+                let cleanup = UploadTemporaryFile(temporary.clone());
+                let mut staged = tokio::fs::File::create(&temporary).await.map_err(db_err)?;
+                let mut count = 0usize;
+                while let Some(chunk) = field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+                    count = count.checked_add(chunk.len()).ok_or(StatusCode::BAD_REQUEST)?;
+                    staged.write_all(&chunk).await.map_err(db_err)?;
+                }
+                staged.flush().await.map_err(db_err)?;
+                drop(staged);
+                if count > 0 {
+                    upload = Some(Upload { filename, content_type, bytes: Vec::new(), temporary: Some(cleanup) });
+                }
+            } else {
+                values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
+            }
+        }
+        Ok((values, upload))
+    } else {
+        let Form(values) = Form::<HashMap<String, String>>::from_request(req, s).await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        Ok((values, None))
+    }
+}
 async fn message_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path((room_id, message_id)): Path<(String, String)>,
-    Form(body_fields): Form<HashMap<String, String>>,
+    req: Request,
 ) -> AppResult {
-    let u = user(&s, &headers)?;
-    let rid = path_record_id(&room_id)?;
-    let mid = path_record_id(&message_id)?;
-    room_for(&s, u.id, rid)?;
-    let db = pool(&s)?;
-    let creator: Option<i64> = db
-        .query_row(
-            "SELECT creator_id FROM messages WHERE id=?1 AND room_id=?2",
-            params![mid, rid],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(db_err)?;
-    let creator = creator.ok_or(StatusCode::NOT_FOUND)?;
-    if !is_admin(&u) && creator != u.id {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let (rid, mid, db) = authorized_message_edit(&s, &headers, &room_id, &message_id)?;
+    let (body_fields, upload) = parse_message_update_request(&s, req).await?;
+    message_update_values(&s, &headers, &uri, rid, mid, db, body_fields, upload)
+}
+fn message_update_values(
+    s: &Arc<AppState>, headers: &HeaderMap, uri: &Uri,
+    rid: i64, mid: i64, db: r2d2::PooledConnection<SqliteConnectionManager>,
+    body_fields: HashMap<String, String>, mut upload: Option<Upload>,
+) -> AppResult {
     let query = uri.query().unwrap_or("").as_bytes();
-    let f = if parameter_group_present(query, "message") { fields(query).0 } else { body_fields };
+    let f = if parameter_group_present(query, "message") {
+        upload = None;
+        fields(query).0
+    } else { body_fields };
     let nested = f.keys().any(|key| key.starts_with("message[") && key.ends_with(']'));
     if f.get("message").is_some_and(|value| !value.trim().is_empty()) && !nested {
         return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
@@ -6955,19 +7068,20 @@ async fn message_update(
     let body = f.get("message[body]").map(String::as_str);
     let client_id = f.get("message[client_message_id]").map(String::as_str);
     if body.is_none() {
-        if let Some(client_id) = client_id {
-            let current: String = db.query_row(
-                "SELECT client_message_id FROM messages WHERE id=?1", [mid], |row| row.get(0)
+        let current: String = db.query_row(
+            "SELECT client_message_id FROM messages WHERE id=?1", [mid], |row| row.get(0)
+        ).map_err(db_err)?;
+        if client_id.is_some_and(|id| id != current) || upload.is_some() {
+            let updated_at = now();
+            let updated_at_ns = message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            db.execute(
+                "UPDATE messages SET client_message_id=COALESCE(?1,client_message_id),updated_at=?2,updated_at_ns=?3 WHERE id=?4",
+                params![client_id, updated_at, updated_at_ns, mid],
             ).map_err(db_err)?;
-            if current != client_id {
-                let updated_at = now();
-                let updated_at_ns = message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                db.execute(
-                    "UPDATE messages SET client_message_id=?1,updated_at=?2,updated_at_ns=?3 WHERE id=?4",
-                    params![client_id, updated_at, updated_at_ns, mid],
-                ).map_err(db_err)?;
-                touch_room(&db, rid)?;
+            if let Some(file) = upload.take() {
+                replace_message_attachment(&db, mid, file, &updated_at)?;
             }
+            touch_room(&db, rid)?;
         }
         drop(db);
         let unchanged = message_by_id(&s, rid, mid)?;
@@ -7072,6 +7186,9 @@ async fn message_update(
             }
         }
     }
+    if let Some(file) = upload.take() {
+        replace_message_attachment(&db, mid, file, &updated_at)?;
+    }
     drop(db);
     let updated_message = message_by_id(&s, rid, mid)?;
     message_update_response(&s, &headers, &uri, rid, mid, updated_message)
@@ -7108,11 +7225,13 @@ async fn message_post_override(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path((room_id, message_id)): Path<(String, String)>,
-    Form(form): Form<HashMap<String, String>>,
+    req: Request,
 ) -> AppResult {
+    let (form, upload) = parse_message_update_request(&s, req).await?;
     match form.get("_method").map(String::as_str) {
         Some("patch" | "put") => {
-            message_update(State(s), headers, OriginalUri(uri), Path((room_id, message_id)), Form(form)).await
+            let (rid, mid, db) = authorized_message_edit(&s, &headers, &room_id, &message_id)?;
+            message_update_values(&s, &headers, &uri, rid, mid, db, form, upload)
         }
         Some("delete") => message_delete(State(s), headers, OriginalUri(uri), Path((room_id, message_id))).await,
         _ => Err(StatusCode::METHOD_NOT_ALLOWED),

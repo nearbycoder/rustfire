@@ -101,7 +101,7 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
         db.execute("UPDATE sessions SET ip_address='127.0.0.1' WHERE token=?", [rust_token])
     rust_port, camp_port = free_port(), free_port()
     camp_env = dict(base_env, DATABASE_URL=f"sqlite3:{camp_db}", PORT=str(camp_port), PIDFILE=str(temp / f"puma-{index}.pid"))
-    rust = start_server(rust_db, rust_port)
+    rust = start_server(rust_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(temp / f"rust-uploads-{index}")})
     try:
         with open(temp / f"puma-{index}.log", "w+") as log:
             camp = subprocess.Popen(
