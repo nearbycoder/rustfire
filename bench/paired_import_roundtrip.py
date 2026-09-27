@@ -1,0 +1,146 @@
+"""Compare a live Campfire fixture with its offline Rustfire import.
+
+Run after cargo build --release with the pinned Ruby bundle and Redis.
+"""
+
+import argparse
+import base64
+import html
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import urllib.parse
+
+from direct_lookup import free_port, start_server, stop_server
+from paired_bot_admin import AvatarPreview, PNG, cleanup_campfire_uploads, multipart, request
+from paired_attachment_mime import post as post_attachment
+from paired_direct_lookup import login_campfire, seed_campfire, wait_for_server
+from paired_room_shell import AGENT, assert_equal, section
+
+
+def page(port, path, cookie, csrf):
+    status, _, body = request(port, "GET", path, cookie, csrf, extra_headers={"User-Agent": AGENT})
+    assert status == 200, (path, status)
+    return body
+
+
+def preview(port, document, cookie, csrf):
+    parser = AvatarPreview()
+    parser.feed(document.decode())
+    assert parser.src, "bot edit form has no avatar preview"
+    signed_path = urllib.parse.urlsplit(parser.src).path
+    status, location, _ = request(port, "GET", signed_path, cookie, csrf)
+    assert status == 302 and location, (status, location)
+    disk_path = urllib.parse.urlsplit(location).path
+    disk_status, _, body = request(port, "GET", disk_path, cookie, csrf)
+    assert disk_status == 200 and body == PNG, (disk_status, len(body))
+    return signed_path, body
+
+
+def attachment(port, document, cookie, csrf):
+    candidates = re.findall(r"/rails/active_storage/blobs/redirect/[^\"'<> ]+/notes\.txt", html.unescape(document.decode()))
+    assert candidates, "room page has no signed imported attachment link"
+    path = candidates[0]
+    status, location, _ = request(port, "GET", path, cookie, csrf)
+    assert status == 302 and location, (status, location)
+    disk_status, _, body = request(port, "GET", urllib.parse.urlsplit(location).path, cookie, csrf)
+    assert disk_status == 200 and body == b"Imported attachment\n", (disk_status, body)
+    return path
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--campfire-repo", type=Path, default=Path("/tmp/once-campfire-reference"))
+    parser.add_argument("--ruby", type=Path, default=Path("/tmp/rustfire-baseline/local/bin/ruby"))
+    parser.add_argument("--bundle-path", type=Path, default=Path("/tmp/rustfire-baseline/bundle"))
+    parser.add_argument("--sample-dir", type=Path)
+    args = parser.parse_args()
+    repository, ruby, bundle_path = args.campfire_repo.resolve(), args.ruby.resolve(), args.bundle_path.resolve()
+    revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repository, text=True).strip()
+    assert revision == "91d294f4a09f9bbe37f9548959bfcb43645678fb", revision
+    with tempfile.TemporaryDirectory(prefix="paired-import-roundtrip-") as directory:
+        temp = Path(directory)
+        source_database = repository / "storage/db/production.sqlite3"
+        camp_db, rust_db, uploads = temp / "campfire.sqlite3", temp / "rustfire.sqlite3", temp / "uploads"
+        camp_port, rust_port = free_port(), free_port()
+        env = seed_campfire(repository, ruby, bundle_path, source_database, camp_db, [], camp_port, temp)
+        generator_x = bytes.fromhex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
+        generator_y = bytes.fromhex("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
+        vapid_public = base64.urlsafe_b64encode(b"\x04" + generator_x + generator_y).rstrip(b"=").decode()
+        vapid_private = base64.urlsafe_b64encode(bytes(31) + b"\x01").rstrip(b"=").decode()
+        env["VAPID_PUBLIC_KEY"], env["VAPID_PRIVATE_KEY"] = vapid_public, vapid_private
+        log = (temp / "puma.log").open("w+")
+        process = subprocess.Popen((str(ruby), str(ruby.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"),
+            cwd=repository, env=env, stdout=log, stderr=log)
+        try:
+            wait_for_server(camp_port, process)
+            cookie, csrf = login_campfire(camp_port)
+            body, content_type = multipart("Imported Bot", "", avatar=True)
+            status, location, _ = request(camp_port, "POST", "/account/bots", cookie, csrf, body, content_type)
+            assert status == 302 and urllib.parse.urlsplit(location).path == "/account/bots", (status, location)
+            with sqlite3.connect(camp_db) as db:
+                bot_id = db.execute("SELECT id FROM users WHERE name='Imported Bot'").fetchone()[0]
+            message = urllib.parse.urlencode({"message[body]": "<div>Imported hello</div>"}).encode()
+            status, _, _ = request(camp_port, "POST", "/rooms/1/messages", cookie, csrf, message,
+                "application/x-www-form-urlencoded", {"Accept": "text/vnd.turbo-stream.html"})
+            assert status == 200, status
+            post_attachment(camp_port, cookie, csrf,
+                ("import-text", "notes.txt", "text/plain", b"Imported attachment\n"))
+            paths = {"bot_index": "/account/bots", "bot_edit": f"/account/bots/{bot_id}/edit", "room": "/rooms/1"}
+            source = {name: page(camp_port, path, cookie, csrf) for name, path in paths.items()}
+            source_preview, _ = preview(camp_port, source["bot_edit"], cookie, csrf)
+            source_attachment = attachment(camp_port, source["room"], cookie, csrf)
+        except Exception:
+            log.flush()
+            log.seek(0)
+            print(log.read()[-3000:])
+            cleanup_campfire_uploads(source_database, camp_db, repository)
+            raise
+        finally:
+            stop_server(process)
+            log.close()
+        try:
+            with sqlite3.connect(camp_db) as db:
+                db.execute("""INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
+                    VALUES(1,'https://push.example.test/import','test-p256dh','test-auth','test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""")
+            importer_env = dict(os.environ, RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE=env["SECRET_KEY_BASE"],
+                RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY=vapid_public, RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY=vapid_private)
+            command = (sys.executable, "tools/import_campfire.py", "--source-db", str(camp_db),
+                "--source-files", str(repository / "storage/files"), "--target-db", str(rust_db),
+                "--target-uploads", str(uploads), "--rustfire-bin", "target/release/rustfire")
+            result = subprocess.run(command, env=importer_env, check=True, capture_output=True, text=True)
+            print("import:", result.stdout.strip())
+            rust_process = start_server(rust_db, rust_port, {
+                "RUSTFIRE_UPLOAD_DIR": str(uploads),
+                "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"],
+            })
+            try:
+                target = {name: page(rust_port, path, cookie, csrf) for name, path in paths.items()}
+                target_preview, _ = preview(rust_port, target["bot_edit"], cookie, csrf)
+                target_attachment = attachment(rust_port, target["room"], cookie, csrf)
+            finally:
+                stop_server(rust_process)
+        finally:
+            cleanup_campfire_uploads(source_database, camp_db, repository)
+        assert source_preview == target_preview, (source_preview, target_preview)
+        print("imported original avatar signed path and bytes match")
+        assert source_attachment == target_attachment, (source_attachment, target_attachment)
+        print("imported message attachment signed path and bytes match")
+        if args.sample_dir:
+            args.sample_dir.mkdir(parents=True, exist_ok=True)
+            for label, documents in (("campfire", source), ("rustfire", target)):
+                for name, document in documents.items():
+                    (args.sample_dir / f"{label}-import-{name}.html").write_bytes(document)
+        for name in paths:
+            for part in ("head", "body"):
+                options = {"normalize_times": True, "normalize_avatar_paths": True, "normalize_blob_paths": True,
+                    "normalize_text_origins": True, "ignore_csrf_inputs": name == "room"}
+                assert_equal(f"imported {name} {part}", section(source[name], part, **options), section(target[name], part, **options))
+
+
+if __name__ == "__main__":
+    main()

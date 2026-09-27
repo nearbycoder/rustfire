@@ -33,7 +33,7 @@ AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) 
 
 
 class Section(HTMLParser):
-    def __init__(self, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False, normalize_avatar_paths=False, normalize_bot_keys=False):
+    def __init__(self, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False, normalize_avatar_paths=False, normalize_bot_keys=False, normalize_text_origins=False):
         super().__init__(convert_charrefs=True)
         self.target = target
         self.normalize_times = normalize_times
@@ -41,6 +41,7 @@ class Section(HTMLParser):
         self.normalize_blob_paths = normalize_blob_paths
         self.normalize_avatar_paths = normalize_avatar_paths
         self.normalize_bot_keys = normalize_bot_keys
+        self.normalize_text_origins = normalize_text_origins
         self.depth = 0
         self.tokens = []
 
@@ -93,13 +94,15 @@ class Section(HTMLParser):
     def handle_data(self, data):
         if self.depth and data.strip():
             text = " ".join(data.split()).replace("Campfire", "Rustfire")
+            if self.normalize_text_origins:
+                text = re.sub(r"http://127\.0\.0\.1(?::\d+)?", "<origin>", text)
             if self.target in {"message-area", "body"} and "$messageClasses$" in text:
                 text = "<message-template>"
             self.tokens.append(("text", text))
 
 
-def section(page, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False, normalize_avatar_paths=False, normalize_bot_keys=False):
-    parser = Section(target, normalize_times, ignore_csrf_inputs, normalize_blob_paths, normalize_avatar_paths, normalize_bot_keys)
+def section(page, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False, normalize_avatar_paths=False, normalize_bot_keys=False, normalize_text_origins=False):
+    parser = Section(target, normalize_times, ignore_csrf_inputs, normalize_blob_paths, normalize_avatar_paths, normalize_bot_keys, normalize_text_origins)
     parser.feed(page.decode())
     assert parser.tokens, f"Missing {target}"
     return parser.tokens
