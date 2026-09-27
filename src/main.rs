@@ -2598,6 +2598,11 @@ fn clean_og_text(input: &str) -> String {
 fn og_attributes(document: &str) -> HashMap<String, String> {
     let html = ParsedHtml::parse_document(document);
     let selector = Selector::parse("meta").unwrap();
+    let has_meta_encoding = html.select(&selector).any(|meta| {
+        meta.value().attr("charset").is_some_and(|value| !value.is_empty())
+            || (meta.value().attr("http-equiv").is_some_and(|value| value.eq_ignore_ascii_case("content-type"))
+                && meta.value().attr("content").is_some_and(|value| value.to_ascii_lowercase().contains("charset=")))
+    });
     let mut attributes = HashMap::new();
     for meta in html.select(&selector) {
         let property = meta
@@ -2609,7 +2614,15 @@ fn og_attributes(document: &str) -> HashMap<String, String> {
         };
         if matches!(key, "title" | "url" | "image" | "description") {
             if let Some(content) = meta.value().attr("content") {
-                attributes.insert(key.to_string(), content.to_string());
+                // Nokogiri's source implementation re-encodes meta content as
+                // binary when the document declares no charset. That drops
+                // every non-ASCII byte, including otherwise valid UTF-8.
+                let content = if has_meta_encoding {
+                    content.to_string()
+                } else {
+                    content.chars().filter(char::is_ascii).collect()
+                };
+                attributes.insert(key.to_string(), content);
             }
         }
     }
@@ -13676,6 +13689,19 @@ mod tests {
         assert!(!super::acceptable_og_document_response(axum::http::StatusCode::CREATED, Some("text/html"), None));
         assert!(!super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("image/jpeg"), None));
         assert!(!super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("text/html"), Some(5 * 1024 * 1024 + 1)));
+    }
+    #[test]
+    fn opengraph_meta_encoding_matches_campfire() {
+        for (declaration, expected) in [
+            ("", "Caf  rsum"),
+            ("<meta charset='utf-8'>", "Café – résumé"),
+            ("<meta http-equiv='Content-Type' content='text/html; charset=utf-8'>", "Café – résumé"),
+        ] {
+            let html = format!("<html><head>{declaration}<meta property='og:description' content='Café – résumé'></head></html>");
+            assert_eq!(super::og_attributes(&html).get("description").unwrap(), expected);
+        }
+        let html = "<meta property='og:description' content='Hello â\u{0080}\u{0099}World'>";
+        assert_eq!(super::og_attributes(html).get("description").unwrap(), "Hello World");
     }
     #[test]
     fn live_message_replace_requests_scroll_maintenance() {
