@@ -2220,6 +2220,24 @@ async fn multipart_authenticity_valid(
         }
     }
 }
+async fn multipart_profile_method(bytes: &Bytes, content_type: &str) -> Option<String> {
+    let Ok(boundary) = multer::parse_boundary(content_type) else {
+        return None;
+    };
+    let mut multipart = multer::Multipart::new(Body::from(bytes.clone()).into_data_stream(), boundary);
+    let mut method = None;
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) if field.name() == Some("_method") => {
+                let Ok(value) = field.text().await else { return None };
+                method = Some(value);
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return method,
+            Err(_) => return None,
+        }
+    }
+}
 fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> Response {
     let media = error_media_type(headers, uri);
     let json = media.as_bytes().starts_with(b"application/json");
@@ -3289,18 +3307,24 @@ async fn reject_banned_ip(
             }
             request = Request::from_parts(parts, Body::from(bytes));
         }
-        if path.starts_with("/users/") && path.ends_with("/profile") && request.method() == Method::POST
-            && request.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded"))
-        {
+        if path.starts_with("/users/") && path.ends_with("/profile") && request.method() == Method::POST {
             let (parts, body) = request.into_parts();
             let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
                 Ok(bytes) => bytes,
                 Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
             };
-            let tunneled = form_urlencoded::parse(&bytes).any(|(key, value)| {
-                key == "_method" && matches!(value.as_ref(), "patch" | "put")
-            });
+            let content_type = parts.headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("");
+            let body_method = if content_type.starts_with("application/x-www-form-urlencoded") {
+                form_urlencoded::parse(&bytes).filter(|(key, _)| key == "_method")
+                    .map(|(_, value)| value.into_owned()).last()
+            } else if content_type.starts_with("multipart/form-data") {
+                multipart_profile_method(&bytes, content_type).await
+            } else {
+                None
+            };
+            let tunneled = body_method.or_else(|| parts.headers.get("x-http-method-override")
+                .and_then(|value| value.to_str().ok()).map(str::to_owned))
+                .is_some_and(|value| value.eq_ignore_ascii_case("patch") || value.eq_ignore_ascii_case("put"));
             if !tunneled {
                 return rails_error_response(StatusCode::NOT_FOUND, &parts.headers, &parts.uri);
             }
