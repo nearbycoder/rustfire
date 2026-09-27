@@ -1330,15 +1330,29 @@ fn generate_inline_image_variant(input: &std::path::Path, output: &std::path::Pa
     }
     let extension = output.extension().and_then(|extension| extension.to_str()).unwrap_or("png");
     let temporary = parent.join(format!("inline-{}.{}", Uuid::new_v4(), extension));
-    let width = width.to_string();
-    let height = height.to_string();
-    let converted = std::process::Command::new("vips")
-        .arg("thumbnail")
-        .arg(input)
-        .arg(&temporary)
-        .args([&width, "--height", &height, "--size", "down"])
-        .output()
-        .is_ok_and(|result| result.status.success());
+    let mask = std::path::Path::new("static/vips-sharpen-mask.txt");
+    let converted = if vips::thumbnail_and_sharpen_sized(input, &temporary, mask, width as i32, height as i32) {
+        true
+    } else {
+        let stage = parent.join(format!("inline-{}.v", Uuid::new_v4()));
+        let resized = std::process::Command::new("vips")
+            .arg("thumbnail")
+            .arg(input)
+            .arg(&stage)
+            .args([&width.to_string(), "--height", &height.to_string(), "--size", "down"])
+            .output()
+            .is_ok_and(|result| result.status.success());
+        let sharpened = resized && std::process::Command::new("vips")
+            .arg("conv")
+            .arg(&stage)
+            .arg(&temporary)
+            .arg(mask)
+            .args(["--precision", "integer"])
+            .output()
+            .is_ok_and(|result| result.status.success());
+        let _ = std::fs::remove_file(stage);
+        sharpened
+    };
     let published = converted && std::fs::rename(&temporary, output).is_ok();
     if !published {
         let _ = std::fs::remove_file(&temporary);
@@ -1838,6 +1852,66 @@ fn render_imported_inline_files(
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok((rendered, used))
+}
+fn flatten_inline_blob_presentation(
+    html: &str,
+    used: &[i64],
+    signing_key: &[u8],
+    imported_key: Option<&[u8]>,
+) -> String {
+    if used.is_empty() {
+        return html.to_string();
+    }
+    static ATTACHMENT: OnceLock<Regex> = OnceLock::new();
+    static WRAPPER: OnceLock<Regex> = OnceLock::new();
+    let attachment = ATTACHMENT.get_or_init(|| Regex::new(r"(?is)<action-text-attachment\b[^>]*>.*?</action-text-attachment>").unwrap());
+    let wrapper = WRAPPER.get_or_init(|| Regex::new(r"(?i)</?(?:action-text-attachment|figure|figcaption)\b[^>]*>").unwrap());
+    let selector = Selector::parse("action-text-attachment[sgid]").unwrap();
+    attachment.replace_all(html, |capture: &regex::Captures<'_>| {
+        let fragment = ParsedHtml::parse_fragment(&capture[0]);
+        let id = fragment.select(&selector).next()
+            .and_then(|node| node.value().attr("sgid"))
+            .and_then(|sgid| campfire_blob_id_from_sgid(signing_key, sgid)
+                .or_else(|| imported_key.and_then(|key| campfire_blob_id_from_sgid(key, sgid))));
+        if id.is_some_and(|id| used.contains(&id)) {
+            wrapper.replace_all(&capture[0], "").to_string()
+        } else {
+            capture[0].to_string()
+        }
+    }).to_string()
+}
+fn link_uploaded_inline_blobs(
+    db: &rusqlite::Connection,
+    message_id: i64,
+    input: &str,
+    signing_key: &[u8],
+    imported_key: Option<&[u8]>,
+) -> Result<Vec<i64>, StatusCode> {
+    if !input.contains("action-text-attachment") {
+        return Ok(Vec::new());
+    }
+    let document = ParsedHtml::parse_fragment(input);
+    let selector = Selector::parse("action-text-attachment[sgid]").unwrap();
+    let mut linked = Vec::new();
+    for attachment in document.select(&selector) {
+        let Some(id) = attachment.value().attr("sgid").and_then(|sgid| {
+            campfire_blob_id_from_sgid(signing_key, sgid)
+                .or_else(|| imported_key.and_then(|key| campfire_blob_id_from_sgid(key, sgid)))
+        }) else { continue };
+        db.execute(
+            "INSERT OR IGNORE INTO inline_blobs(id,filename,content_type,stored_name,byte_size,created_at) SELECT id,filename,content_type,storage_key,byte_size,created_at FROM direct_upload_blobs WHERE id=?1 AND uploaded=1",
+            [id],
+        ).map_err(db_err)?;
+        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM inline_blobs WHERE id=?1)", [id], |row| row.get(0)).map_err(db_err)?;
+        if exists {
+            db.execute("INSERT OR IGNORE INTO inline_embeds(message_id,blob_id) VALUES(?1,?2)", params![message_id,id]).map_err(db_err)?;
+            db.execute("DELETE FROM direct_upload_blobs WHERE id=?1", [id]).map_err(db_err)?;
+            if !linked.contains(&id) {
+                linked.push(id);
+            }
+        }
+    }
+    Ok(linked)
 }
 fn mention_ids(input: &str, signing_key: &[u8], imported_key: Option<&[u8]>) -> Vec<i64> {
     if !input.contains("application/vnd.campfire.mention")
@@ -5473,7 +5547,7 @@ fn insert_message(
         Vec::new()
     };
     let db = pool(s)?;
-    let (plain, body_html) = if rich && !body.trim().is_empty() {
+    let (mut plain, mut body_html) = if rich && !body.trim().is_empty() {
         let cleaned = strip_disallowed_rich_tags(body);
         let (trusted, plain_source) = replace_mention_attachments(
             cleaned.as_deref().unwrap_or(body),
@@ -5515,6 +5589,31 @@ fn insert_message(
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     db.execute("INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich && !body.trim().is_empty() {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
+    if rich {
+        let normalized = action_text_webhook_html(body);
+        let cleaned = strip_disallowed_rich_tags(&normalized);
+        let inline_input = cleaned.as_deref().unwrap_or(&normalized);
+        if !link_uploaded_inline_blobs(&db, id, inline_input, &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?.is_empty() {
+            let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
+            let (inline, used) = render_imported_inline_files(
+                inline_input, &db, id,
+                &s.mention_signing_key, s.imported_mention_signing_key.as_deref(), blob_key, true,
+            )?;
+            let (trusted, plain_source) = replace_mention_attachments(
+                &inline, &db, &s.mention_signing_key,
+                s.imported_mention_signing_key.as_deref(),
+                s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key),
+            )?;
+            let (mut rendered_plain, html) = rich_body_trusted(&trusted, request_host);
+            if plain_source != trusted {
+                rendered_plain = rich_body_trusted(&plain_source, request_host).0;
+            }
+            let html = flatten_inline_blob_presentation(&html, &used, &s.mention_signing_key, s.imported_mention_signing_key.as_deref());
+            db.execute("UPDATE messages SET body=?1,body_html=?2 WHERE id=?3", params![rendered_plain,html,id]).map_err(db_err)?;
+            plain = rendered_plain;
+            body_html = Some(html);
+        }
+    }
     touch_room(&db, rid)?;
     let mut valid_mentions = Vec::new();
     for mentioned_id in candidate_mentions {
@@ -6228,9 +6327,11 @@ async fn message_update(
     let body = form_value(&f, "body", "message[body]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let rich = matches!(form_value(&f, "format", "message[format]"), None | Some("html"));
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
+    let mut newly_linked = Vec::new();
     let (plain, body_html, body_source, used_inline) = if rich {
         let normalized = action_text_webhook_html(body);
         let cleaned = strip_disallowed_rich_tags(&normalized);
+        newly_linked = link_uploaded_inline_blobs(&db, mid, cleaned.as_deref().unwrap_or(&normalized), &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?;
         let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
         let (inline, used) = render_imported_inline_files(
             cleaned.as_deref().unwrap_or(&normalized),
@@ -6268,6 +6369,7 @@ async fn message_update(
             )?;
             plain = action_text_plain_body(&original_plain);
         }
+        let html = flatten_inline_blob_presentation(&html, &used, &s.mention_signing_key, s.imported_mention_signing_key.as_deref());
         (plain, Some(html), Some(normalized), used)
     } else {
         (body.to_string(), None, None, Vec::new())
@@ -6290,11 +6392,17 @@ async fn message_update(
     if plain.is_empty() {
         refresh_file_only_search_entry(&db, mid)?;
     }
-    for blob_id in old_inline.iter().filter(|id| !used_inline.contains(id)) {
+    let mut linked_inline = old_inline;
+    for id in newly_linked {
+        if !linked_inline.contains(&id) {
+            linked_inline.push(id);
+        }
+    }
+    for blob_id in linked_inline.iter().filter(|id| !used_inline.contains(id)) {
         db.execute("DELETE FROM inline_embeds WHERE message_id=?1 AND blob_id=?2", params![mid, blob_id])
             .map_err(db_err)?;
     }
-    purge_orphan_inline_blobs(&db, &old_inline)?;
+    purge_orphan_inline_blobs(&db, &linked_inline)?;
     touch_room(&db, rid)?;
     db.execute("DELETE FROM message_mentions WHERE message_id=?1", [mid])
         .map_err(db_err)?;
@@ -10361,7 +10469,8 @@ async fn signed_representation_get(
     Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{disk_token}/{}", encoded_blob_filename(&variant_filename)))))
 }
 fn remove_attachment_files(stored: &str) {
-    if Uuid::parse_str(stored).is_err() {
+    let rails_key = stored.len() == 28 && stored.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if Uuid::parse_str(stored).is_err() && !rails_key {
         return;
     }
     let dir = std::path::PathBuf::from(
@@ -11358,11 +11467,12 @@ fn render_imported_rich_text(
         let tx = conn.transaction()?;
         for (id, source, missing_search) in &batch {
             let cleaned = strip_disallowed_rich_tags(source);
-            let (inline, _) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
+            let (inline, used) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let (trusted, plain_source) = replace_mention_attachments(&inline, &tx, signing_key, imported_key, avatar_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;
             let (mut plain, html) = rich_body_trusted(&trusted, None);
+            let html = flatten_inline_blob_presentation(&html, &used, signing_key, imported_key);
             if plain_source != trusted {
                 plain = rich_body_trusted(&plain_source, None).0;
             }

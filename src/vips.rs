@@ -32,6 +32,10 @@ fn c_path(path: &Path) -> Option<CString> {
 }
 
 pub fn thumbnail_and_sharpen(input: &Path, output: &Path, mask: &Path) -> bool {
+    thumbnail_and_sharpen_sized(input, output, mask, 1200, 800)
+}
+
+pub fn thumbnail_and_sharpen_sized(input: &Path, output: &Path, mask: &Path, width: i32, height: i32) -> bool {
     static INITIALIZED: OnceLock<bool> = OnceLock::new();
     if !*INITIALIZED.get_or_init(|| unsafe { vips_init(c"rustfire".as_ptr()) == 0 }) {
         return false;
@@ -46,9 +50,9 @@ pub fn thumbnail_and_sharpen(input: &Path, output: &Path, mask: &Path) -> bool {
         vips_thumbnail(
             input.as_ptr(),
             &mut thumbnail.0,
-            1200,
+            width,
             c"height".as_ptr(),
-            800 as c_int,
+            height as c_int,
             c"size".as_ptr(),
             2 as c_int, // VIPS_SIZE_DOWN
             std::ptr::null::<c_void>(),
