@@ -10018,7 +10018,7 @@ async fn bot_messages_get(
         .replace('&', "\\u0026")
         .replace('<', "\\u003c")
         .replace('>', "\\u003e");
-    let mut r = ([(header::CONTENT_TYPE, "application/json")], json).into_response();
+    let mut r = ([(header::CONTENT_TYPE, "application/json; charset=utf-8")], json).into_response();
     r.headers_mut()
         .insert("x-total-count", count.to_string().parse().unwrap());
     if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
@@ -11319,9 +11319,10 @@ async fn health(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Response {
     let json = requested_format(&uri).as_deref() == Some("json")
         || (requested_format(&uri).is_none() && headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with("application/json")));
     if json {
-        ([(header::CONTENT_TYPE, "application/json; charset=UTF-8")], "ok").into_response()
+        let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        ([(header::CONTENT_TYPE, "application/json; charset=utf-8")], format!(r#"{{"status":"up","timestamp":"{timestamp}"}}"#)).into_response()
     } else {
-        Html("ok").into_response()
+        Html("<!DOCTYPE html><html><body style=\"background-color: green\"></body></html>").into_response()
     }
 }
 fn generate_join_code() -> Result<String, StatusCode> {
