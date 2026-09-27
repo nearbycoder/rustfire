@@ -86,7 +86,7 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
         connection.close()
 
 
-def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=b"", content_type="application/x-www-form-urlencoded", role="admin", query="", after_request=None):
+def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=b"", content_type="application/x-www-form-urlencoded", role="admin", query="", before_request=None, after_request=None):
     method, path, accept = case
     rust_token = "benchmark-member-session" if role == "member" else "benchmark-session"
     rust_csrf = "benchmark-member-csrf" if role == "member" else "benchmark-csrf"
@@ -113,6 +113,8 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
                 email = "member@example.invalid" if role == "member" else "benchmark@example.invalid"
                 camp_cookie, camp_csrf = login_campfire(camp_port, email=email)
                 request_path = path + ("?" + query if query else "")
+                if before_request is not None:
+                    before_request(rust_port, rust_cookie, camp_port, camp_cookie)
                 rust_result = request(rust_port, rust_db, rust_cookie, rust_csrf, method, request_path, accept, body, content_type, user_id)
                 camp_result = request(camp_port, camp_db, camp_cookie, camp_csrf, method, request_path, accept, body, content_type, user_id)
                 if after_request is not None:

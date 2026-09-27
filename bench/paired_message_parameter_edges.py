@@ -7,8 +7,10 @@ its own source and Rustfire server. Run after ``cargo build --release``.
 import argparse
 import hashlib
 import html
+import json
 import pathlib
 import re
+import select
 import sqlite3
 import subprocess
 import tempfile
@@ -17,7 +19,8 @@ import urllib.request
 
 from paired_attachment_mime import image_preview, video_poster
 from paired_link_preview import Presentation
-from direct_lookup import free_port
+from paired_room_shell import Markup
+from direct_lookup import ROOT, free_port
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis
 from paired_direct_lookup import seed_campfire, seed_rustfire
 from paired_turbo_fanout import seed_boost_message
@@ -204,6 +207,28 @@ def replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, kind):
     return preview(rust_port, rust_cookie), preview(camp_port, camp_cookie)
 
 
+def normalized_replace_stream(payload, target):
+    parsed = Markup()
+    parsed.feed(payload)
+    tokens = []
+    for token in parsed.tokens:
+        if token[0] != "start":
+            tokens.append(token)
+            continue
+        _, tag, attrs = token
+        normalized = []
+        for key, value in attrs:
+            if value is not None:
+                value = re.sub(
+                    r"(/rails/active_storage/(?:blobs|representations)/(?:redirect|proxy)/)(?:[^/]+/)+(?=[^/?]+(?:\?|$))",
+                    r"\1<signed>/", value,
+                )
+            normalized.append((key, value))
+        tokens.append(("start", tag, tuple(normalized)))
+    assert tokens[0] == ("start", "turbo-stream", (("action", "replace"), ("maintain_scroll", "true"), ("target", target))), tokens[:2]
+    return tuple(tokens)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     selected = parser.add_mutually_exclusive_group()
@@ -214,7 +239,10 @@ def main():
     selected.add_argument("--edit-post-only", action="store_true", help="check only URL-encoded POST method-override edits")
     selected.add_argument("--edit-multipart-post-only", action="store_true", help="check only multipart POST method-override edits")
     parser.add_argument("--label", help="run only a named case from the selected group")
+    parser.add_argument("--edit-stream", action="store_true", help="also compare one signed room replacement event per edit")
     args = parser.parse_args()
+    if args.edit_stream and not (args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only):
+        parser.error("--edit-stream requires an edit case group")
     ordinary = tuple((label, body, accept, "", "application/x-www-form-urlencoded") for label, body, accept in FORMS)
     query = tuple((label, body, accept, query, "application/x-www-form-urlencoded") for label, body, accept, query in QUERY_FORMS)
     multipart = tuple((label, *multipart_body(parts), query) for label, parts, query in MULTIPART_QUERY_FORMS)
@@ -257,13 +285,47 @@ def main():
                     camp_old.write_bytes(OLD_FILE)
                 method, path = ("POST" if args.edit_post_only or args.edit_multipart_post_only else "PATCH", "/rooms/1/messages/1") if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only else ("POST", "/rooms/1/messages")
                 preview_kind = "image" if label in ("edit multipart image", "POST multipart image") else "video" if label == "edit multipart video" else "malformed" if label in ("edit multipart malformed JPEG", "POST multipart malformed JPEG") else None
-                rust_result, camp_result = run_case(
-                    (method, path, accept), index, temp,
-                    rust_base, camp_base, checkout, base_env, redis_port, body=body, query=query,
-                    content_type=content_type,
-                    after_request=(lambda rust_port, rust_cookie, camp_port, camp_cookie:
-                                   replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, preview_kind)) if preview_kind else None,
-                )
+                stream_expected = args.edit_stream and label != "edit query scalar"
+                stream_target = "presentation_message_edge-1" if label == "edit query client ID" else "presentation_message_boost-fixture"
+                captures = []
+                def start_captures(rust_port, rust_cookie, camp_port, camp_cookie):
+                    for port, cookie in ((rust_port, rust_cookie), (camp_port, camp_cookie)):
+                        capture = subprocess.Popen(
+                            ["node", "bench/capture_message_replace.mjs", "--base", f"http://127.0.0.1:{port}",
+                             "--cookie", cookie, "--target", stream_target],
+                            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        )
+                        captures.append(capture)
+                        ready, _, _ = select.select([capture.stdout], [], [], 20)
+                        marker = capture.stdout.readline().strip() if ready else ""
+                        if marker != "READY":
+                            output, error = capture.communicate(timeout=5)
+                            raise AssertionError((label, "socket capture not ready", marker, output, error))
+
+                def inspect_after(rust_port, rust_cookie, camp_port, camp_cookie):
+                    preview = replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, preview_kind) if preview_kind else (None, None)
+                    if not stream_expected:
+                        return preview
+                    streams = []
+                    for capture in captures:
+                        output, error = capture.communicate(timeout=35)
+                        assert capture.returncode == 0, (label, output, error)
+                        streams.append(normalized_replace_stream(json.loads(output.strip().splitlines()[-1]), stream_target))
+                    return (preview[0], streams[0]), (preview[1], streams[1])
+
+                try:
+                    rust_result, camp_result = run_case(
+                        (method, path, accept), index, temp,
+                        rust_base, camp_base, checkout, base_env, redis_port, body=body, query=query,
+                        content_type=content_type,
+                        before_request=start_captures if stream_expected else None,
+                        after_request=inspect_after if preview_kind or stream_expected else None,
+                    )
+                finally:
+                    for capture in captures:
+                        if capture.poll() is None:
+                            capture.kill()
+                            capture.communicate()
                 rust_files = temp / f"rust-uploads-{index}" if args.edit_multipart_only or args.edit_multipart_post_only else None
                 camp_files = checkout / "storage/files" if args.edit_multipart_only or args.edit_multipart_post_only else None
                 rust_saved = saved_message(temp / f"rust-{index}.sqlite3", False, rust_files)

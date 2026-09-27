@@ -5942,21 +5942,13 @@ fn replace_message_attachment(db: &rusqlite::Connection, mid: i64, mut file: Upl
     } else {
         std::fs::write(&input, &file.bytes).map_err(db_err)?;
     }
-    let (width, height) = if let Some(format) = image_format(&file.content_type) {
-        let (width, height) = analyze_image_and_thumbnail(&input, &stored, "thumb", format);
-        (width.map(|value| value as f64), height.map(|value| value as f64))
-    } else if safe_inline_video(&file.content_type) {
-        analyze_video_and_poster(&input, &stored)
-    } else {
-        (None, None)
-    };
     let previous: Option<String> = db.query_row(
         "SELECT stored_name FROM attachments WHERE message_id=?1", [mid], |row| row.get(0)
     ).optional().map_err(db_err)?;
     db.execute("DELETE FROM attachments WHERE message_id=?1", [mid]).map_err(db_err)?;
     db.execute(
-        "INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![mid, file.filename, file.content_type, stored, t, width, height],
+        "INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at) VALUES(?1,?2,?3,?4,?5)",
+        params![mid, file.filename, file.content_type, stored, t],
     ).map_err(db_err)?;
     if let Some(previous) = previous {
         let referenced: bool = db.query_row(
