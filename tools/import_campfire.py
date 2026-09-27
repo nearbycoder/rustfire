@@ -153,6 +153,9 @@ def import_data(source, target, source_files, uploads):
         source, target, "push_subscriptions",
         ("id", "user_id", "endpoint", "p256dh_key", "auth_key", "user_agent", "created_at", "updated_at"),
     )
+    push_sequence = source.execute("SELECT seq FROM sqlite_sequence WHERE name='push_subscriptions'").fetchone()
+    if push_sequence:
+        target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name='push_subscriptions'", push_sequence)
     counts["sessions"] = copy_table(
         source, target, "sessions",
         ("id", "user_id", "token", "created_at", "last_active_at", "ip_address"),

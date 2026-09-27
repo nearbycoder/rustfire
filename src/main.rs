@@ -5093,7 +5093,7 @@ async fn push_subscriptions_post(
     if let Some(id) = existing {
         db.execute("UPDATE push_subscriptions SET updated_at=?1 WHERE id=?2", params![t, id]).map_err(db_err)?;
     } else {
-        db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)", params![u.id, value.endpoint, value.p256dh_key, value.auth_key, agent, t]).map_err(db_err)?;
+        db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM push_subscriptions))+1 FROM id_sequences WHERE name='push_subscriptions'),?1,?2,?3,?4,?5,?6,?6)", params![u.id, value.endpoint, value.p256dh_key, value.auth_key, agent, t]).map_err(db_err)?;
     }
     s.has_push_subscriptions.store(true, Ordering::Relaxed);
     Ok(StatusCode::OK.into_response())
@@ -11361,6 +11361,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
             ALTER TABLE push_subscriptions_new RENAME TO push_subscriptions;")?;
         tx.commit()?;
     }
+    conn.execute_batch("INSERT INTO id_sequences(name,last_id) VALUES('push_subscriptions',COALESCE((SELECT MAX(id) FROM push_subscriptions),0)) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS push_subscription_id_track AFTER INSERT ON push_subscriptions BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='push_subscriptions'; END;")?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_keys ON push_subscriptions(user_id,endpoint,p256dh_key,auth_key)", [])?;
     let has_search_updated_at: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('searches') WHERE name='updated_at')",

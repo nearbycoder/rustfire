@@ -208,6 +208,7 @@ def main():
             fixture.execute("DELETE FROM message_search_index WHERE rowid IN (1,2)")
             fixture.execute("UPDATE sqlite_sequence SET seq=40 WHERE name='users'")
             fixture.execute("UPDATE sqlite_sequence SET seq=50 WHERE name='rooms'")
+            fixture.execute("UPDATE sqlite_sequence SET seq=60 WHERE name='push_subscriptions'")
             fixture.commit()
         target_db = root / "rustfire.sqlite3"
         target_uploads = root / "uploads"
@@ -235,6 +236,7 @@ def main():
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='boosts'").fetchone() == (20,)
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='users'").fetchone() == (40,)
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='rooms'").fetchone() == (50,)
+            assert imported.execute("SELECT last_id FROM id_sequences WHERE name='push_subscriptions'").fetchone() == (60,)
             assert imported.execute("SELECT count(*) FROM sqlite_master WHERE name='import_missing_search'").fetchone() == (0,)
             assert imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=1").fetchone() == (
                 "Hello\n• One\n• Two", source_body, source_body,
@@ -360,6 +362,14 @@ def main():
             with sqlite3.connect(target_db) as imported:
                 assert imported.execute("SELECT id FROM users WHERE name='After import'").fetchone() == (41,)
                 assert imported.execute("SELECT id FROM rooms WHERE name='After import'").fetchone() == (51,)
+            create_push = urllib.request.Request(f"http://127.0.0.1:{port}/users/me/push_subscriptions",
+                data=urllib.parse.urlencode({"push_subscription[endpoint]": "https://fcm.googleapis.com/fcm/send/imported-next",
+                    "push_subscription[p256dh_key]": "new-key", "push_subscription[auth_key]": "new-auth"}).encode(),
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token})
+            with urllib.request.urlopen(create_push, timeout=10) as response:
+                assert response.status == 200
+            with sqlite3.connect(target_db) as imported:
+                assert imported.execute("SELECT id FROM push_subscriptions WHERE p256dh_key='new-key'").fetchone() == (61,)
             blob_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"ActiveStorage", 1000, 64)
             blob_payload = json.dumps({"_rails": {"data": 10, "pur": "blob_id"}}, separators=(",", ":")).encode()
             blob_encoded = base64.b64encode(blob_payload).decode()

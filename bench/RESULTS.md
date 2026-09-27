@@ -4,6 +4,8 @@
 
 After Rustfire began retaining Campfire's deleted-user and deleted-room ID high-water marks, `python tests/import_campfire.py` imported a fixture whose highest live user and room IDs were 3 and 1 but whose saved sequences were 40 and 50. Creating a bot and open room through Rustfire's HTTP routes then assigned IDs 41 and 51. The 46 Rust unit tests and paired first-run and bot-administration probes passed with the changed allocator.
 
+The same importer check now sets Campfire's push-subscription sequence to 60 with only IDs 1 and 2 live. A new registration through the imported Rustfire account receives ID 61, preserving the identity used by subscription delete and test-notification controls. `python bench/paired_push_registration.py` also passes after a release rebuild, including upgrade of Rustfire's older unique-endpoint table and Campfire's exact-match touch behavior.
+
 `python bench/paired_sidebar_fanout.py --sockets 100 --rooms 10 --campfire-workers 22` passed in both server orders using the release build. Each app created ten open rooms with 51 memberships each and delivered all 1,000 expected, source-shaped sidebar events with no missed or unexpected events. The sampled payloads matched byte for byte. The measured ten-request interval was 50 ms for Rustfire versus 640 ms for Campfire with Rustfire first, and 56 ms versus 664 ms with Campfire first. This short same-host burst checks room creation and delivery at 100 sockets; it does not establish sustained or maximum capacity.
 
 ## Paired QR code response parity
