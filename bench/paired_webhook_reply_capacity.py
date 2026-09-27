@@ -194,7 +194,7 @@ def sampled_trial(process_pids, *args):
     return report, signatures
 
 
-def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, sockets, reply_sample=None, redis_port=None):
+def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, sockets, post_events=None, reply_events=None, redis_port=None):
     if not sockets:
         return sampled_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, redis_port)
     command = [
@@ -204,8 +204,10 @@ def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate,
         "--bot-replies", str(posts), "--timeout", str(round((timeout + posts / rate + 30) * 1000)),
         "--await-start", "1",
     ]
-    if reply_sample:
-        command.extend(("--reply-sample-file", str(reply_sample)))
+    if reply_events:
+        command.extend(("--reply-events-file", str(reply_events)))
+    if post_events:
+        command.extend(("--events-file", str(post_events)))
     capture = subprocess.Popen(command, cwd=ROOT, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         ready, _, _ = select.select([capture.stdout], [], [], 60)
@@ -228,29 +230,59 @@ def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate,
             capture.communicate(timeout=5)
 
 
-def check_reply_samples(camp_file, rust_file):
-    parsed = []
-    for path in (camp_file, rust_file):
-        source = path.read_text()
-        matched = re.search(r"\bdata-message-id=['\"](\d+)['\"]", source)
-        assert matched, f"Missing reply message ID in {path}"
-        message_id = int(matched.group(1))
-        tags = StreamWithoutCsrfInputs()
-        tags.feed(source)
-        check_message_times(tags.attributes, path)
-        parsed.append((tags, message_id))
-    (camp, camp_id), (rust, rust_id) = parsed
-    assert camp.tags == rust.tags, "Bot reply append tags differ"
-    assert camp.attribute_keys == rust.attribute_keys, "Bot reply append attribute keys differ"
+def check_reply_events(camp_file, rust_file, camp_db, rust_db, posts):
+    def parsed_events(path, database, campfire):
+        events = json.loads(path.read_text())
+        expected_ids = {message_id for message_id, _ in saved_replies(database, campfire)}
+        assert len(events) == posts and {message_id for message_id, _ in events} == expected_ids, (path, len(events), len(expected_ids))
+        result = []
+        for index, (message_id, source) in enumerate(events, 1):
+            matched = re.search(r"\bdata-message-id=['\"](\d+)['\"]", source)
+            assert matched and int(matched.group(1)) == message_id, (path, index, message_id)
+            tags = StreamWithoutCsrfInputs()
+            tags.feed(source)
+            check_message_times(tags.attributes, f"{path} reply {index}")
+            values = stable_multi_stream_values(tags.attributes, message_id, 1)
+            stable_values = [(tag, tuple((key, re.sub(r"(?<=message_)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<client-id>", value) if value else value) for key, value in attrs)) for tag, attrs in values]
+            result.append((tags.tags, tags.attribute_keys, stable_values, tags.text))
+        return result
 
-    def stable_reply_values(attributes, message_id):
-        values = stable_multi_stream_values(attributes, message_id, 1)
-        return [(tag, tuple((key, re.sub(r"(?<=message_)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<client-id>", value) if value else value) for key, value in attrs)) for tag, attrs in values]
+    camp_events = parsed_events(camp_file, camp_db, True)
+    rust_events = parsed_events(rust_file, rust_db, False)
+    for index, (camp, rust) in enumerate(zip(camp_events, rust_events), 1):
+        assert camp[0] == rust[0], f"Bot reply append {index} tags differ"
+        assert camp[1] == rust[1], f"Bot reply append {index} attribute keys differ"
+        assert camp[2] == rust[2], next(((item, left, right) for item, (left, right) in enumerate(zip(camp[2], rust[2])) if left != right), f"Bot reply append {index} attribute lengths differ")
+        assert camp[3] == rust[3], f"Bot reply append {index} text differs"
+    return posts
 
-    camp_values = stable_reply_values(camp.attributes, camp_id)
-    rust_values = stable_reply_values(rust.attributes, rust_id)
-    assert camp_values == rust_values, next(((index, left, right) for index, (left, right) in enumerate(zip(camp_values, rust_values)) if left != right), "Bot reply append attribute lengths differ")
-    assert camp.text == rust.text, "Bot reply append text differs"
+
+def check_post_events(camp_file, rust_file, camp_db, rust_db, posts):
+    def parsed_events(path, database):
+        events = json.loads(path.read_text())
+        assert len(events) == posts, (path, len(events), posts)
+        with sqlite3.connect(database) as db:
+            expected_ids = dict(db.execute("SELECT client_message_id,id FROM messages WHERE client_message_id LIKE 'paired-reply-load-%' AND creator_id=1"))
+        assert len(expected_ids) == posts, (path, len(expected_ids), posts)
+        result = []
+        for index, source in enumerate(events, 1):
+            matched = re.search(r"\bdata-message-id=['\"](\d+)['\"]", source)
+            message_id = expected_ids[f"paired-reply-load-{index:05d}"]
+            assert matched and int(matched.group(1)) == message_id, (path, index, message_id)
+            tags = StreamWithoutCsrfInputs()
+            tags.feed(source)
+            check_message_times(tags.attributes, f"{path} post {index}")
+            result.append((tags.tags, tags.attribute_keys, stable_multi_stream_values(tags.attributes, message_id, 1), tags.text))
+        return result
+
+    camp_events = parsed_events(camp_file, camp_db)
+    rust_events = parsed_events(rust_file, rust_db)
+    for index, (camp, rust) in enumerate(zip(camp_events, rust_events), 1):
+        assert camp[0] == rust[0], f"User post append {index} tags differ"
+        assert camp[1] == rust[1], f"User post append {index} attribute keys differ"
+        assert camp[2] == rust[2], next(((item, left, right) for item, (left, right) in enumerate(zip(camp[2], rust[2])) if left != right), f"User post append {index} attribute lengths differ")
+        assert camp[3] == rust[3], f"User post append {index} text differs"
+    return posts
 
 
 def main():
@@ -297,7 +329,7 @@ def main():
                 def rust_trial():
                     server = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "0"})
                     try:
-                        return captured_trial((server.pid,) if args.resources else (), "rustfire", rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", args.posts, args.rate, args.timeout, args.sockets, temp / "rust-reply-append.html" if args.sockets else None)
+                        return captured_trial((server.pid,) if args.resources else (), "rustfire", rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", args.posts, args.rate, args.timeout, args.sockets, temp / "rust-post-appends.json" if args.sockets else None, temp / "rust-reply-appends.json" if args.sockets else None)
                     finally:
                         stop_server(server)
 
@@ -312,7 +344,7 @@ def main():
                                 wait_for_worker(redis_port, worker)
                             cookie, csrf = login_campfire(camp_port)
                             process_pids = (camp.pid, redis.pid, *(worker.pid for worker in workers)) if args.resources else ()
-                            return captured_trial(process_pids, "campfire", camp_port, camp_db, cookie, csrf, args.posts, args.rate, args.timeout, args.sockets, temp / "camp-reply-append.html" if args.sockets else None, redis_port)
+                            return captured_trial(process_pids, "campfire", camp_port, camp_db, cookie, csrf, args.posts, args.rate, args.timeout, args.sockets, temp / "camp-post-appends.json" if args.sockets else None, temp / "camp-reply-appends.json" if args.sockets else None, redis_port)
                         finally:
                             stop_server(camp)
                             for worker in workers:
@@ -325,7 +357,8 @@ def main():
                 else:
                     (rust_report, rust_signatures), (camp_report, camp_signatures) = rust_trial(), camp_trial()
                 if args.sockets:
-                    check_reply_samples(temp / "camp-reply-append.html", temp / "rust-reply-append.html")
+                    checked_reply_events = check_reply_events(temp / "camp-reply-appends.json", temp / "rust-reply-appends.json", camp_db, rust_db, args.posts)
+                    checked_post_events = check_post_events(temp / "camp-post-appends.json", temp / "rust-post-appends.json", camp_db, rust_db, args.posts)
             finally:
                 redis.terminate()
                 redis.wait(timeout=10)
@@ -337,7 +370,8 @@ def main():
     assert rust_signatures == camp_signatures, next(((left, right) for left, right in zip(rust_signatures, camp_signatures) if left != right), None)
     report = {"source_revision": REVISION, "posts": args.posts, "rate": args.rate, "reply_delay_ms": args.delay_ms, "campfire_resque_workers": args.campfire_workers, "campfire_first": args.campfire_first, "sockets": args.sockets, "payloads_match": True, "rustfire": rust_report, "campfire": camp_report}
     if args.sockets:
-        report["reply_append_sample_matches"] = True
+        report["reply_append_events_match"] = checked_reply_events
+        report["post_append_events_match"] = checked_post_events
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

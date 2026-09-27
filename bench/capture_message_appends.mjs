@@ -55,6 +55,7 @@ const repliesSeen = Array.from({ length: socketCount }, () => new Set());
 const unreadSeen = Array(socketCount).fill(0);
 const readSeen = Array(socketCount).fill(0);
 const events = args['events-file'] ? Array(messageCount).fill(null) : null;
+const replyEvents = args['reply-events-file'] ? new Map() : null;
 let received = 0;
 let replyReceived = 0;
 let unexpected = 0;
@@ -159,6 +160,7 @@ function connect(index) {
               fs.writeFileSync(args['reply-sample-file'], html);
               replySampled = true;
             }
+            if (index === 0 && replyEvents) replyEvents.set(Number(messageId), html);
           } else {
             unexpected++;
           }
@@ -187,8 +189,10 @@ try {
   while ((received < expected || replyReceived < expectedReplies || browserChannels && unreadReceived < expected) && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
   if (received === expected && replyReceived === expectedReplies && (!browserChannels || unreadReceived === expected)) await new Promise(resolve => setTimeout(resolve, 100));
   if (events) fs.writeFileSync(args['events-file'], JSON.stringify(events));
-  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, bot_replies: botReplyCount, reply_expected: expectedReplies, reply_received: replyReceived, reply_missed: expectedReplies - replyReceived, unexpected, closed_early: closedEarly, sampled, reply_sampled: replySampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
-  if (received !== expected || replyReceived !== expectedReplies || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (args['reply-sample-file'] && !replySampled) || (events && events.some(event => event === null))) process.exitCode = 1;
+  if (replyEvents) fs.writeFileSync(args['reply-events-file'], JSON.stringify([...replyEvents].sort((left, right) => left[0] - right[0])));
+  const replyIdsMatch = repliesSeen.every(ids => ids.size === repliesSeen[0].size && [...ids].every(id => repliesSeen[0].has(id)));
+  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, bot_replies: botReplyCount, reply_expected: expectedReplies, reply_received: replyReceived, reply_missed: expectedReplies - replyReceived, reply_ids_match: replyIdsMatch, unexpected, closed_early: closedEarly, sampled, reply_sampled: replySampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
+  if (received !== expected || replyReceived !== expectedReplies || !replyIdsMatch || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (args['reply-sample-file'] && !replySampled) || (replyEvents && replyEvents.size !== botReplyCount) || (events && events.some(event => event === null))) process.exitCode = 1;
 } finally {
   for (const socket of sockets) socket.destroy();
 }
