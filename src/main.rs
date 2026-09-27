@@ -1257,13 +1257,8 @@ fn jpeg_dimensions(input: &std::path::Path) -> Option<(i64, i64)> {
         file.seek(SeekFrom::Current(i64::from(length - 2))).ok()?;
     }
 }
-fn analyze_image_and_thumbnail(
-    input: &std::path::Path,
-    stored: &str,
-    kind: &str,
-    format: &str,
-) -> (Option<i64>, Option<i64>) {
-    let dimensions = (format == "jpg")
+fn image_dimensions(input: &std::path::Path, format: &str) -> (Option<i64>, Option<i64>) {
+    (format == "jpg")
         .then(|| jpeg_dimensions(input))
         .flatten()
         .map(|(width, height)| (Some(width), Some(height)))
@@ -1290,7 +1285,15 @@ fn analyze_image_and_thumbnail(
                     }
                 })
                 .unwrap_or((None, None))
-        });
+        })
+}
+fn analyze_image_and_thumbnail(
+    input: &std::path::Path,
+    stored: &str,
+    kind: &str,
+    format: &str,
+) -> (Option<i64>, Option<i64>) {
+    let dimensions = image_dimensions(input, format);
     let cache = input
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -1413,8 +1416,8 @@ fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Pa
     let _ = std::fs::remove_file(frame);
     published
 }
-fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f64>, Option<f64>) {
-    let dimensions = std::process::Command::new("ffprobe")
+fn video_dimensions(input: &std::path::Path) -> (Option<f64>, Option<f64>) {
+    std::process::Command::new("ffprobe")
         .args([
             "-print_format",
             "json",
@@ -1478,7 +1481,10 @@ fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f6
                 (encoded_width, display_height)
             })
         })
-        .unwrap_or((None, None));
+        .unwrap_or((None, None))
+}
+fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f64>, Option<f64>) {
+    let dimensions = video_dimensions(input);
     let frame = std::process::Command::new("ffmpeg")
         .arg("-i")
         .arg(input)
@@ -5922,7 +5928,13 @@ impl Drop for UploadTemporaryFile {
         let _ = std::fs::remove_file(&self.0);
     }
 }
-fn replace_message_attachment(db: &rusqlite::Connection, mid: i64, mut file: Upload, t: &str) -> Result<(), StatusCode> {
+fn next_attachment_id(db: &rusqlite::Connection) -> Result<i64, StatusCode> {
+    db.query_row(
+        "UPDATE id_sequences SET last_id=MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM attachments),(SELECT COALESCE(MAX(id),0) FROM replaced_attachments),(SELECT COALESCE(MAX(id),0) FROM inline_blobs))+1 WHERE name='attachments' RETURNING last_id",
+        [], |row| row.get(0),
+    ).map_err(db_err)
+}
+fn replace_message_attachment(db: &mut rusqlite::Connection, mid: i64, mut file: Upload, t: &str) -> Result<(), StatusCode> {
     let prefix = if let Some(temporary) = &file.temporary {
         let mut source = std::fs::File::open(&temporary.0).map_err(db_err)?;
         let mut prefix = vec![0; 16];
@@ -5942,27 +5954,41 @@ fn replace_message_attachment(db: &rusqlite::Connection, mid: i64, mut file: Upl
     } else {
         std::fs::write(&input, &file.bytes).map_err(db_err)?;
     }
-    let previous: Option<String> = db.query_row(
-        "SELECT stored_name FROM attachments WHERE message_id=?1", [mid], |row| row.get(0)
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let previous: Option<(i64, i64, String, String, String)> = tx.query_row(
+        "SELECT a.id,m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.message_id=?1",
+        [mid], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
     ).optional().map_err(db_err)?;
-    db.execute("DELETE FROM attachments WHERE message_id=?1", [mid]).map_err(db_err)?;
-    db.execute(
-        "INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at) VALUES(?1,?2,?3,?4,?5)",
-        params![mid, file.filename, file.content_type, stored, t],
-    ).map_err(db_err)?;
-    if let Some(previous) = previous {
-        let referenced: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attachments WHERE stored_name=?1 UNION SELECT 1 FROM inline_blobs WHERE stored_name=?1)",
-            [&previous], |row| row.get(0),
+    let new_id = next_attachment_id(&tx)?;
+    if let Some((id, room_id, filename, content_type, old_stored)) = &previous {
+        tx.execute(
+            "INSERT INTO replaced_attachments(id,room_id,filename,content_type,stored_name) VALUES(?1,?2,?3,?4,?5)",
+            params![id,room_id,filename,content_type,old_stored],
         ).map_err(db_err)?;
-        if !referenced {
-            remove_attachment_files(&previous);
-        }
     }
-    let plain: String = db.query_row("SELECT body FROM messages WHERE id=?1", [mid], |row| row.get(0)).map_err(db_err)?;
+    tx.execute("DELETE FROM attachments WHERE message_id=?1", [mid]).map_err(db_err)?;
+    tx.execute(
+        "INSERT INTO attachments(id,message_id,filename,content_type,stored_name,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![new_id, mid, file.filename, file.content_type, stored, t],
+    ).map_err(db_err)?;
+    let available_at = Utc::now().timestamp_millis() + 500;
+    if let Some((id, _, _, _, old_stored)) = &previous {
+        tx.execute(
+            "INSERT INTO attachment_jobs(kind,attachment_id,stored_name,available_at_ms,created_at) VALUES('purge',?1,?2,?3,?4)",
+            params![id,old_stored,available_at,t],
+        ).map_err(db_err)?;
+    }
+    if image_format(&file.content_type).is_some() || safe_inline_video(&file.content_type) {
+        tx.execute(
+            "INSERT INTO attachment_jobs(kind,attachment_id,stored_name,available_at_ms,created_at) VALUES('analyze',?1,?2,?3,?4)",
+            params![new_id,stored,available_at,t],
+        ).map_err(db_err)?;
+    }
+    let plain: String = tx.query_row("SELECT body FROM messages WHERE id=?1", [mid], |row| row.get(0)).map_err(db_err)?;
     if plain.is_empty() {
-        refresh_file_only_search_entry(db, mid)?;
+        refresh_file_only_search_entry(&tx, mid)?;
     }
+    tx.commit().map_err(db_err)?;
     Ok(())
 }
 fn insert_message(
@@ -6119,8 +6145,8 @@ fn insert_message(
         } else {
             (None, None)
         };
-        db.execute("INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,file.filename,file.content_type,stored,t,width,height]).map_err(db_err)?;
-        let attachment_id = db.last_insert_rowid();
+        let attachment_id = next_attachment_id(&db)?;
+        db.execute("INSERT INTO attachments(id,message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![attachment_id,id,file.filename,file.content_type,stored,t,width,height]).map_err(db_err)?;
         let presented_filename = rails_sanitized_filename(&file.filename);
         if plain.is_empty() {
             refresh_file_only_search_entry(&db, id)?;
@@ -7034,7 +7060,7 @@ async fn message_update(
 }
 fn message_update_values(
     s: &Arc<AppState>, headers: &HeaderMap, uri: &Uri,
-    rid: i64, mid: i64, db: r2d2::PooledConnection<SqliteConnectionManager>,
+    rid: i64, mid: i64, mut db: r2d2::PooledConnection<SqliteConnectionManager>,
     body_fields: HashMap<String, String>, mut upload: Option<Upload>,
 ) -> AppResult {
     let query = uri.query().unwrap_or("").as_bytes();
@@ -7063,7 +7089,7 @@ fn message_update_values(
                 params![client_id, updated_at, updated_at_ns, mid],
             ).map_err(db_err)?;
             if let Some(file) = upload.take() {
-                replace_message_attachment(&db, mid, file, &updated_at)?;
+                replace_message_attachment(&mut db, mid, file, &updated_at)?;
             }
             touch_room(&db, rid)?;
         }
@@ -7171,7 +7197,7 @@ fn message_update_values(
         }
     }
     if let Some(file) = upload.take() {
-        replace_message_attachment(&db, mid, file, &updated_at)?;
+        replace_message_attachment(&mut db, mid, file, &updated_at)?;
     }
     drop(db);
     let updated_message = message_by_id(&s, rid, mid)?;
@@ -9907,10 +9933,71 @@ fn process_banned_content_batch(s: &AppState) -> Result<bool, StatusCode> {
     Ok(true)
 }
 
+fn process_attachment_job(s: &AppState) -> Result<bool, StatusCode> {
+    let mut db = pool(s)?;
+    let current_ms = Utc::now().timestamp_millis();
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let job: Option<(i64, String, i64, String)> = tx.query_row(
+        "SELECT id,kind,attachment_id,stored_name FROM attachment_jobs WHERE available_at_ms<=?1 AND (claimed_at_ms IS NULL OR claimed_at_ms<?2) ORDER BY id LIMIT 1",
+        params![current_ms,current_ms-60_000],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).optional().map_err(db_err)?;
+    let Some((job_id, kind, attachment_id, stored)) = job else { return Ok(false); };
+    tx.execute("UPDATE attachment_jobs SET claimed_at_ms=?1 WHERE id=?2", params![current_ms,job_id]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    match kind.as_str() {
+        "analyze" => {
+            let content_type: Option<String> = db.query_row(
+                "SELECT content_type FROM attachments WHERE id=?1 AND stored_name=?2",
+                params![attachment_id,stored], |row| row.get(0),
+            ).optional().map_err(db_err)?;
+            if let Some(content_type) = content_type {
+                let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+                let input = std::path::Path::new(&dir).join(&stored);
+                let dimensions = if let Some(format) = image_format(&content_type) {
+                    let (width, height) = image_dimensions(&input, format);
+                    (width.map(|value| value as f64), height.map(|value| value as f64))
+                } else if safe_inline_video(&content_type) {
+                    video_dimensions(&input)
+                } else {
+                    (None, None)
+                };
+                if dimensions.0.is_some() && dimensions.1.is_some() {
+                    db.execute(
+                        "UPDATE attachments SET width=?1,height=?2 WHERE id=?3 AND stored_name=?4",
+                        params![dimensions.0,dimensions.1,attachment_id,stored],
+                    ).map_err(db_err)?;
+                }
+            }
+        }
+        "purge" => {
+            let archived: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM replaced_attachments WHERE id=?1 AND stored_name=?2)",
+                params![attachment_id,stored], |row| row.get(0),
+            ).map_err(db_err)?;
+            if archived {
+                let referenced: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attachments WHERE stored_name=?1 UNION SELECT 1 FROM inline_blobs WHERE stored_name=?1 UNION SELECT 1 FROM replaced_attachments WHERE stored_name=?1 AND id!=?2)",
+                    params![stored,attachment_id], |row| row.get(0),
+                ).map_err(db_err)?;
+                if !referenced {
+                    remove_attachment_files(&stored);
+                    db.execute("DELETE FROM replaced_attachments WHERE id=?1 AND stored_name=?2",params![attachment_id,stored]).map_err(db_err)?;
+                }
+            }
+        }
+        _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+    db.execute("DELETE FROM attachment_jobs WHERE id=?1", [job_id]).map_err(db_err)?;
+    Ok(true)
+}
+
 async fn run_background_jobs(s: Arc<AppState>) {
     loop {
         let state = s.clone();
-        let pause = match tokio::task::spawn_blocking(move || process_banned_content_batch(&state)).await {
+        let pause = match tokio::task::spawn_blocking(move || {
+            if process_banned_content_batch(&state)? { Ok(true) } else { process_attachment_job(&state) }
+        }).await {
             Ok(Ok(true)) => std::time::Duration::from_millis(10),
             Ok(Ok(false)) => std::time::Duration::from_millis(250),
             Ok(Err(error)) => {
@@ -10984,6 +11071,13 @@ fn attachment_record_unchecked(
     let db = pool(&s)?;
     let row:Option<(i64,String,String,String)>=db.query_row("SELECT m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?;
     if let Some((room_id, filename, content_type, stored)) = row {
+        return Ok((room_id, rails_sanitized_filename(&filename), content_type, stored));
+    }
+    let replaced: Option<(i64,String,String,String)> = db.query_row(
+        "SELECT room_id,filename,content_type,stored_name FROM replaced_attachments WHERE id=?1",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional().map_err(db_err)?;
+    if let Some((room_id, filename, content_type, stored)) = replaced {
         return Ok((room_id, rails_sanitized_filename(&filename), content_type, stored));
     }
     let (room_id, filename, content_type, stored): (i64, String, String, String) = db.query_row("SELECT m.room_id,b.filename,b.content_type,b.stored_name FROM inline_blobs b JOIN inline_embeds e ON e.blob_id=b.id JOIN messages m ON m.id=e.message_id WHERE b.id=?1 ORDER BY m.id LIMIT 1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(db_err)?.ok_or(StatusCode::NOT_FOUND)?;
@@ -12383,6 +12477,9 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(ip_address);
         CREATE TABLE IF NOT EXISTS background_jobs(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_background_jobs_kind ON background_jobs(kind,id);
+        CREATE TABLE IF NOT EXISTS replaced_attachments(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS attachment_jobs(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,attachment_id INTEGER NOT NULL,stored_name TEXT NOT NULL,available_at_ms INTEGER NOT NULL,claimed_at_ms INTEGER,created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_attachment_jobs_ready ON attachment_jobs(available_at_ms,claimed_at_ms,id);
         CREATE TABLE IF NOT EXISTS webhook_jobs(id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,created_at TEXT NOT NULL,claimed_at INTEGER);
         CREATE INDEX IF NOT EXISTS idx_webhook_jobs_claim ON webhook_jobs(claimed_at,id);
         CREATE TABLE IF NOT EXISTS failed_webhook_jobs(job_id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,error TEXT NOT NULL,created_at TEXT NOT NULL,failed_at TEXT NOT NULL,retried_at TEXT);
@@ -12405,6 +12502,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_id_track AFTER INSERT ON messages BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='messages'; END;
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
+        INSERT OR IGNORE INTO id_sequences(name,last_id) VALUES('attachments',0);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
         CREATE TABLE IF NOT EXISTS direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,content_type_is_null INTEGER NOT NULL DEFAULT 0,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
         INSERT INTO id_sequences(name,last_id) VALUES('direct_upload_blobs',MAX(999999999999,COALESCE((SELECT MAX(id) FROM direct_upload_blobs),0))) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);

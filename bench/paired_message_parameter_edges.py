@@ -303,6 +303,8 @@ def main():
                             raise AssertionError((label, "socket capture not ready", marker, output, error))
 
                 def inspect_after(rust_port, rust_cookie, camp_port, camp_cookie):
+                    if args.edit_multipart_only or args.edit_multipart_post_only:
+                        assert rust_old.exists() and camp_old.exists(), (label, "old attachment purged before the queued job")
                     preview = replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, preview_kind) if preview_kind else (None, None)
                     if not stream_expected:
                         return preview
@@ -319,7 +321,7 @@ def main():
                         rust_base, camp_base, checkout, base_env, redis_port, body=body, query=query,
                         content_type=content_type,
                         before_request=start_captures if stream_expected else None,
-                        after_request=inspect_after if preview_kind or stream_expected else None,
+                        after_request=inspect_after if preview_kind or stream_expected or args.edit_multipart_only or args.edit_multipart_post_only else None,
                     )
                 finally:
                     for capture in captures:
@@ -332,7 +334,8 @@ def main():
                 camp_saved = saved_message(temp / f"camp-{index}.sqlite3", True, camp_files)
                 if args.edit_multipart_only or args.edit_multipart_post_only:
                     replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "edit multipart malformed JPEG", "POST multipart patch file", "POST multipart put file only", "POST multipart image", "POST multipart malformed JPEG")
-                    assert rust_old.exists() != replaced, (label, "old Rustfire attachment cleanup")
+                    if not replaced:
+                        assert rust_old.exists(), (label, "retained old Rustfire attachment")
                 if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only:
                     rust_saved = (rust_saved, message_updated_at(temp / f"rust-{index}.sqlite3") != message_updated_at(rust_base))
                     camp_saved = (camp_saved, message_updated_at(temp / f"camp-{index}.sqlite3") != message_updated_at(camp_base))
