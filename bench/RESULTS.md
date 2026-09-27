@@ -1,5 +1,11 @@
 # Preliminary Rustfire measurements
 
+## Room creation after preserving imported ID high-water marks
+
+After Rustfire began retaining Campfire's deleted-user and deleted-room ID high-water marks, `python tests/import_campfire.py` imported a fixture whose highest live user and room IDs were 3 and 1 but whose saved sequences were 40 and 50. Creating a bot and open room through Rustfire's HTTP routes then assigned IDs 41 and 51. The 46 Rust unit tests and paired first-run and bot-administration probes passed with the changed allocator.
+
+`python bench/paired_sidebar_fanout.py --sockets 100 --rooms 10 --campfire-workers 22` passed in both server orders using the release build. Each app created ten open rooms with 51 memberships each and delivered all 1,000 expected, source-shaped sidebar events with no missed or unexpected events. The sampled payloads matched byte for byte. The measured ten-request interval was 50 ms for Rustfire versus 640 ms for Campfire with Rustfire first, and 56 ms versus 664 ms with Campfire first. This short same-host burst checks room creation and delivery at 100 sockets; it does not establish sustained or maximum capacity.
+
 ## Paired QR code response parity
 
 `python bench/paired_qr.py` compared ten invitation-like URLs, alphanumeric strings, and numeric strings against pinned Campfire's `rqrcode` 3.2.0 renderer and running HTTP endpoint. The SVG bodies matched byte for byte, including source-selected masks, high error correction, and a numeric input that exactly fills a smaller QR version but causes Campfire to choose the next version. The actual routes returned matching content type, one-year public cache control, weak ETag, and Vary header; all ten conditional requests returned matching empty 304 responses. The parity probe does not check malformed IDs or every QR capacity transition.

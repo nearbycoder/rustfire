@@ -136,6 +136,10 @@ def import_data(source, target, source_files, uploads):
     counts["users"] = copy_table(source, target, "users", tables["users"])
     counts["bans"] = copy_table(source, target, "bans", tables["bans"])
     counts["rooms"] = copy_table(source, target, "rooms", tables["rooms"])
+    for table in ("users", "rooms"):
+        high_water = source.execute("SELECT seq FROM sqlite_sequence WHERE name=?", (table,)).fetchone()
+        if high_water:
+            target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name=?", (high_water[0], table))
     counts["memberships"] = copy_table(
         source, target, "memberships",
         ("id", "room_id", "user_id", "involvement", "unread_at", "created_at"),

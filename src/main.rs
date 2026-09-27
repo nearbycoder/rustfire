@@ -3522,9 +3522,9 @@ async fn first_run_post(
             params![generate_join_code()?, t],
         )
         .map_err(db_err)?;
-        tx.execute("INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,1,0,?4,?4)",params![name,email,pw,t]).map_err(db_err)?;
+        tx.execute("INSERT INTO users(id,name,email_address,password_digest,role,status,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,?2,?3,1,0,?4,?4)",params![name,email,pw,t]).map_err(db_err)?;
         let uid = tx.last_insert_rowid();
-        tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES('All Talk','Rooms::Open',?1,?2,?2)",params![uid,t]).map_err(db_err)?;
+        tx.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM rooms))+1 FROM id_sequences WHERE name='rooms'),'All Talk','Rooms::Open',?1,?2,?2)",params![uid,t]).map_err(db_err)?;
         let rid = tx.last_insert_rowid();
         tx.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(?1,?2,'mentions',?3)",params![rid,uid,t]).map_err(db_err)?;
         if let Some((_, stored, content_type)) = &staged_avatar {
@@ -6692,7 +6692,7 @@ async fn create_room(
     };
     let tx = db.transaction().map_err(db_err)?;
     tx.execute(
-        "INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)",
+        "INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM rooms))+1 FROM id_sequences WHERE name='rooms'),?1,?2,?3,?4,?4)",
         params![name.trim(), ty, u.id, t],
     )
     .map_err(db_err)?;
@@ -7159,7 +7159,7 @@ async fn direct_create(
         return Ok(found_redirect(&format!("/rooms/{id}")));
     }
     let t = now();
-    tx.execute("INSERT INTO rooms(name,type,creator_id,created_at,updated_at) VALUES(NULL,'Rooms::Direct',?1,?2,?2)",params![u.id,t]).map_err(db_err)?;
+    tx.execute("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM rooms))+1 FROM id_sequences WHERE name='rooms'),NULL,'Rooms::Direct',?1,?2,?2)",params![u.id,t]).map_err(db_err)?;
     let rid = tx.last_insert_rowid();
     for id in &ids {
         tx.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(?1,?2,'everything',?3)",params![rid,id,t]).map_err(db_err)?;
@@ -8255,7 +8255,7 @@ async fn join_post(
     let pw = hash(&password, DEFAULT_COST).map_err(db_err)?;
     let tx = db.transaction().map_err(db_err)?;
     if let Err(error) = tx.execute(
-        "INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,0,0,?4,?4)",
+        "INSERT INTO users(id,name,email_address,password_digest,role,status,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,?2,?3,0,0,?4,?4)",
         params![name.trim(), email, pw, t],
     ) {
         drop(tx);
@@ -9539,7 +9539,7 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Req
     }
     let db = pool(&s)?;
     let t = now();
-    db.execute("INSERT INTO users(name,role,status,bot_token,created_at,updated_at) VALUES(?1,2,0,NULL,?2,?2)",params![name.trim(),t]).map_err(db_err)?;
+    db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,2,0,NULL,?2,?2)",params![name.trim(),t]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     let bot_token = generate_bot_token()?;
     db.execute(
@@ -11316,6 +11316,10 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         END;
         CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,creator_id INTEGER NOT NULL REFERENCES users(id),body TEXT NOT NULL,client_message_id TEXT NOT NULL,created_at TEXT NOT NULL,created_at_ns INTEGER,updated_at TEXT NOT NULL,updated_at_ns INTEGER);
         CREATE TABLE IF NOT EXISTS id_sequences(name TEXT PRIMARY KEY,last_id INTEGER NOT NULL);
+        INSERT INTO id_sequences(name,last_id) VALUES('users',COALESCE((SELECT MAX(id) FROM users),0)) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS user_id_track AFTER INSERT ON users BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='users'; END;
+        INSERT INTO id_sequences(name,last_id) VALUES('rooms',COALESCE((SELECT MAX(id) FROM rooms),0)) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS room_id_track AFTER INSERT ON rooms BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='rooms'; END;
         INSERT INTO id_sequences(name,last_id) VALUES('messages',COALESCE((SELECT MAX(id) FROM messages),0)) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
         CREATE TRIGGER IF NOT EXISTS message_id_track AFTER INSERT ON messages BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='messages'; END;
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));

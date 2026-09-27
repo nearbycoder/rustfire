@@ -206,6 +206,8 @@ def main():
                 fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                     VALUES(?,?,?,?,?,'2026-01-01 00:00:00')""", (blob_id, name, record_type, record_id, blob_id))
             fixture.execute("DELETE FROM message_search_index WHERE rowid IN (1,2)")
+            fixture.execute("UPDATE sqlite_sequence SET seq=40 WHERE name='users'")
+            fixture.execute("UPDATE sqlite_sequence SET seq=50 WHERE name='rooms'")
             fixture.commit()
         target_db = root / "rustfire.sqlite3"
         target_uploads = root / "uploads"
@@ -231,6 +233,8 @@ def main():
             ]
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='messages'").fetchone() == (20,)
             assert imported.execute("SELECT last_id FROM id_sequences WHERE name='boosts'").fetchone() == (20,)
+            assert imported.execute("SELECT last_id FROM id_sequences WHERE name='users'").fetchone() == (40,)
+            assert imported.execute("SELECT last_id FROM id_sequences WHERE name='rooms'").fetchone() == (50,)
             assert imported.execute("SELECT count(*) FROM sqlite_master WHERE name='import_missing_search'").fetchone() == (0,)
             assert imported.execute("SELECT body,body_source,body_html FROM messages WHERE id=1").fetchone() == (
                 "Hello\n• One\n• Two", source_body, source_body,
@@ -343,6 +347,19 @@ def main():
                 headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
             with urllib.request.urlopen(post, timeout=2) as response:
                 assert response.status == 201
+            create_bot = urllib.request.Request(f"http://127.0.0.1:{port}/account/bots",
+                data=urllib.parse.urlencode({"user[name]": "After import"}).encode(),
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token})
+            with urllib.request.urlopen(create_bot, timeout=2) as response:
+                assert response.status == 200
+            create_room = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/opens",
+                data=urllib.parse.urlencode({"room[name]": "After import"}).encode(),
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token})
+            with urllib.request.urlopen(create_room, timeout=2) as response:
+                assert response.status == 200 and response.url.endswith("/rooms/51"), response.url
+            with sqlite3.connect(target_db) as imported:
+                assert imported.execute("SELECT id FROM users WHERE name='After import'").fetchone() == (41,)
+                assert imported.execute("SELECT id FROM rooms WHERE name='After import'").fetchone() == (51,)
             blob_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"ActiveStorage", 1000, 64)
             blob_payload = json.dumps({"_rails": {"data": 10, "pur": "blob_id"}}, separators=(",", ":")).encode()
             blob_encoded = base64.b64encode(blob_payload).decode()
@@ -464,7 +481,7 @@ def main():
         assert derived_image.returncode == 0, derived_image.stderr
         with sqlite3.connect(bad_target) as imported:
             assert imported.execute("SELECT width,height FROM inline_blobs WHERE id=11").fetchone() == (1, 1)
-    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
+    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, saved and rebuilt search text, ID high-water marks, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
 
 
 if __name__ == "__main__":
