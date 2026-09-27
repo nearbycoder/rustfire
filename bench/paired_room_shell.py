@@ -72,6 +72,9 @@ class Section(HTMLParser):
                     if key == "href" and value.startswith("/account/logo?v="):
                         assert value.split("?v=", 1)[1].isdigit(), value
                         value = "<versioned-logo>"
+                    if key == "action" and value.startswith("/account/logo?v="):
+                        assert value.split("?v=", 1)[1].isdigit(), value
+                        value = "<versioned-logo>"
                     value = value.replace("Campfire", "Rustfire")
                 normalized.append((key, value))
             self.tokens.append(("start", tag, tuple(sorted(normalized))))

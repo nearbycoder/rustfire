@@ -1495,3 +1495,20 @@ The paired Chromium composer probe passed after removing the extra script: file 
 | Rustfire first | 3,389.6 / 11.88 ms | 1,178.2 / 59.87 ms |
 
 Rustfire served 2.68–2.88× as many checked reads per second under this sampled workload. These runs do not establish sustained capacity or full-app speed at feature parity.
+
+## Complete parsed account documents
+
+`python bench/paired_account_users.py --users 51 --sample-dir /tmp/rustfire-account-document-parity` and `python bench/paired_account_users.py --users 1100` passed against the pinned Campfire source. The probe now compares the complete parsed `<head>` and `<body>` for administrator and member account settings pages. On the 1,100-user fixture, the administrator page matched 146 head and 40,929 body tokens; the member page matched 146 head and 16,610 body tokens. The administrator document also matched after changing the room-creation restriction, uploading a logo, and deleting it; the logo state added ten body tokens. The comparison normalizes session CSRF values, local origins, generated timestamps, and versioned logo URLs. Both fixtures use the same disposable VAPID key. Rustfire now renders Campfire's version badge in the account footer and applies `account-has-logo` after an upload. Raw HTML bytes, other account states, and browser layout remain outside this document check.
+
+A separate `--users 1100 --clients 1 8 32 --seconds 2 --campfire-workers 22` run passed the same initial document and workflow checks, with zero read errors in both apps. It measured the 500-user page-2 Turbo response and the full account settings page on the same host, running Rustfire first and Campfire second. The page-2 bodies were 874,855 and 1,003,862 bytes; account settings bodies were 1,951,677 and 2,236,954 bytes. The parsed documents matched despite serialization-size differences.
+
+| Path | Clients | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| :--- | ---: | ---: | ---: |
+| User page 2 | 1 | 312.3 / 4.15 ms | 8.4 / 152.91 ms |
+| User page 2 | 8 | 1,463.2 / 7.67 ms | 48.9 / 270.88 ms |
+| User page 2 | 32 | 1,564.4 / 30.59 ms | 99.7 / 539.28 ms |
+| Account settings | 1 | 164.8 / 8.15 ms | 3.9 / 313.40 ms |
+| Account settings | 8 | 756.7 / 12.94 ms | 25.0 / 381.61 ms |
+| Account settings | 32 | 1,025.4 / 47.94 ms | 41.8 / 1,477.06 ms |
+
+At 32 clients, Rustfire served about 15.7× as many checked user-page reads and 24.5× as many checked account-page reads per second. These two-second, one-order samples do not establish sustained capacity or a whole-app speed advantage. The timed user-page client checked status, row count, and first/last users; the timed account client checked status and required controls. Complete parsed parity was checked before timing, not on every timed response.

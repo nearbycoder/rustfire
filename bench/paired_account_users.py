@@ -24,6 +24,7 @@ from direct_lookup import free_port, p95, start_server, stop_server
 from paired_bot_admin import request
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_profile import ProfilePanel
+from paired_room_shell import assert_equal, section
 
 
 def role_and_status(database):
@@ -88,6 +89,10 @@ def source_page_fragment(body, fragment):
     parser.feed(body.decode())
     assert parser.tokens, f"Missing account {fragment}"
     return parser.tokens
+
+
+def document_markup(body):
+    return tuple(section(body, part, normalize_times=True, normalize_blob_paths=True) for part in ("head", "body"))
 
 
 def member_account_view(port, cookie, csrf):
@@ -253,6 +258,7 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     status, _, body = request(port, "GET", "/account/edit", cookie, csrf)
     assert status == 200
     page = body.decode()
+    result['settings_document'] = document_markup(body)
     result['settings_controls'] = settings_summary(page)
     result['settings_nav_markup'] = source_page_fragment(body, 'nav')
     result['settings_panel_markup'] = source_page_fragment(body, 'panel')
@@ -273,10 +279,12 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, location, payload[:200])
     status, _, restricted_page = request(port, "GET", "/account/edit", cookie, csrf)
     assert status == 200, status
+    result["settings_restricted_document"] = document_markup(restricted_page)
     result["settings_panel_restricted_markup"] = source_page_fragment(restricted_page, "panel")
     upload_account_logo(port, cookie, csrf)
     status, _, logo_page = request(port, "GET", "/account/edit", cookie, csrf)
     assert status == 200, status
+    result["settings_logo_document"] = document_markup(logo_page)
     result["settings_panel_logo_markup"] = source_page_fragment(logo_page, "panel")
     logo_action = re.search(rb'<form class=["\']button_to["\'] method=["\']post["\'] action=["\'](/account/logo\?v=[^"\']+)', logo_page)
     assert logo_action, "Source-style logo deletion form is missing"
@@ -285,6 +293,7 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, location, payload[:200])
     status, _, deleted_logo_page = request(port, "GET", "/account/edit", cookie, csrf)
     assert status == 200, status
+    result["settings_deleted_logo_document"] = document_markup(deleted_logo_page)
     result["settings_panel_after_logo_delete_markup"] = source_page_fragment(deleted_logo_page, "panel")
     if users > 500:
         result["initial_roster"] = page_summary(body)
@@ -334,6 +343,7 @@ def main():
     parser.add_argument("--clients", type=int, nargs="*", default=[], help="concurrent clients for page-2 reads")
     parser.add_argument("--seconds", type=float, default=3.0, help="duration of each concurrent trial")
     parser.add_argument("--campfire-workers", type=int, default=1, help="Puma workers; packaged default here is 22")
+    parser.add_argument("--sample-dir", type=pathlib.Path, help="save paired initial account pages")
     args = parser.parse_args()
     if args.users < 51:
         parser.error("users must be at least 51")
@@ -351,6 +361,10 @@ def main():
         direct_rooms = [(2,)]
         seed_rustfire(rust_db, rust_port, direct_rooms)
         env = seed_campfire(repository, ruby, bundle_path, repository / "storage/db/production.sqlite3", camp_db, direct_rooms, camp_port, temp)
+        vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
+        env["VAPID_PUBLIC_KEY"], env["VAPID_PRIVATE_KEY"] = subprocess.check_output(
+            [str(ruby), "-e", vapid_code, str(rust_db.with_suffix(".vapid.der"))], text=True,
+        ).splitlines()
         seed_large_fixture(rust_db, args.users)
         seed_large_fixture(camp_db, args.users)
         with sqlite3.connect(rust_db) as db:
@@ -359,6 +373,15 @@ def main():
             db.execute("UPDATE users SET email_address='member@example.invalid',password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
         rust_process = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"]})
         try:
+            rust_documents = {}
+            if args.sample_dir:
+                args.sample_dir.mkdir(parents=True, exist_ok=True)
+            for role, cookie, csrf in (("admin", "session_token=benchmark-session", "benchmark-csrf"), ("member", "session_token=benchmark-member-session", "benchmark-member-csrf")):
+                status, _, body = request(rust_port, "GET", "/account/edit", cookie, csrf)
+                assert status == 200, (role, status)
+                rust_documents[role] = body
+                if args.sample_dir:
+                    (args.sample_dir / f"rustfire-account-{role}.html").write_bytes(body)
             rust_member = member_account_view(rust_port, "session_token=benchmark-member-session", "benchmark-member-csrf")
             rust, rust_performance = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, args.users, args.clients, args.seconds)
         finally:
@@ -370,6 +393,13 @@ def main():
             wait_for_server(camp_port, camp_process)
             cookie, csrf = login_campfire(camp_port)
             member_cookie, member_csrf = login_campfire(camp_port, "member@example.invalid")
+            camp_documents = {}
+            for role, identity, token in (("admin", cookie, csrf), ("member", member_cookie, member_csrf)):
+                status, _, body = request(camp_port, "GET", "/account/edit", identity, token)
+                assert status == 200, (role, status)
+                camp_documents[role] = body
+                if args.sample_dir:
+                    (args.sample_dir / f"campfire-account-{role}.html").write_bytes(body)
             camp_member = member_account_view(camp_port, member_cookie, member_csrf)
             camp, camp_performance = workflow(camp_port, cookie, csrf, camp_db, args.users, args.clients, args.seconds)
         except Exception:
@@ -380,6 +410,13 @@ def main():
         finally:
             stop_server(camp_process)
             log.close()
+        for role in ("admin", "member"):
+            for part in ("head", "body"):
+                assert_equal(
+                    f"{role} account complete {part}",
+                    section(camp_documents[role], part, normalize_times=True, normalize_blob_paths=True),
+                    section(rust_documents[role], part, normalize_times=True, normalize_blob_paths=True),
+                )
         for label, expected, actual in (("member nav", camp_member[0], rust_member[0]), ("member panel", camp_member[1], rust_member[1])):
             if expected != actual:
                 mismatch = next((index for index, pair in enumerate(zip(expected, actual)) if pair[0] != pair[1]), min(len(expected), len(actual)))
@@ -387,6 +424,11 @@ def main():
             print(f"{label}: {len(expected)} matching parsed tokens")
         for key in rust:
             if rust[key] != camp[key]:
+                if key.endswith("_document"):
+                    for part, actual, expected in zip(("head", "body"), rust[key], camp[key], strict=True):
+                        if actual != expected:
+                            mismatch = next((index for index, pair in enumerate(zip(actual, expected)) if pair[0] != pair[1]), min(len(actual), len(expected)))
+                            raise AssertionError((key, part, mismatch, actual[mismatch:mismatch + 3], expected[mismatch:mismatch + 3]))
                 if key.endswith("_markup"):
                     mismatch = next((index for index, pair in enumerate(zip(rust[key], camp[key])) if pair[0] != pair[1]), min(len(rust[key]), len(camp[key])))
                     raise AssertionError((key, mismatch, rust[key][mismatch:mismatch + 3], camp[key][mismatch:mismatch + 3]))
@@ -394,6 +436,8 @@ def main():
             if key.endswith("_markup"):
                 digest = hashlib.sha256(repr(rust[key]).encode()).hexdigest()
                 print(f"{key}: events={len(rust[key])} sha256={digest} equal=True")
+            elif key.endswith("_document"):
+                print(f"{key}: head={len(rust[key][0])} body={len(rust[key][1])} matching parsed tokens")
             elif key.startswith("page_") or key == "initial_roster":
                 ids, replaced, appended, next_page = rust[key]
                 print(f"{key}: users={len(ids)} first={ids[0] if ids else None} last={ids[-1] if ids else None} replace={replaced} append={appended} next={next_page}")

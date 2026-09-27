@@ -3671,6 +3671,12 @@ async fn first_run_post(
     let Some(uid) = created? else { return Ok(found_redirect("/")) };
     create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
 }
+fn app_version() -> String {
+    env::var("APP_VERSION").ok().filter(|value| !value.trim().is_empty())
+        .or_else(|| env::var("GIT_REVISION").ok().filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| "0".to_string())
+}
+
 fn login_page(s: &AppState, headers: &HeaderMap, email_address: &str, rejection: Option<StatusCode>) -> AppResult {
     let db = pool(s)?;
     let (account_name, updated_at): (String, String) = db.query_row(
@@ -3696,9 +3702,7 @@ fn login_page(s: &AppState, headers: &HeaderMap, email_address: &str, rejection:
     ]);
     let help_contact = owner.map(|(name, email)| {
         let address = format!("mailto:\"{name}\" <{email}>");
-        let version = env::var("APP_VERSION").ok().filter(|value| !value.trim().is_empty())
-            .or_else(|| env::var("GIT_REVISION").ok().filter(|value| !value.trim().is_empty()))
-            .unwrap_or_else(|| "0".to_string());
+        let version = app_version();
         format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Rustfire&trade; version <span class=\"version-badge\">{}</span></div></div>", esc(&address), esc(&name), esc(&email), esc(&version))
     }).unwrap_or_default();
     let flash = if rejection.is_some() {
@@ -7850,8 +7854,8 @@ async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap, Origina
         .replace("<input type=\"hidden\" name=\"_method\" value=\"patch\">", &format!("<input type=\"hidden\" name=\"_method\" value=\"patch\"><input type='hidden' name='authenticity_token' value='{csrf}'>"))
         .replace("<input type=\"hidden\" name=\"_method\" value=\"put\">", &format!("<input type=\"hidden\" name=\"_method\" value=\"put\"><input type='hidden' name='authenticity_token' value='{csrf}'>"));
     let body = format!("<section class='panel txt-align-center flex flex-column gap' style='view-transition-name: account-settings'>{account_controls}<div class='margin-block pad-inline pad-block-start fill-shade border-radius'>{invite_controls}<hr class='margin-block separator full-width' style='--border-style: solid'>{list}</div></section>");
-    let footer = "<div class='txt-align-center center margin-block-double txt-subtle'>Campfire™ version Rustfire</div>";
-    Ok(render_source_page_with_footer("Account settings", &body, &nav, footer, Some(&u), u.csrf_token.as_deref().unwrap_or("")))
+    let footer = format!("<div class='txt-align-center center margin-block-double txt-subtle'>Campfire™ version <span class='version-badge'>{}</span></div>", esc(&app_version()));
+    Ok(render_source_page_sections("Account settings", &body, &nav, &footer, "", "", if has_logo { "account-has-logo" } else { "" }, "", Some(&u), u.csrf_token.as_deref().unwrap_or("")))
 }
 async fn account_users_index(
     State(s): State<Arc<AppState>>,
@@ -8547,7 +8551,7 @@ async fn join_get(
         .map_err(db_err)?;
     let help_contact = owner.map(|(name, email)| {
         let address = format!("mailto:\"{name}\" <{email}>");
-        format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">Rustfire</span></div></div>", esc(&address), esc(&name), esc(&email))
+        format!("<div class=\"txt-align-center margin-block-double full-width\"><a href=\"{}\" class=\"btn center\" title=\"Email {}\"><img src=\"/assets/lifebuoy-f31f26aa.svg\" aria-hidden=\"true\"><span>{}</span></a><div class=\"txt-align-center center margin-block txt-subtle\">Campfire&trade; version <span class=\"version-badge\">{}</span></div></div>", esc(&address), esc(&name), esc(&email), esc(&app_version()))
     }).unwrap_or_default();
     let logo_version: String = updated_at.chars().filter(char::is_ascii_digit).take(14).collect();
     let name_translation = profile_translation_button("Enter your name", [
