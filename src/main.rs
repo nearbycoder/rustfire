@@ -6966,9 +6966,15 @@ fn room_form_panel(kind: &str, room_id: Option<i64>, name: &str, csrf_token: &st
     let style = room_id.map(|id| format!("edit-room-{id}")).unwrap_or_else(|| "new-room".to_string());
     let action = room_id.map(|id| format!("/rooms/{kind}/{id}")).unwrap_or_else(|| format!("/rooms/{kind}"));
     let method = if room_id.is_some() { "<input type=\"hidden\" name=\"_method\" value=\"patch\" />" } else { "" };
-    let back = room_id.map(|id| format!("/rooms/{id}")).unwrap_or_else(|| "/".to_string());
     let csrf = esc(csrf_token);
-    format!("<nav class=\"new-room-back\"><a class=\"btn\" href=\"{back}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Go Back</span></a></nav><section class=\"panel txt-align-center\" style=\"view-transition-name: {style}\"><form action=\"{action}\" accept-charset=\"UTF-8\" method=\"post\">{method}<input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /><div class=\"flex align-center gap\">{}<label class=\"flex-item-grow txt-large\"><input name=\"room[name]\" id=\"room_name\" class=\"input full-width\" required=\"required\" autofocus=\"autofocus\" placeholder=\"Name the room\" data-turbo-permanent=\"true\" data-action=\"keydown.enter-&gt;form#submit:prevent\" type=\"text\" value=\"{}\" /><span class=\"for-screen-reader\">Name this room</span></label></div><hr class=\"margin-block borderless\"><section class=\"room-access margin-block pad-inline fill-shade border-radius\"><menu class=\"flex flex-column gap margin-none pad overflow-y constrain-height\" data-controller=\"filter\" data-filter-active-class=\"filter--active\" data-filter-selected-class=\"selected\">{everyone}{search}<div data-filter-target=\"list\" contents>{rows}</div></menu></section><button name=\"button\" type=\"submit\" class=\"btn btn--reversed txt-large center\"><img aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Save</span></button></form></section>", new_room_translation_button(), esc(name))
+    format!("<section class=\"panel txt-align-center\" style=\"view-transition-name: {style}\"><form action=\"{action}\" accept-charset=\"UTF-8\" method=\"post\">{method}<input type=\"hidden\" name=\"authenticity_token\" value=\"{csrf}\" /><div class=\"flex align-center gap\">{}<label class=\"flex-item-grow txt-large\"><input name=\"room[name]\" id=\"room_name\" class=\"input full-width\" required=\"required\" autofocus=\"autofocus\" placeholder=\"Name the room\" data-turbo-permanent=\"true\" data-action=\"keydown.enter-&gt;form#submit:prevent\" type=\"text\" value=\"{}\" /><span class=\"for-screen-reader\">Name this room</span></label></div><hr class=\"margin-block borderless\"><section class=\"room-access margin-block pad-inline fill-shade border-radius\"><menu class=\"flex flex-column gap margin-none pad overflow-y constrain-height\" data-controller=\"filter\" data-filter-active-class=\"filter--active\" data-filter-selected-class=\"selected\">{everyone}{search}<div data-filter-target=\"list\" contents>{rows}</div></menu></section><button name=\"button\" type=\"submit\" class=\"btn btn--reversed txt-large center\"><img aria-hidden=\"true\" src=\"/assets/check-7897ff7e.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Save</span></button></form></section>", new_room_translation_button(), esc(name))
+}
+fn room_form_nav(headers: &HeaderMap) -> String {
+    let back = cookie(headers, "last_room")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+        .map_or("/".to_string(), |id| format!("/rooms/{id}"));
+    format!("<div class=\"flex-item-justify-start\"><a class=\"btn\" href=\"{back}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Go Back</span></a></div>")
 }
 async fn new_room(
     State(s): State<Arc<AppState>>,
@@ -6993,11 +6999,8 @@ async fn new_room(
     let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
     let rows = users.iter().map(|(id,name,bio,updated_at)| room_form_user_row(*id,name,bio,updated_at,closed,true,*id==u.id,u.id,avatar_key)).collect::<Result<String, _>>()?;
     let panel = room_form_panel(&kind, None, "New room", u.csrf_token.as_deref().unwrap_or(""), &rows, users.len());
-    Ok(render(
-        "New chat room",
-        &panel,
-        Some(&u),
-    ))
+    let has_logo: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)).map_err(db_err)?;
+    Ok(render_source_page_sections("New chat room", &panel, &room_form_nav(&headers), "", "", "", if has_logo { "account-has-logo" } else { "" }, "", Some(&u), u.csrf_token.as_deref().unwrap_or("")))
 }
 async fn new_open_room(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     new_room(State(s), headers, Path("opens".to_string())).await
@@ -7141,11 +7144,8 @@ async fn render_room_edit(s: Arc<AppState>, headers: HeaderMap, rid: i64, kind: 
         let delete_url = public_url(&headers, &format!("/rooms/{rid}"));
         panels.push_str(&format!("<section class=\"panel txt-align-center\"><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative max-width\" aria-label=\"Delete {}\" data-turbo-confirm=\"Are you sure you want to delete this room and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" width=\"20\" height=\"20\" /><span class=\"overflow-ellipsis\">{}</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></section>", esc(&r.name), esc(&r.name), esc(csrf)));
     }
-    Ok(render(
-        &format!("Edit settings for {}", r.name),
-        &panels,
-        Some(&u),
-    ))
+    let has_logo: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)).map_err(db_err)?;
+    Ok(render_source_page_sections(&format!("Edit settings for {}", r.name), &panels, &room_form_nav(&headers), "", "", "", if has_logo { "account-has-logo" } else { "" }, "", Some(&u), csrf))
 }
 async fn room_update(
     State(s): State<Arc<AppState>>,
@@ -7389,12 +7389,14 @@ async fn direct_edit(
         members.push_str(&format!("<div class=\"member flex flex-column gap fill-shade pad border-radius\"><figure class=\"avatar center\" style=\"--avatar-border-radius: 10ch; --avatar-size: 10ch;\"><a title=\"{}\" class=\"btn avatar\" data-turbo-frame=\"_top\" href=\"/users/{id}\"><img aria-hidden=\"true\" loading=\"lazy\" src=\"{avatar}\" width=\"48\" height=\"48\" /></a></figure><strong>{}</strong></div>", esc(&title), esc(&name)));
     }
     let delete_url = public_url(&headers, &format!("/rooms/directs/{rid}"));
-    Ok(render(
-        &format!("Edit settings for {display_name}"),
-        &format!(
-            "<nav class=\"ping-settings-back\"><a class=\"btn\" href=\"/rooms/{rid}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Go Back</span></a></nav><div class=\"panel txt-align-center\"><section class=\"directs--edit margin-block-end\">{members}</section><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative center\" aria-label=\"Delete Ping\" data-turbo-confirm=\"Are you sure you want to delete this ping and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" />Ping</button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></div>", esc(u.csrf_token.as_deref().unwrap_or(""))
-        ),
-        Some(&u),
+    let panel = format!(
+        "<div class=\"panel txt-align-center\"><section class=\"directs--edit margin-block-end\">{members}</section><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative center\" aria-label=\"Delete Ping\" data-turbo-confirm=\"Are you sure you want to delete this ping and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" />Ping</button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></div>", esc(u.csrf_token.as_deref().unwrap_or(""))
+    );
+    let has_logo: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)).map_err(db_err)?;
+    Ok(render_source_page_sections(
+        &format!("Edit settings for {display_name}"), &panel, &room_form_nav(&headers),
+        "", "", "", if has_logo { "account-has-logo" } else { "" }, "",
+        Some(&u), u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
 async fn direct_delete(
@@ -7494,10 +7496,12 @@ async fn direct_new(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppRe
     if headers.get("turbo-frame").and_then(|value| value.to_str().ok()) == Some("direct_rooms_control") {
         return Ok(Html(frame).into_response());
     }
-    Ok(render(
+    Ok(render_source_page(
         "New ping",
         &frame,
+        "",
         Some(&u),
+        u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
 async fn direct_create(

@@ -1,5 +1,9 @@
 # Preliminary Rustfire measurements
 
+## Paired page snapshots
+
+`python bench/paired_visual_pages.py --output-dir /tmp/rustfire-visual-review` compared eight matched Chromium pages at 1280×800 against the pinned source. The normalized pixel differences were 0.071% for the room, 0.016% for account settings, 0.062% for the profile, 0.046% for search, 0.013% for a member page, and 0% for the bot list, open-room edit, and push-subscription pages. The fixture aligns timestamps, account join code, and the sampled search result; generated product names and values account for some remaining differences. `python bench/paired_direct_sidebar.py` also passed its parsed private-chat and room-creation workflow comparisons after the source-style page shell was applied to open-room and private-chat settings. These screenshots cover one viewport and fixture, not every application state or responsive layout.
+
 ## Room-page read check after query-format parity
 
 After the 3,348-case GET format sweep passed across three roles, `python bench/paired_room_shell.py --read-clients 32 --seconds 5 --campfire-workers 22` ran in both server orders on the release build. The probe checked every successful room-page read and matched the sampled parsed page sections before timing. Each app had zero read errors.
