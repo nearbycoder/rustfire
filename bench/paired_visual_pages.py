@@ -28,6 +28,7 @@ PAGES = (
     ("room-new-open", "/rooms/opens/new", "body"),
     ("room-new-private", "/rooms/closeds/new", "body"),
     ("ping-new", "/rooms/directs/new", "body"),
+    ("involvement", "/rooms/1/involvement", "body"),
     ("push-subscriptions", "/users/me/push_subscriptions", "body"),
 )
 

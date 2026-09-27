@@ -5137,7 +5137,16 @@ async fn involvement_get(
         ))
         .into_response());
     }
-    Ok(render("Notifications", &frame, Some(&u)))
+    let has_logo: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)",
+        [],
+        |row| row.get(0),
+    ).map_err(db_err)?;
+    Ok(render_source_page_sections(
+        "Notifications", &frame, "", "", "", "",
+        if has_logo { "account-has-logo" } else { "" }, "",
+        Some(&u), u.csrf_token.as_deref().unwrap_or(""),
+    ))
 }
 
 fn involvement_frame_html(rid: i64, kind: &str, current: &str, csrf_token: &str) -> String {
