@@ -2565,6 +2565,7 @@ dependencies = [
  "futures-util",
  "html-escape",
  "httpdate",
+ "multer",
  "openssl",
  "qrcodegen",
  "r2d2",

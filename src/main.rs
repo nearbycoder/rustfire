@@ -2174,6 +2174,30 @@ fn error_media_type(headers: &HeaderMap, uri: &Uri) -> HeaderValue {
 fn invalid_authenticity_response(headers: &HeaderMap, uri: &Uri) -> Response {
     rails_error_response(StatusCode::UNPROCESSABLE_ENTITY, headers, uri)
 }
+async fn multipart_authenticity_valid(
+    bytes: &Bytes,
+    content_type: &str,
+    csrf: &str,
+) -> bool {
+    let Ok(boundary) = multer::parse_boundary(content_type) else {
+        return false;
+    };
+    let mut multipart = multer::Multipart::new(Body::from(bytes.clone()).into_data_stream(), boundary);
+    let mut token = None;
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) if field.name() == Some("authenticity_token") => {
+                let Ok(value) = field.text().await else {
+                    return false;
+                };
+                token = Some(value);
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return token.as_deref() == Some(csrf),
+            Err(_) => return false,
+        }
+    }
+}
 fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> Response {
     let media = error_media_type(headers, uri);
     let json = media.as_bytes().starts_with(b"application/json");
@@ -3228,25 +3252,35 @@ async fn reject_banned_ip(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let (parts, body) = request.into_parts();
-                let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
-                    Ok(bytes) => bytes,
-                    Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-                };
-                let form_valid = if content_type.starts_with("application/x-www-form-urlencoded") {
-                    form_urlencoded::parse(&bytes)
-                        .any(|(key, value)| key == "authenticity_token" && value == csrf)
-                } else if content_type.starts_with("multipart/form-data") {
-                    bytes
-                        .windows(csrf.len())
-                        .any(|window| window == csrf.as_bytes())
-                } else {
-                    false
-                };
-                if !form_valid {
-                    return if anonymous_direct_upload { StatusCode::UNPROCESSABLE_ENTITY.into_response() } else { invalid_authenticity_response(&parts.headers, &parts.uri) };
+                let message_upload = request.method() == Method::POST
+                    && content_type.starts_with("multipart/form-data")
+                    && path.strip_prefix("/rooms/")
+                        .and_then(|rest| rest.strip_suffix("/messages"))
+                        .is_some_and(|room_id| room_id.parse::<i64>().is_ok());
+                // The message handler validates the form field as it streams the
+                // attachment, so large uploads do not need a buffered copy here.
+                if !message_upload {
+                    let (parts, body) = request.into_parts();
+                    let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
+                        Ok(bytes) => bytes,
+                        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                    };
+                    let form_valid = if content_type.starts_with("application/x-www-form-urlencoded") {
+                        form_urlencoded::parse(&bytes)
+                            .filter(|(key, _)| key == "authenticity_token")
+                            .map(|(_, value)| value == csrf)
+                            .last()
+                            .unwrap_or(false)
+                    } else if content_type.starts_with("multipart/form-data") {
+                        multipart_authenticity_valid(&bytes, &content_type, &csrf).await
+                    } else {
+                        false
+                    };
+                    if !form_valid {
+                        return if anonymous_direct_upload { StatusCode::UNPROCESSABLE_ENTITY.into_response() } else { invalid_authenticity_response(&parts.headers, &parts.uri) };
+                    }
+                    request = Request::from_parts(parts, Body::from(bytes));
                 }
-                request = Request::from_parts(parts, Body::from(bytes));
             }
         }
     }
@@ -6270,6 +6304,9 @@ async fn message_create(
     req: Request,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let csrf_header_valid = u.csrf_token.as_deref().is_some_and(|csrf| {
+        headers.get("x-csrf-token").and_then(|value| value.to_str().ok()) == Some(csrf)
+    });
     let (body, client_id, upload, rich) = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -6283,6 +6320,7 @@ async fn message_create(
         let mut client_id = None;
         let mut upload = None;
         let mut rich = true;
+        let mut form_csrf = None;
         while let Some(mut field) = multipart
             .next_field()
             .await
@@ -6321,7 +6359,12 @@ async fn message_create(
                 client_id = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             } else if name == "message[format]" {
                 rich = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)? == "html";
+            } else if name == "authenticity_token" {
+                form_csrf = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
+        }
+        if !csrf_header_valid && form_csrf.as_deref() != u.csrf_token.as_deref() {
+            return Ok(invalid_authenticity_response(&headers, &uri));
         }
         (body, client_id, upload, rich)
     } else {

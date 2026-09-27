@@ -35,14 +35,17 @@ def multipart(client_id, csrf, data):
     return prefix + data + f"\r\n--{boundary}--\r\n".encode(), boundary
 
 
-def post(connection, cookie, csrf, client_id, data):
+def post(connection, cookie, csrf, client_id, data, form_csrf_only):
     payload, boundary = multipart(client_id, csrf, data)
     begun = time.perf_counter()
-    connection.request("POST", "/rooms/1/messages", payload, {
-        "Cookie": cookie, "X-CSRF-Token": csrf,
+    headers = {
+        "Cookie": cookie,
         "Accept": "text/vnd.turbo-stream.html, text/html",
         "Content-Type": f"multipart/form-data; boundary={boundary}",
-    })
+    }
+    if not form_csrf_only:
+        headers["X-CSRF-Token"] = csrf
+    connection.request("POST", "/rooms/1/messages", payload, headers)
     response = connection.getresponse()
     body = response.read()
     elapsed_ms = (time.perf_counter() - begun) * 1000
@@ -76,7 +79,7 @@ def verify(database, uploads, campfire, clients, count, data):
         assert not list(uploads.glob("message-upload-*")), "Rustfire left staged upload files"
 
 
-def measure(process_pids, port, cookie, csrf, data, clients, count):
+def measure(process_pids, port, cookie, csrf, data, clients, count, form_csrf_only):
     ready = threading.Barrier(clients + 1, timeout=120)
     start = threading.Event()
     stop_sampling = threading.Event()
@@ -96,14 +99,14 @@ def measure(process_pids, port, cookie, csrf, data, clients, count):
         latencies = []
         try:
             try:
-                post(connection, cookie, csrf, f"capacity-warmup-{client}", data)
+                post(connection, cookie, csrf, f"capacity-warmup-{client}", data, form_csrf_only)
             except Exception:
                 ready.abort()
                 raise
             ready.wait()
             assert start.wait(30), "Timed upload start signal was not sent"
             for index in range(count):
-                latencies.append(post(connection, cookie, csrf, f"capacity-{client}-{index}", data))
+                latencies.append(post(connection, cookie, csrf, f"capacity-{client}-{index}", data, form_csrf_only))
             return latencies
         finally:
             connection.close()
@@ -114,8 +117,7 @@ def measure(process_pids, port, cookie, csrf, data, clients, count):
             ready.wait()
         except threading.BrokenBarrierError:
             for future in futures:
-                if future.done():
-                    future.result()
+                future.result(timeout=30)
             raise
         baseline_pss, baseline_cpu, _ = resource_snapshot(process_pids)
         samples.append(baseline_pss)
@@ -159,6 +161,7 @@ def main():
     parser.add_argument("--file-mib", type=int, default=8)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--rustfire-first", action="store_true")
+    parser.add_argument("--form-csrf-only", action="store_true", help="authenticate with only the multipart form field, without the X-CSRF-Token header")
     parser.add_argument("--report", type=pathlib.Path)
     args = parser.parse_args()
     if min(args.clients, args.uploads_per_client, args.file_mib, args.campfire_workers) < 1:
@@ -183,7 +186,7 @@ def main():
             def run_rustfire():
                 process = start_server(rust_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(rust_uploads)})
                 try:
-                    result = measure([process.pid], rust_port, "session_token=benchmark-session", "benchmark-csrf", data, args.clients, args.uploads_per_client)
+                    result = measure([process.pid], rust_port, "session_token=benchmark-session", "benchmark-csrf", data, args.clients, args.uploads_per_client, args.form_csrf_only)
                     verify(rust_db, rust_uploads, False, args.clients, args.uploads_per_client, data)
                     return result
                 finally:
@@ -195,7 +198,7 @@ def main():
                     try:
                         wait_for_server(camp_port, process)
                         cookie, csrf = login_campfire(camp_port)
-                        result = measure([process.pid, redis.pid], camp_port, cookie, csrf, data, args.clients, args.uploads_per_client)
+                        result = measure([process.pid, redis.pid], camp_port, cookie, csrf, data, args.clients, args.uploads_per_client, args.form_csrf_only)
                         verify(camp_db, REPOSITORY / "storage/files", True, args.clients, args.uploads_per_client, data)
                         return result
                     except Exception:
@@ -218,6 +221,7 @@ def main():
     report = {
         "clients": args.clients, "uploads_per_client": args.uploads_per_client,
         "file_bytes": len(data), "campfire_workers": args.campfire_workers,
+        "form_csrf_only": args.form_csrf_only,
         "rustfire_first": args.rustfire_first, "rustfire": rust_result, "campfire": camp_result,
     }
     if args.report:
