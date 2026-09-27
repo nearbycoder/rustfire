@@ -142,6 +142,19 @@ def image_preview(port, cookie, payload, name):
         return response.headers.get_content_type(), hashlib.sha256(response.read()).hexdigest()
 
 
+def video_poster(port, cookie, payload, name):
+    parsed = Presentation(name)
+    parsed.feed(payload.decode())
+    posters = [dict(item[1])["poster"] for item in parsed.structure
+               if isinstance(item, tuple) and item[0] == "video" and "poster" in dict(item[1])]
+    assert len(posters) == 1, (name, posters)
+    assert posters[0].startswith("/rails/active_storage/representations/redirect/"), (name, posters[0])
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{posters[0]}", headers={"Cookie": cookie})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.status == 200, (name, response.status)
+        return response.headers.get_content_type(), hashlib.sha256(response.read()).hexdigest()
+
+
 def malformed_state(database, campfire, upload_dir):
     with sqlite3.connect(database) as db:
         if campfire:
@@ -192,6 +205,7 @@ def main():
                 rust_previews = {name: image_preview(rust_port, "session_token=benchmark-session", payload, name)
                                  for (name, _, _, _), payload in zip(fixtures, rust_payloads)
                                  if name in PREVIEW_CASES}
+                rust_previews["mov-as-text"] = video_poster(rust_port, "session_token=benchmark-session", rust_payloads[3], "mov-as-text")
                 rust_bad = post(rust_port, "session_token=benchmark-session", "benchmark-csrf", ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                 rust_bad_row = malformed_state(rust_db, False, temp / "uploads")
                 assert not list((temp / "uploads").glob("message-upload-*")), "Rustfire left staged composer files"
@@ -207,6 +221,7 @@ def main():
                     camp_previews = {name: image_preview(camp_port, cookie, payload, name)
                                      for (name, _, _, _), payload in zip(fixtures, camp_payloads)
                                      if name in PREVIEW_CASES}
+                    camp_previews["mov-as-text"] = video_poster(camp_port, cookie, camp_payloads[3], "mov-as-text")
                     camp_bad = post(camp_port, cookie, csrf, ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                     camp_bad_row = malformed_state(camp_db, True, REPOSITORY / "storage/files")
                 except Exception:
@@ -226,7 +241,7 @@ def main():
                 assert rust == camp, (case[0], next(((i,left,right) for i,(left,right) in enumerate(zip(rust,camp)) if left!=right), (len(rust),len(camp))))
             large_note = f", {args.large_mib} MiB plus one byte file" if args.large_mib else ""
             image_note = ", generated GIF/WebP/TIFF, animated GIF, and EXIF-rotated JPEG/WebP/PNG" if args.extended_images else ""
-            print(f"PASS paired message attachment types, saved original bytes, Turbo responses, malformed image failure{image_note}{large_note}")
+            print(f"PASS paired message attachment types, saved original bytes, QuickTime poster, Turbo responses, malformed image failure{image_note}{large_note}")
         finally:
             redis.terminate()
             redis.wait(timeout=10)

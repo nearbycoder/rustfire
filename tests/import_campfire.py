@@ -106,12 +106,12 @@ def main():
             video_payload = b'{"_rails":{"data":"gid://campfire/ActiveStorage::Blob/13?expires_in","pur":"attachable"}}'
             video_encoded = base64.urlsafe_b64encode(video_payload).decode()
             video_sgid = f"{video_encoded}--{hmac.new(signing_key, video_encoded.encode(), hashlib.sha1).hexdigest()}"
-            video_body = f'<div>Clip <action-text-attachment sgid="{video_sgid}" content-type="video/mp4" filename="clip.mp4" width="16" height="16" previewable="true"></action-text-attachment> end</div>'
+            video_body = f'<div>Clip <action-text-attachment sgid="{video_sgid}" content-type="video/quicktime" filename="alpha-centuri.mov" width="320" height="180" previewable="true"></action-text-attachment> end</div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(6,'Message',7,'body',?,?,?)", (video_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
-            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(7,?)", ("Clip [clip.mp4] end",))
-            gallery_body = f'<div class="attachment-gallery attachment-gallery--3"><action-text-attachment sgid="{image_sgid}" content-type="image/png" filename="pixel.png"></action-text-attachment><action-text-attachment sgid="{pdf_sgid}" content-type="application/pdf" filename="page.pdf"></action-text-attachment><action-text-attachment sgid="{video_sgid}" content-type="video/mp4" filename="clip.mp4"></action-text-attachment></div>'
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(7,?)", ("Clip [alpha-centuri.mov] end",))
+            gallery_body = f'<div class="attachment-gallery attachment-gallery--3"><action-text-attachment sgid="{image_sgid}" content-type="image/png" filename="pixel.png"></action-text-attachment><action-text-attachment sgid="{pdf_sgid}" content-type="application/pdf" filename="page.pdf"></action-text-attachment><action-text-attachment sgid="{video_sgid}" content-type="video/quicktime" filename="alpha-centuri.mov"></action-text-attachment></div>'
             fixture.execute("INSERT INTO action_text_rich_texts(id,record_type,record_id,name,body,created_at,updated_at) VALUES(7,'Message',8,'body',?,?,?)", (gallery_body, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
-            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(8,?)", ("[pixel.png] [page.pdf] [clip.mp4]",))
+            fixture.execute("INSERT INTO message_search_index(rowid,body) VALUES(8,?)", ("[pixel.png] [page.pdf] [alpha-centuri.mov]",))
             for message_id, rich_id, blob_id, content_type, filename, label in ((9, 8, 14, "image/tiff", "scan.tiff", "Scan"), (10, 9, 15, "image/svg+xml", "icon.svg", "Icon")):
                 payload = f'{{"_rails":{{"data":"gid://campfire/ActiveStorage::Blob/{blob_id}?expires_in","pur":"attachable"}}}}'.encode()
                 encoded = base64.urlsafe_b64encode(payload).decode()
@@ -163,13 +163,10 @@ def main():
             video_key = "ab13cdef1234567890"
             video_file = source_files / video_key[:2] / video_key[2:4] / video_key
             video_file.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory() as video_temp:
-                generated = Path(video_temp) / "clip.mp4"
-                subprocess.run(("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=1", "-t", "1", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-y", str(generated)), capture_output=True, check=True)
-                video_bytes = generated.read_bytes()
+            video_bytes = (SOURCE.parents[2] / "test/fixtures/files/alpha-centuri.mov").read_bytes()
             video_file.write_bytes(video_bytes)
             fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
-                VALUES(13,?,'clip.mp4','video/mp4',?,'local',?,'2026-01-01 00:00:00')""", (video_key, json.dumps({"width": 16, "height": 16, "identified": True}), len(video_bytes)))
+                VALUES(13,?,'alpha-centuri.mov','video/quicktime',?,'local',?,'2026-01-01 00:00:00')""", (video_key, json.dumps({"width": 320, "height": 180, "identified": True}), len(video_bytes)))
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                 VALUES(13,'embeds','ActionText::RichText',6,13,'2026-01-01 00:00:00')""")
             fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
@@ -261,7 +258,7 @@ def main():
             image_stored = imported.execute("SELECT stored_name,width,height FROM inline_blobs WHERE id=11").fetchone()
             assert image_stored[1:] == (1, 1) and (target_uploads / image_stored[0]).read_bytes() == image_bytes
             image_variant = target_uploads / "variants" / f"{image_stored[0]}-inline.png"
-            assert image_variant.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            assert hashlib.sha256(image_variant.read_bytes()).hexdigest() == "8f4014cc056144e2b5446eb662167c125fa4fcbf2842127e0e528f0444db70e0"
             image_variant.unlink()
             pdf_html = imported.execute("SELECT body_html FROM messages WHERE id=6").fetchone()[0]
             assert "attachment--preview attachment--pdf" in pdf_html, pdf_html
@@ -271,17 +268,17 @@ def main():
             pdf_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=12").fetchone()[0]
             assert (target_uploads / pdf_stored).read_bytes() == pdf_bytes
             pdf_variant = target_uploads / "variants" / f"{pdf_stored}-inline-pdf.png"
-            assert pdf_variant.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            assert hashlib.sha256(pdf_variant.read_bytes()).hexdigest() == "a8561bc9adcd5f210a4b06d6ddd858681bcb28f4af239dd485fddfb8c7979bd7"
             pdf_variant.unlink()
             video_html = imported.execute("SELECT body_html FROM messages WHERE id=7").fetchone()[0]
-            assert "attachment--preview attachment--mp4" in video_html and 'width="16"' in video_html, video_html
+            assert "attachment--preview attachment--mov" in video_html and 'width="320"' in video_html, video_html
             video_url = re.search(r'<img src="([^"]+)"', video_html)
             assert video_url and "/rails/active_storage/representations/redirect/" in video_url.group(1), video_html
             assert variation_data(video_url.group(1)) == {"resize_to_limit": [1024, 768]}
             video_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=13").fetchone()[0]
             assert (target_uploads / video_stored).read_bytes() == video_bytes
             video_variant = target_uploads / "variants" / f"{video_stored}-inline-video.jpeg"
-            assert video_variant.read_bytes().startswith(b"\xff\xd8")
+            assert hashlib.sha256(video_variant.read_bytes()).hexdigest() == "c2828b3402f711dc900fab8edcba2fe2df20b4786faa2eff2532dc83cf1f5897"
             video_variant.unlink()
             gallery_html = imported.execute("SELECT body_html FROM messages WHERE id=8").fetchone()[0]
             assert 'class="attachment-gallery attachment-gallery--3"' in gallery_html, gallery_html

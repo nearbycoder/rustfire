@@ -13,7 +13,7 @@ import urllib.request
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
-from paired_bot_admin import cleanup_campfire_uploads, request
+from paired_bot_admin import PNG, cleanup_campfire_uploads, request
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_direct_upload import path_from_url, raw_request
 from paired_link_preview import Presentation
@@ -22,6 +22,7 @@ from paired_room_shell import minimal_pdf
 
 CASES = [("text", "note.txt", "text/plain", b"An inline note.\n"),
          ("image", "moon.jpg", "image/jpeg", (REPOSITORY / "test/fixtures/files/moon.jpg").read_bytes()),
+         ("png", "pixel.png", "image/png", PNG),
          ("pdf", "page.pdf", "application/pdf", minimal_pdf()),
          ("video", "alpha-centuri.mov", "video/quicktime", (REPOSITORY / "test/fixtures/files/alpha-centuri.mov").read_bytes())]
 
@@ -162,7 +163,7 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
         status, structure, payload = post(port, cookie, csrf, name, metadata)
         assert status == 200 and structure, (name, status, payload[:500])
         stored_blob(database, campfire, upload_root, metadata["id"], data)
-        preview_type = {"image": "image/jpeg", "pdf": "image/png", "video": "image/jpeg"}.get(name)
+        preview_type = {"image": "image/jpeg", "png": "image/png", "pdf": "image/png", "video": "image/jpeg"}.get(name)
         results[name] = normalized(structure), image_previews(port, cookie, structure, content_type=preview_type) if preview_type else None, search_text(database, name)
     image = uploads["image"]
     image_data = CASES[1][3]
@@ -263,7 +264,7 @@ def main():
                 finally:
                     stop_server(camp)
             assert rust_results == camp_results, (rust_results, camp_results)
-            print("PASS paired inline text/JPEG/PDF/QuickTime uploads, preview bytes, galleries, search, edits, and shared-blob retention")
+            print(f"PASS paired inline text/JPEG/PNG/PDF/QuickTime uploads, preview bytes, galleries, search, edits, and shared-blob retention; PNG preview SHA-256 {camp_results['png'][1][0]}")
         finally:
             redis.terminate()
             redis.wait(timeout=10)

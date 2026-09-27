@@ -44,12 +44,27 @@ def store_blob(source_files, uploads, key, byte_size):
     return stored
 
 
+SHARPEN_MASK = Path(__file__).resolve().parent.parent / "static/vips-sharpen-mask.txt"
+VIDEO_PREVIEW_FILTER = r"select=eq(n\,0)+eq(key\,1)+gt(scene\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+
+
+def prepare_image_variant(source, output, width=1024, height=768):
+    stage = output.parent / f"inline-{uuid.uuid4()}.v"
+    temporary = output.parent / f"inline-{uuid.uuid4()}{output.suffix}"
+    try:
+        subprocess.run(("vips", "thumbnail", str(source), str(stage), str(width), "--height", str(height), "--size", "down"), capture_output=True, check=True)
+        subprocess.run(("vips", "conv", str(stage), str(temporary), str(SHARPEN_MASK), "--precision", "integer"), capture_output=True, check=True)
+        os.replace(temporary, output)
+    finally:
+        stage.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+
+
 def prepare_inline_image(uploads, stored, content_type, width, height):
     formats = {"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "image/tiff": "png"}
     variant_dir = uploads / "variants"
     variant_dir.mkdir(exist_ok=True)
     output = variant_dir / f"{stored}-inline.{formats[content_type]}"
-    temporary = variant_dir / f"inline-{uuid.uuid4()}.{formats[content_type]}"
     try:
         dimensions = []
         for field in ("width", "height"):
@@ -57,13 +72,10 @@ def prepare_inline_image(uploads, stored, content_type, width, height):
             dimensions.append(int(result.stdout.strip()))
         if (width is not None and width != dimensions[0]) or (height is not None and height != dimensions[1]):
             raise ValueError(f"inline image {stored} dimensions do not match Active Storage metadata")
-        subprocess.run(("vips", "thumbnail", str(uploads / stored), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
-        os.replace(temporary, output)
+        prepare_image_variant(uploads / stored, output)
         return dimensions
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         raise ValueError(f"cannot render inline image {stored} ({content_type})") from error
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def prepare_inline_pdf(uploads, stored):
@@ -72,33 +84,27 @@ def prepare_inline_pdf(uploads, stored):
     prefix = variant_dir / f"pdf-{uuid.uuid4()}"
     frame = prefix.with_suffix(".png")
     output = variant_dir / f"{stored}-inline-pdf.png"
-    temporary = variant_dir / f"pdf-{uuid.uuid4()}.png"
     try:
         subprocess.run(("pdftoppm", "-f", "1", "-singlefile", "-cropbox", "-r", "72", "-png", str(uploads / stored), str(prefix)), capture_output=True, check=True)
-        subprocess.run(("vips", "thumbnail", str(frame), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
-        os.replace(temporary, output)
+        prepare_image_variant(frame, output)
     except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError(f"cannot render inline PDF {stored}") from error
     finally:
         frame.unlink(missing_ok=True)
-        temporary.unlink(missing_ok=True)
 
 
 def prepare_inline_video(uploads, stored):
     variant_dir = uploads / "variants"
     variant_dir.mkdir(exist_ok=True)
     frame = variant_dir / f"video-{uuid.uuid4()}.jpg"
-    temporary = variant_dir / f"video-{uuid.uuid4()}.jpeg"
     output = variant_dir / f"{stored}-inline-video.jpeg"
     try:
-        subprocess.run(("ffmpeg", "-v", "error", "-i", str(uploads / stored), "-y", "-vframes", "1", "-f", "image2", str(frame)), capture_output=True, check=True)
-        subprocess.run(("vips", "thumbnail", str(frame), str(temporary), "1024", "--height", "768", "--size", "down"), capture_output=True, check=True)
-        os.replace(temporary, output)
+        subprocess.run(("ffmpeg", "-v", "error", "-i", str(uploads / stored), "-y", "-vf", VIDEO_PREVIEW_FILTER, "-frames:v", "1", "-f", "image2", str(frame)), capture_output=True, check=True)
+        prepare_image_variant(frame, output)
     except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError(f"cannot render inline video {stored}") from error
     finally:
         frame.unlink(missing_ok=True)
-        temporary.unlink(missing_ok=True)
 
 
 def import_data(source, target, source_files, uploads):
