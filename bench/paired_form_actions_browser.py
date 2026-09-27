@@ -62,7 +62,11 @@ def check_browser(session, port, database, campfire):
         browser(session, "snapshot", "-i")
         browser(session, "scrollintoview", "#message_form-actions .message__edit-btn")
         browser(session, "eval", "document.querySelector('#message_form-actions .message__edit-btn').click()")
-        browser(session, "wait", '#message_form-actions form[data-action*="form#cancel"] trix-editor')
+        try:
+            browser(session, "wait", '#message_form-actions form[data-action*="form#cancel"] trix-editor')
+        except RuntimeError as error:
+            state = browser(session, "eval", "({url:location.href,frame:document.querySelector('#edit_message_form-actions')?.outerHTML.slice(0,1000)})")
+            raise AssertionError(("message editor did not open", state, browser(session, "network", "requests", "--filter", "/rooms/1/messages/1"), browser(session, "errors"))) from error
         browser(session, "snapshot", "-i")
 
     open_editor()

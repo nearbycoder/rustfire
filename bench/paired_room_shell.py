@@ -151,6 +151,19 @@ def assert_head_runtime_metadata(source, target):
         else:
             assert source_link == target_link, (name, source_link, target_link)
 
+    def assets(page):
+        head = page.split(b"</head>", 1)[0]
+        import_map = re.search(rb'<script type="importmap" data-turbo-track="reload">(.*?)</script>', head, re.S)
+        assert import_map, "Missing source import map"
+        return (
+            import_map.group(1),
+            re.findall(rb'<link rel="modulepreload" href="([^"]+)">', head),
+            re.findall(rb'<link rel="stylesheet" href="([^"]+)" data-turbo-track="reload"\s*/?>', head),
+            re.findall(rb'<script type="module">(.*?)</script>', head, re.S),
+        )
+
+    assert assets(source) == assets(target), "Campfire asset graph differs"
+
 
 def message_template(page):
     match = re.search(rb'<script type="text/template" data-messages-target="template">(.*?)</script>', page, re.S)
@@ -344,6 +357,7 @@ def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, 
     if sample_dir:
         (sample_dir / f"campfire-message-{label}-{message_id}.html").write_bytes(source)
         (sample_dir / f"rustfire-message-{label}-{message_id}.html").write_bytes(target)
+    assert_head_runtime_metadata(source, target)
     for part in ("nav", "footer", "sidebar", "main-content"):
         assert_equal(f"message {message_id} {label} {part}", section(source, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths), section(target, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths))
     assert 'class="admin"' in target.decode()
@@ -440,6 +454,12 @@ def main():
                 for label, path in (("original", "/rooms/1"), ("direct", "/rooms/2"), ("private", "/rooms/3")):
                     _, target = compare_room(label, path, camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir)
                     assert 'class="sidebar admin"' in target.decode()
+                for asset in ("/assets/application-b6b3795e.js", "/assets/controllers/composer_controller-cd7e7ff3.js"):
+                    source_status, source_headers, source_body = raw_get(camp_port, asset, camp_cookie)
+                    target_status, target_headers, target_body = raw_get(rust_port, asset, "session_token=benchmark-session")
+                    assert source_status == target_status == 200 and source_body == target_body, (asset, source_status, target_status)
+                    for name in ("content-type", "cache-control"):
+                        assert source_headers.get(name) == target_headers.get(name), (asset, name, source_headers.get(name), target_headers.get(name))
                 post_message(camp_port, camp_cookie, camp_csrf)
                 post_message(rust_port, "session_token=benchmark-session", "benchmark-csrf")
                 compare_room("original with message", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True)
@@ -528,9 +548,9 @@ def main():
                     source_search = source_db.execute("SELECT body FROM message_search_index WHERE rowid=7").fetchone()[0]
                     target_search = target_db.execute("SELECT body FROM message_search_index WHERE rowid=7").fetchone()[0]
                     assert source_search == target_search == "report-Q-.txt", (source_search, target_search)
-                for port, cookie in ((camp_port, camp_cookie), (rust_port, "session_token=benchmark-session")):
+                for name, port, cookie in (("campfire", camp_port, camp_cookie), ("rustfire", rust_port, "session_token=benchmark-session")):
                     search_status, _, search_body = raw_get(port, "/searches?q=report-Q-.txt", cookie)
-                    assert search_status == 200 and b"room-page-unsafe-filename" in search_body, ("attachment search", port, search_status, search_body[:120])
+                    assert search_status == 200 and b"room-page-unsafe-filename" in search_body, ("attachment search", name, port, search_status, search_body[:120])
                 unsafe_source, unsafe_target = compare_message_page(7, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
                 compare_message_page(7, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 compare_room("original with unsafe filename", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True, ignore_csrf_inputs=True, normalize_blob_paths=True)

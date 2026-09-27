@@ -1452,3 +1452,18 @@ Rustfire cleared all replies within 0.06–0.07 seconds of the final HTTP post; 
 ## Message-list response and cursor parity
 
 `python bench/paired_success_bodies.py` passed 14 matched successful GET bodies: health and service-worker responses, bot message-list HTML/JSON, and the ordinary room message list with three seeded messages, both paging directions, and empty 204 pages. The parsed message-list markup matched after normalizing generated CSRF tokens, avatar signatures, and local origins. `python bench/paired_message_cache.py --messages 3 --campfire-workers 1` and the same probe with `--messages 40` both passed. Its cursor sweep matched successful page IDs and parsed markup, conditional 304 behavior, and the status, media type, and SHA-256 body hash of source-shaped 404 responses for invalid or missing IDs. Campfire gives `before` precedence over `after` and accepts a numeric ID prefix; Rustfire now follows those sampled cases. Standalone message-page documents still differ in the head and asset graph, and neither probe establishes all response-body or full-app parity.
+
+## Pinned browser modules as the default frontend
+
+Rustfire now serves Campfire's pinned JavaScript import map and all 104 compiled JavaScript assets by default; `RUSTFIRE_FRONTEND=rustfire` retains the prior browser script as a fallback. The paired room-shell probe checks the same 92 import-map entries and module preloads, stylesheet URLs, and module entrypoint on room and standalone message pages. HTTP reads of the entrypoint and composer JavaScript also match source bytes, media type, and 30-day cache control. It also passed its original, direct, private, plain, rich, text, JPEG, MP4, PDF, and unsafe-filename fixtures after Rustfire's search SELECT gained the author bio column required by its shared message decoder. The original browser uploader's wildcard-Accept multipart request now receives a Turbo Stream, and Turbo's redirected sign-in GET can load the HTML room page.
+
+The paired Chromium probes passed clicked lightboxes, replies, multi-file composer previews and uploads, typing and unread state, offline/reconnect behavior, boost drafts, logout, and message edit, avatar upload, and custom-style form actions with the pinned browser modules. These are sampled interactions; remaining routes, browser profiles, push behavior, and full document bytes are not verified.
+
+With the source modules as the default, `python bench/paired_room_shell.py --read-clients 32 --seconds 5 --campfire-workers 22` passed in both server orders. Its timed reader checked each HTTP 200, HTML media type, and one-message root, with zero errors:
+
+| Server order | Rustfire reads/s / p95 | Campfire reads/s / p95 |
+| :--- | ---: | ---: |
+| Campfire first | 3,289.9 / 12.49 ms | 1,240.4 / 46.98 ms |
+| Rustfire first | 3,531.1 / 11.34 ms | 1,136.9 / 70.43 ms |
+
+Rustfire served 2.65–3.11× as many checked room reads in these two short, same-host samples. The asset graph and sampled page sections matched before timing, but the client did not parse every measured body and the complete HTML documents still differ. This is one room and one account at 32 clients; it does not establish whole-app or maximum sustained capacity.

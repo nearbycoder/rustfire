@@ -63,6 +63,11 @@ use web_push::{
 type Db = Pool<SqliteConnectionManager>;
 type AppResult = Result<Response, StatusCode>;
 static VAPID_PUBLIC: OnceLock<String> = OnceLock::new();
+static CAMPFIRE_FRONTEND: OnceLock<bool> = OnceLock::new();
+
+fn use_campfire_frontend() -> bool {
+    *CAMPFIRE_FRONTEND.get_or_init(|| std::env::var("RUSTFIRE_FRONTEND").map_or(true, |value| value != "rustfire"))
+}
 static CUSTOM_STYLES: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
 struct AppState {
@@ -2326,8 +2331,13 @@ fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, foo
     };
     let current_user_meta = current.map(|user| format!("<meta name=\"current-user-id\" content=\"{}\"><meta name=\"current-user-name\" content=\"{}\">", user.id, esc(&user.name))).unwrap_or_default();
     let logo_url = logo_version.map_or_else(|| "/account/logo".to_string(), |version| format!("/account/logo?v={version}"));
+    let scripts = if use_campfire_frontend() {
+        include_str!("../static/campfire-importmap.html")
+    } else {
+        "<script defer src=\"/static/app.js\"></script>"
+    };
     let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}<script defer src="/static/app.js"></script>{head_extra}</head>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}{scripts}{head_extra}</head>
 <body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav>{flash}<main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
         title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
     );
@@ -6375,12 +6385,12 @@ async fn message_create(
     let csrf_header_valid = u.csrf_token.as_deref().is_some_and(|csrf| {
         headers.get("x-csrf-token").and_then(|value| value.to_str().ok()) == Some(csrf)
     });
-    let (body, client_id, upload, rich) = if headers
+    let multipart_form = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .starts_with("multipart/form-data")
-    {
+        .starts_with("multipart/form-data");
+    let (body, client_id, upload, rich) = if multipart_form {
         let mut multipart = Multipart::from_request(req, &s)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -6463,7 +6473,7 @@ async fn message_create(
             Json(message_json(&s, &m, Some(&headers))?),
         )
             .into_response())
-    } else if suffix == Some("turbo_stream") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html")) {
+    } else if suffix == Some("turbo_stream") || (suffix.is_none() && (accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html") || (multipart_form && matches!(accept.trim(), "*/*" | "")))) {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html; charset=utf-8")],
@@ -7398,7 +7408,7 @@ async fn search_get(
     let mut messages = Vec::new();
     if !query.trim().is_empty() {
         // Select the latest visible IDs before loading attachments, boosts, and rich text.
-        let mut stmt=db.prepare("WITH hits AS MATERIALIZED (SELECT m.id,m.created_at_ns FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN memberships mem ON mem.room_id=m.room_id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100) SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM hits h JOIN messages m ON m.id=h.id JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id ORDER BY h.created_at_ns DESC,h.id DESC").map_err(db_err)?;
+        let mut stmt=db.prepare("WITH hits AS MATERIALIZED (SELECT m.id,m.created_at_ns FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN memberships mem ON mem.room_id=m.room_id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100) SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height,u.bio FROM hits h JOIN messages m ON m.id=h.id JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id ORDER BY h.created_at_ns DESC,h.id DESC").map_err(db_err)?;
         messages = stmt
             .query_map(params![u.id, query], chat_message_from_row)
             .map_err(db_err)?
@@ -11401,6 +11411,7 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let native_navigation = native_navigation_path(path);
     let asset = path.starts_with("/assets/") || path.starts_with("/static/");
+    let pinned_asset = path.starts_with("/assets/");
     let active_storage = path.starts_with("/rails/active_storage/");
     let application_controller = !asset && path != "/up" && path != "/cable"
         && !active_storage && !native_navigation;
@@ -11412,7 +11423,10 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
         || (native_navigation && explicit_format.is_none());
     let requested = req.headers().get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let first_format = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
-    let rejected_format = if !native_navigation && matches!(req.method(), &Method::GET | &Method::HEAD) {
+    // Turbo retains its stream Accept header while following a form redirect to
+    // a full HTML page. Campfire serves that navigation as HTML.
+    let turbo_navigation = use_campfire_frontend() && req.headers().contains_key("x-turbo-request-id");
+    let rejected_format = if !native_navigation && !turbo_navigation && matches!(req.method(), &Method::GET | &Method::HEAD) {
         match explicit_format.as_deref() {
             Some("html") => None,
             Some("json") => Some("application/json"),
@@ -11444,6 +11458,9 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
         && !response.headers().contains_key(header::CONTENT_TYPE)
     {
         response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    }
+    if pinned_asset && response.status().is_success() {
+        response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=2592000"));
     }
     if !response.status().is_informational()
         && !matches!(response.status(), StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED | StatusCode::NOT_ACCEPTABLE)

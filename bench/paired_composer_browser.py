@@ -81,6 +81,7 @@ def check_app(session, port, database, rails):
     browser(session, "wait", "--url", "**/rooms/1")
     browser(session, "wait", "#composer trix-editor")
     browser(session, "wait", "--load", "networkidle")
+    browser(session, "eval", "window.__composerErrors=[];window.addEventListener('unhandledrejection',event=>window.__composerErrors.push(String(event.reason)))")
     files = [str(REPOSITORY / "test/fixtures/files/earth.png"), str(REPOSITORY / "test/fixtures/files/moon.jpg")]
     browser(session, "upload", '#composer input[type="file"]', *files)
     both = preview(session)
@@ -111,7 +112,7 @@ def check_app(session, port, database, rails):
         if len(rows) == 3 and sum(bool(row[3]) for row in rows) == 2:
             break
         time.sleep(0.1)
-    assert len(rows) == 3 and sum(bool(row[3]) for row in rows) == 2, (rows, browser(session, "eval", "JSON.stringify({alerts:window.__composerAlerts,messages:[...document.querySelectorAll('.messages .message')].map(node=>({id:node.id,classes:node.className,text:node.textContent.slice(-100)}))})"))
+    assert len(rows) == 3 and sum(bool(row[3]) for row in rows) == 2, (rows, browser(session, "eval", "JSON.stringify({alerts:window.__composerAlerts,errors:window.__composerErrors,messages:[...document.querySelectorAll('.messages .message')].map(node=>({id:node.id,classes:node.className,text:node.textContent.slice(-100)}))})"), browser(session, "network", "requests", "--filter", "/rooms/1/messages"))
     for _, client_id, _, _ in rows:
         browser(session, "wait", f'#message_{client_id}[data-message-id]')
     assert preview(session) == [], preview(session)
