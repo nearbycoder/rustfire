@@ -2,6 +2,8 @@
 """Import a stopped ONCE Campfire SQLite installation into a new Rustfire database."""
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,12 +37,14 @@ def blob_file(source_files, key):
     return path
 
 
-def store_blob(source_files, uploads, key, byte_size):
+def store_blob(source_files, uploads, key, byte_size, subdir=None):
     source = blob_file(source_files, key)
     if source.stat().st_size != byte_size:
         raise ValueError(f"Active Storage byte size mismatch: {source}")
     stored = str(uuid.uuid4())
-    shutil.copyfile(source, uploads / stored)
+    destination = uploads / subdir if subdir else uploads
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination / stored)
     return stored
 
 
@@ -246,13 +250,26 @@ def import_data(source, target, source_files, uploads):
         raise ValueError(f"{unmatched} inline file embeds do not belong to a message body")
 
     media = (("User", "avatar", "avatars", "user_id"), ("Account", "logo", "account_logos", "id"))
+    avatar_blobs = {}
     for record_type, name, table, key_column in media:
         count = 0
-        query = """SELECT attachment.record_id,blob.key,COALESCE(blob.content_type,'application/octet-stream'),blob.byte_size
+        query = """SELECT attachment.record_id,blob.id,blob.key,blob.filename,
+            COALESCE(blob.content_type,'application/octet-stream'),blob.byte_size,blob.created_at
             FROM active_storage_attachments attachment JOIN active_storage_blobs blob ON blob.id=attachment.blob_id
             WHERE attachment.record_type=? AND attachment.name=?"""
-        for record_id, key, content_type, size in rows(source, query, (record_type, name)):
-            stored = store_blob(source_files, uploads, key, size)
+        for record_id, blob_id, key, filename, content_type, size, created_at in rows(source, query, (record_type, name)):
+            if table == "avatars" and blob_id in avatar_blobs:
+                stored = avatar_blobs[blob_id]
+            else:
+                stored = store_blob(source_files, uploads, key, size, "avatars" if table == "avatars" else None)
+                if table == "avatars":
+                    avatar_blobs[blob_id] = stored
+                    with (uploads / "avatars" / stored).open("rb") as file:
+                        checksum = base64.b64encode(hashlib.file_digest(file, "md5").digest()).decode()
+                    target.execute("""INSERT INTO direct_upload_blobs
+                        (id,storage_key,filename,content_type,content_type_is_null,byte_size,checksum,created_at,uploaded)
+                        VALUES(?,?,?,?,0,?,?,?,1)""",
+                        (blob_id, f"avatars/{stored}", filename, content_type, size, checksum, created_at))
             target.execute(f"INSERT INTO {table}({key_column},stored_name,content_type) VALUES(?,?,?)", (record_id, stored, content_type))
             count += 1
         counts[table] = count

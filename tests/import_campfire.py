@@ -4,6 +4,7 @@
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 
@@ -205,6 +207,18 @@ def main():
                     VALUES(?,?,'media.txt','text/plain','{}','local',?,'2026-01-01 00:00:00')""", (blob_id, media_key, len(file_bytes)))
                 fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
                     VALUES(?,?,?,?,?,'2026-01-01 00:00:00')""", (blob_id, name, record_type, record_id, blob_id))
+            for user_id in (4, 5):
+                fixture.execute("""INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at)
+                    VALUES(?,?,2,0,?,'2026-01-01 00:00:00','2026-01-01 00:00:00')""",
+                    (user_id, f"Imported Bot {user_id}", f"importedbot{user_id}"))
+                fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                    VALUES(?,'avatar','User',?,21,'2026-01-01 00:00:00')""", (20 + user_id, user_id))
+            bot_key = "ab21cdef1234567890"
+            bot_file = source_files / bot_key[:2] / bot_key[2:4] / bot_key
+            bot_file.parent.mkdir(parents=True, exist_ok=True)
+            bot_file.write_bytes(image_bytes)
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
+                VALUES(21,?,'bot.png','image/png','{}','local',?,'2026-01-01 00:00:00')""", (bot_key, len(image_bytes)))
             fixture.execute("DELETE FROM message_search_index WHERE rowid IN (1,2)")
             fixture.execute("UPDATE sqlite_sequence SET seq=40 WHERE name='users'")
             fixture.execute("UPDATE sqlite_sequence SET seq=50 WHERE name='rooms'")
@@ -314,9 +328,15 @@ def main():
             assert imported.execute("SELECT custom_styles FROM accounts").fetchone() == ("body { color: navy; }",)
             assert imported.execute("SELECT token FROM sessions WHERE id=1").fetchone() == ("imported-session",)
             csrf_token = imported.execute("SELECT csrf_token FROM sessions WHERE id=1").fetchone()[0]
-            for table in ("avatars", "account_logos"):
-                media = imported.execute(f"SELECT stored_name FROM {table}").fetchone()[0]
-                assert (target_uploads / media).read_bytes() == file_bytes
+            owner_avatar = imported.execute("SELECT stored_name FROM avatars WHERE user_id=1").fetchone()[0]
+            assert (target_uploads / "avatars" / owner_avatar).read_bytes() == file_bytes
+            logo = imported.execute("SELECT stored_name FROM account_logos").fetchone()[0]
+            assert (target_uploads / logo).read_bytes() == file_bytes
+            bot_avatars = imported.execute("SELECT stored_name FROM avatars WHERE user_id IN (4,5) ORDER BY user_id").fetchall()
+            assert len(bot_avatars) == 2 and bot_avatars[0] == bot_avatars[1]
+            assert (target_uploads / "avatars" / bot_avatars[0][0]).read_bytes() == image_bytes
+            blob = imported.execute("SELECT storage_key,filename,content_type,byte_size,uploaded FROM direct_upload_blobs WHERE id=21").fetchone()
+            assert blob == (f"avatars/{bot_avatars[0][0]}", "bot.png", "image/png", len(image_bytes), 1)
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
@@ -334,6 +354,50 @@ def main():
             else:
                 raise AssertionError("imported Rustfire server did not serve the room")
             assert "Imported room" in page and "Hello" in page and "imported.txt" in page
+            source_blob_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"ActiveStorage", 1000, 64)
+            bot_blob_payload = json.dumps({"_rails": {"data": 21, "pur": "blob_id"}}, separators=(",", ":")).encode()
+            bot_blob_encoded = base64.b64encode(bot_blob_payload).decode()
+            bot_blob_token = f"{bot_blob_encoded}--{hmac.new(source_blob_key, bot_blob_encoded.encode(), hashlib.sha1).hexdigest()}"
+            preview_urls = []
+            for bot_id in (4, 5):
+                edit = urllib.request.Request(f"http://127.0.0.1:{port}/account/bots/{bot_id}/edit",
+                    headers={"Cookie": "session_token=imported-session"})
+                with urllib.request.urlopen(edit, timeout=2) as response:
+                    edit_page = response.read().decode()
+                preview = re.search(r'<img alt="Bot avatar"[^>]*src="([^"]+)"', edit_page)
+                preview_url = html.unescape(preview.group(1)) if preview else ""
+                assert "/rails/active_storage/blobs/redirect/" in preview_url, edit_page[edit_page.find('Bot avatar')-100:edit_page.find('Bot avatar')+250]
+                assert f"/{bot_blob_token}/bot.png" in preview_url, preview_url
+                preview_urls.append(preview_url)
+                with urllib.request.urlopen(preview_url, timeout=2) as response:
+                    assert response.read() == image_bytes
+            assert preview_urls[0] == preview_urls[1]
+            remove_avatar = urllib.request.Request(f"http://127.0.0.1:{port}/account/bots/4/avatar/delete", data=b"",
+                headers={"Cookie": "session_token=imported-session", "X-CSRF-Token": csrf_token})
+            with urllib.request.urlopen(remove_avatar, timeout=2) as response:
+                assert response.status == 200
+            with urllib.request.urlopen(preview_urls[1], timeout=2) as response:
+                assert response.read() == image_bytes
+            with sqlite3.connect(target_db) as shared:
+                assert shared.execute("SELECT user_id FROM avatars WHERE user_id IN (4,5)").fetchall() == [(5,)]
+                assert shared.execute("SELECT count(*) FROM direct_upload_blobs WHERE id=21").fetchone() == (1,)
+            bot_list = urllib.request.Request(f"http://127.0.0.1:{port}/account/bots",
+                headers={"Cookie": "session_token=imported-session"})
+            with urllib.request.urlopen(bot_list, timeout=2) as response:
+                bot_page = response.read().decode()
+            bot_avatar = re.search(r"title='Imported Bot 5'[^>]*><img[^>]*src='([^']+)'", bot_page)
+            assert bot_avatar, bot_page[bot_page.find('Imported Bot 5')-100:bot_page.find('Imported Bot 5')+300]
+            avatar_request = urllib.request.Request(f"http://127.0.0.1:{port}{html.unescape(bot_avatar.group(1))}",
+                headers={"Cookie": "session_token=imported-session"})
+            with urllib.request.urlopen(avatar_request, timeout=10) as response:
+                assert response.headers["Content-Type"] == "image/webp" and response.read().startswith(b"RIFF")
+            remove_last_avatar = urllib.request.Request(f"http://127.0.0.1:{port}/account/bots/5/avatar/delete", data=b"",
+                headers={"Cookie": "session_token=imported-session", "X-CSRF-Token": csrf_token})
+            with urllib.request.urlopen(remove_last_avatar, timeout=2) as response:
+                assert response.status == 200
+            with sqlite3.connect(target_db) as cleared:
+                assert cleared.execute("SELECT count(*) FROM direct_upload_blobs WHERE id=21").fetchone() == (0,)
+            assert not (target_uploads / "avatars" / bot_avatars[0][0]).exists()
             assert '<style data-turbo-track="reload">body { color: navy; }</style>' in page
             assert public_key in page, page[:800]
             cookie_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"signed cookie", 1000, 64)
@@ -346,9 +410,9 @@ def main():
                 assert "Imported room" in response.read().decode()
             form = urllib.parse.urlencode({"message[body]": "posted with imported cookie"}).encode()
             post = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages", data=form,
-                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/vnd.turbo-stream.html"})
             with urllib.request.urlopen(post, timeout=2) as response:
-                assert response.status == 201
+                assert response.status == 200 and b"posted with imported cookie" in response.read()
             create_bot = urllib.request.Request(f"http://127.0.0.1:{port}/account/bots",
                 data=urllib.parse.urlencode({"user[name]": "After import"}).encode(),
                 headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token})
@@ -402,9 +466,13 @@ def main():
             edited_body = f'<div>Edited picture <figure data-trix-attachment=\'{trix_data}\'><img src="ignored"></figure> end</div>'
             edit_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5",
                 data=urllib.parse.urlencode({"message[body]": edited_body}).encode(), method="PATCH",
-                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
-            with urllib.request.urlopen(edit_image, timeout=2) as response:
-                assert response.status == 200
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/html"})
+            try:
+                urllib.request.urlopen(edit_image, timeout=2)
+            except urllib.error.HTTPError as response:
+                assert response.code == 302 and response.headers["Location"].endswith("/rooms/1/messages/5")
+            else:
+                raise AssertionError("message edit did not redirect")
             with sqlite3.connect(target_db) as edited:
                 plain, source, rendered = edited.execute("SELECT body,body_source,body_html FROM messages WHERE id=5").fetchone()
                 assert plain == "Edited picture [pixel.png] end", (plain, rendered)
@@ -413,9 +481,13 @@ def main():
                 assert edited.execute("SELECT count(*) FROM inline_embeds WHERE message_id=5").fetchone() == (1,)
             remove_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5",
                 data=urllib.parse.urlencode({"message[body]": "<div>No picture</div>"}).encode(), method="PATCH",
-                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "application/json"})
-            with urllib.request.urlopen(remove_image, timeout=2) as response:
-                assert response.status == 200
+                headers={"Cookie": f"session_token={signed_cookie}", "X-CSRF-Token": csrf_token, "Accept": "text/html"})
+            try:
+                urllib.request.urlopen(remove_image, timeout=2)
+            except urllib.error.HTTPError as response:
+                assert response.code == 302 and response.headers["Location"].endswith("/rooms/1/messages/5")
+            else:
+                raise AssertionError("message edit did not redirect")
             with sqlite3.connect(target_db) as edited:
                 assert edited.execute("SELECT body FROM messages WHERE id=5").fetchone() == ("No picture",)
                 assert edited.execute("SELECT count(*) FROM inline_embeds WHERE message_id=5").fetchone() == (0,)

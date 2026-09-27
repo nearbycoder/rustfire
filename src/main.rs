@@ -9189,8 +9189,7 @@ fn save_avatar(
     )
     .map_err(db_err)?;
     if let Some(old) = old {
-        db.execute("DELETE FROM direct_upload_blobs WHERE storage_key=?1", [format!("avatars/{old}")]).map_err(db_err)?;
-        remove_avatar_files(&old);
+        remove_avatar_if_unreferenced(&db, &old)?;
     }
     Ok(())
 }
@@ -9229,6 +9228,17 @@ fn remove_avatar_files(stored: &str) {
     let _ = std::fs::remove_file(dir.join(stored));
     let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}.webp")));
 }
+fn remove_avatar_if_unreferenced(db: &rusqlite::Connection, stored: &str) -> Result<(), StatusCode> {
+    let referenced: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM avatars WHERE stored_name=?1)",
+        [stored], |row| row.get(0),
+    ).map_err(db_err)?;
+    if !referenced {
+        db.execute("DELETE FROM direct_upload_blobs WHERE storage_key=?1", [format!("avatars/{stored}")]).map_err(db_err)?;
+        remove_avatar_files(stored);
+    }
+    Ok(())
+}
 async fn avatar_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -9258,7 +9268,7 @@ async fn avatar_delete(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Ap
     )
     .map_err(db_err)?;
     if let Some(old) = old {
-        remove_avatar_files(&old);
+        remove_avatar_if_unreferenced(&db, &old)?;
     }
     Ok(found_redirect(&public_url(&headers, "/users/me/profile")))
 }
@@ -10034,7 +10044,8 @@ async fn bot_edit(
         |row| row.get(0),
     ).map_err(db_err)?;
     let avatar = if let Some((blob_id, filename)) = avatar_blob {
-        public_url(&headers, &blob_path(&s.blob_signing_key, blob_id, &rails_sanitized_filename(&filename))?)
+        let key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
+        public_url(&headers, &blob_path(key, blob_id, &rails_sanitized_filename(&filename))?)
     } else if !has_avatar {
         "/assets/default-bot-avatar-de1d12f7.svg".to_string()
     } else {
@@ -10191,7 +10202,7 @@ async fn bot_avatar_delete(
     )
     .map_err(db_err)?;
     if let Some(old) = old {
-        remove_avatar_files(&old);
+        remove_avatar_if_unreferenced(&db, &old)?;
     }
     Ok(Redirect::to(&format!("/account/bots/{id}/edit")).into_response())
 }
