@@ -6172,7 +6172,7 @@ async fn deliver_push(
     if !valid_push_keys(&subscription.p256dh_key, &subscription.auth_key) {
         if invalidate_expired && !subscription.auth_key.is_empty()
             && invalid_push_point(&subscription.p256dh_key) {
-            invalidate_push_subscription(&s, subscription.id)?;
+            invalidate_push_subscription(&s.db, &s.has_push_subscriptions, subscription.id)?;
         }
         return Err("invalid subscription".into());
     }
@@ -6204,7 +6204,7 @@ async fn deliver_push(
         Ok(message) => message,
         Err(error) => {
             if invalidate_expired && invalid_push_point(&subscription.p256dh_key) {
-                invalidate_push_subscription(&s, subscription.id)?;
+                invalidate_push_subscription(&s.db, &s.has_push_subscriptions, subscription.id)?;
             }
             return Err(error);
         }
@@ -6226,22 +6226,27 @@ async fn deliver_push(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    if invalidate_expired && response.status().as_u16() == 410 {
-        invalidate_push_subscription(&s, subscription.id)?;
+    finish_push_response(&s.db, &s.has_push_subscriptions, subscription.id,
+        response.status(), invalidate_expired)
+}
+fn finish_push_response(db: &Db, has_subscriptions: &AtomicBool, id: i64,
+    status: StatusCode, invalidate_expired: bool) -> Result<(), String> {
+    if invalidate_expired && status == StatusCode::GONE {
+        invalidate_push_subscription(db, has_subscriptions, id)?;
     }
-    if !response.status().is_success() {
-        return Err(format!("push service returned {}", response.status()));
+    if !status.is_success() {
+        return Err(format!("push service returned {status}"));
     }
     Ok(())
 }
-fn invalidate_push_subscription(s: &AppState, id: i64) -> Result<(), String> {
-    let db = pool(s).map_err(|e| e.to_string())?;
+fn invalidate_push_subscription(db: &Db, has_subscriptions: &AtomicBool, id: i64) -> Result<(), String> {
+    let db = db.get().map_err(|e| e.to_string())?;
     db.execute("DELETE FROM push_subscriptions WHERE id=?1", [id])
         .map_err(|e| e.to_string())?;
     let any: bool = db
         .query_row("SELECT EXISTS(SELECT 1 FROM push_subscriptions)", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    s.has_push_subscriptions.store(any, Ordering::Relaxed);
+    has_subscriptions.store(any, Ordering::Relaxed);
     Ok(())
 }
 fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCode> {
@@ -13311,6 +13316,38 @@ mod tests {
         let large = super::campfire_push_message_fallback(&info, signature.clone(), &vec![b'x'; 4_078]).unwrap();
         assert_eq!(large.payload.unwrap().content.len(), 4_182);
         assert!(super::campfire_push_message_fallback(&info, signature, &vec![b'x'; 4_079]).is_err());
+    }
+    #[test]
+    fn push_service_expiry_deletes_only_background_http_410() {
+        let database = r2d2::Pool::builder().max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory()).unwrap();
+        {
+            let conn = database.get().unwrap();
+            conn.execute_batch("CREATE TABLE push_subscriptions(id INTEGER PRIMARY KEY); INSERT INTO push_subscriptions(id) VALUES(1),(2),(3),(4),(5),(6),(7);").unwrap();
+        }
+        let has_subscriptions = std::sync::atomic::AtomicBool::new(true);
+        for (id, status, background, error) in [
+            (1, axum::http::StatusCode::NOT_FOUND, true, true),
+            (2, axum::http::StatusCode::GONE, true, true),
+            (3, axum::http::StatusCode::SERVICE_UNAVAILABLE, true, true),
+            (4, axum::http::StatusCode::NO_CONTENT, true, false),
+            (5, axum::http::StatusCode::GONE, false, true),
+            (6, axum::http::StatusCode::NOT_FOUND, false, true),
+        ] {
+            let result = super::finish_push_response(&database, &has_subscriptions, id, status, background);
+            assert_eq!(result.is_err(), error, "{status}");
+        }
+        let conn = database.get().unwrap();
+        let ids = conn.prepare("SELECT id FROM push_subscriptions ORDER BY id").unwrap()
+            .query_map([], |row| row.get::<_, i64>(0)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(ids, vec![1, 3, 4, 5, 6, 7]);
+        assert!(has_subscriptions.load(std::sync::atomic::Ordering::Relaxed));
+        conn.execute("DELETE FROM push_subscriptions WHERE id != 7", []).unwrap();
+        drop(conn);
+        assert!(super::finish_push_response(&database, &has_subscriptions, 7,
+            axum::http::StatusCode::GONE, true).is_err());
+        assert!(!has_subscriptions.load(std::sync::atomic::Ordering::Relaxed));
     }
     #[test]
     fn push_endpoint_allowlist_excludes_other_hosts_and_ports() {

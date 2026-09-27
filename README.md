@@ -120,6 +120,8 @@ The importer preserves unknown inline image subtypes as file attachments and pre
 
 The paired invalid-key push probe now checks background cleanup and direct test notifications separately. Both apps discard background subscriptions with malformed P-256 points, including a short but valid-base64 point, retain malformed-base64 and blank-auth subscriptions, return the same 500 page for direct test failures without deleting those rows, and skip delivery to a saved endpoint outside the permitted host list. Rustfire also has a decryptable encryption fallback for legacy auth-secret lengths, compressed P-256 keys, and payloads above its normal Web Push library's limit that Campfire accepts. This checks local delivery decisions; real push-service responses and browser delivery remain open.
 
+A separate controlled push-response probe now matches Campfire's saved subscription outcomes for background HTTP 404, 410, 503, and 204 and direct 404/410 failures. Only background 410 removes a row. This verifies response classification and persistence without a live push-service connection.
+
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior, including remaining generated document-head metadata and HTML serialization differences
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
