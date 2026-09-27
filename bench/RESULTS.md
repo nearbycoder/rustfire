@@ -1,5 +1,16 @@
 # Preliminary Rustfire measurements
 
+## Current 400-socket rich-text browser-channel comparison
+
+On the release build at commit `6a3bbd3`, the four-room, four-user 30-second rich-text mix was rerun in both server orders with 64 checked readers, three posts per second per room, and 100 authenticated sockets per room on eight source-shaped browser channels. Both apps saved all 360 posts within the deadline, delivered all **36,000 message appends and 36,000 unread events**, and emitted all **5,200 expected presence read events** during setup. The harness compared 1,440 paired append structures and every timed read's status, media type, and message count. Both orders had zero checked read errors, missing events, or early socket closes.
+
+| Server order | Rustfire reads/s / p95 | Campfire reads/s / p95 | Rustfire write p95 | Campfire write p95 | Rustfire / Campfire peak PSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 2,669 / 33.84 ms | 1,276 / 107.50 ms | 36.54 ms | 152.25 ms | 117 / 3,828 MiB |
+| Rustfire first | 2,736 / 33.15 ms | 1,496 / 84.16 ms | 35.86 ms | 157.93 ms | 117 / 3,967 MiB |
+
+Rustfire served **1.83–2.09×** as many checked reads per second in this sampled mix. Reproduce with `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 3 --sockets-per-room 100 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources`, then add `--rustfire-first`. The [Campfire-first report](results/rich-browser-400-2026-09-27-camp-first.json) and [Rustfire-first report](results/rich-browser-400-2026-09-27-rust-first.json) contain the raw counts, latency distributions, deliveries, and resource samples. The apps and load clients shared one 32-logical-CPU host; Campfire used 22 Puma workers and isolated Redis, while Rustfire used one release process. Socket setup preceded the measured interval. This is a 30-second, 400-socket sample, not a sustained capacity limit or whole-app speed claim at complete parity.
+
 ## Paired page snapshots
 
 `python bench/paired_visual_pages.py --output-dir /tmp/rustfire-visual-boost` compared fifteen matched Chromium pages at 1280×800 against the pinned source. The normalized pixel differences ranged from 0% to 0.124%; both boost pages, the custom CSS editor, bot list, open-room edit, both new-room forms, new private-chat form, notification-setting page, and push-subscription page matched pixel for pixel. Before the shell changes, the two boost pages differed by 12.705% and 12.842%, the notification-setting page by 12.737%, and the custom CSS editor by 1.039% of pixels. At 390×844, the fifteen pages differed by 0% to 0.280%, with the room page having the largest difference. The fixture aligns timestamps, account join code, and the sampled search result; generated product names and local URL values account for some remaining differences. `python bench/paired_boost_controls.py`, `python bench/paired_direct_sidebar.py`, `python bench/paired_involvement.py`, and `python bench/paired_custom_styles.py` passed their relevant form, transition, and persistence checks. These screenshots cover two viewports and one fixture, not every application state or device behavior.
