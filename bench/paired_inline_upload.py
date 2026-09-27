@@ -17,10 +17,13 @@ from paired_bot_admin import cleanup_campfire_uploads, request
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_direct_upload import path_from_url, raw_request
 from paired_link_preview import Presentation
+from paired_room_shell import minimal_pdf
 
 
 CASES = [("text", "note.txt", "text/plain", b"An inline note.\n"),
-         ("image", "moon.jpg", "image/jpeg", (REPOSITORY / "test/fixtures/files/moon.jpg").read_bytes())]
+         ("image", "moon.jpg", "image/jpeg", (REPOSITORY / "test/fixtures/files/moon.jpg").read_bytes()),
+         ("pdf", "page.pdf", "application/pdf", minimal_pdf()),
+         ("video", "alpha-centuri.mov", "video/quicktime", (REPOSITORY / "test/fixtures/files/alpha-centuri.mov").read_bytes())]
 
 
 def upload(port, cookie, csrf, filename, content_type, data):
@@ -66,14 +69,14 @@ def normalized(structure):
         if tag == "img" and "/rails/active_storage/representations/redirect/" in values.get("src", ""):
             path = urllib.parse.urlsplit(values["src"]).path
             parts = path.split("/")
-            assert len(parts) >= 8 and parts[-1].endswith(".jpg"), path
+            assert len(parts) >= 8, path
             variation = json.loads(base64.b64decode(parts[-2].split("--", 1)[0]))["_rails"]["data"]
-            values["src"] = f'/rails/active_storage/representations/redirect/<blob>/{variation["format"]}:{variation["resize_to_limit"]}/{parts[-1]}'
+            values["src"] = f'/rails/active_storage/representations/redirect/<blob>/{variation.get("format", "source")}:{variation["resize_to_limit"]}/{parts[-1]}'
         result.append((tag, tuple(sorted(values.items()))))
     return result
 
 
-def image_previews(port, cookie, structure, expected=1):
+def image_previews(port, cookie, structure, expected=1, content_type="image/jpeg"):
     paths = [dict(item[1])["src"] for item in structure
              if isinstance(item, tuple) and item[0] == "img" and
              "/rails/active_storage/representations/redirect/" in dict(item[1]).get("src", "")]
@@ -83,7 +86,7 @@ def image_previews(port, cookie, structure, expected=1):
         request = urllib.request.Request(f"http://127.0.0.1:{port}{urllib.parse.urlsplit(path).path}",
                                          headers={"Cookie": cookie})
         with urllib.request.urlopen(request, timeout=30) as response:
-            assert response.status == 200 and response.headers.get_content_type() == "image/jpeg"
+            assert response.status == 200 and response.headers.get_content_type() == content_type
             digests.append(hashlib.sha256(response.read()).hexdigest())
     return tuple(digests)
 
@@ -159,7 +162,8 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
         status, structure, payload = post(port, cookie, csrf, name, metadata)
         assert status == 200 and structure, (name, status, payload[:500])
         stored_blob(database, campfire, upload_root, metadata["id"], data)
-        results[name] = normalized(structure), image_previews(port, cookie, structure) if name == "image" else None, search_text(database, name)
+        preview_type = {"image": "image/jpeg", "pdf": "image/png", "video": "image/jpeg"}.get(name)
+        results[name] = normalized(structure), image_previews(port, cookie, structure, content_type=preview_type) if preview_type else None, search_text(database, name)
     image = uploads["image"]
     image_data = CASES[1][3]
     status, structure, payload = post(port, cookie, csrf, "image-copy", image)
@@ -259,7 +263,7 @@ def main():
                 finally:
                     stop_server(camp)
             assert rust_results == camp_results, (rust_results, camp_results)
-            print("PASS paired inline text/JPEG uploads, gallery variation and bytes, search, edit add/remove, and shared-blob retention")
+            print("PASS paired inline text/JPEG/PDF/QuickTime uploads, preview bytes, galleries, search, edits, and shared-blob retention")
         finally:
             redis.terminate()
             redis.wait(timeout=10)

@@ -1378,6 +1378,8 @@ fn generate_inline_pdf_variant(input: &std::path::Path, output: &std::path::Path
     let _ = std::fs::remove_file(frame);
     published
 }
+// Rails 8.2's Active Storage preview filter selects the first scene change or keyframe.
+const VIDEO_PREVIEW_FILTER: &str = "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1";
 fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Path, width: i64, height: i64) -> bool {
     let Some(parent) = output.parent() else {
         return false;
@@ -1389,7 +1391,7 @@ fn generate_inline_video_variant(input: &std::path::Path, output: &std::path::Pa
     let rendered = std::process::Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(input)
-        .args(["-y", "-vframes", "1", "-f", "image2"])
+        .args(["-y", "-vf", VIDEO_PREVIEW_FILTER, "-frames:v", "1", "-f", "image2"])
         .arg(&frame)
         .output()
         .is_ok_and(|result| result.status.success());
@@ -1466,7 +1468,7 @@ fn analyze_video_and_poster(input: &std::path::Path, stored: &str) -> (Option<f6
     let frame = std::process::Command::new("ffmpeg")
         .arg("-i")
         .arg(input)
-        .args(["-y", "-vframes", "1", "-f", "image2", "-"])
+        .args(["-y", "-vf", VIDEO_PREVIEW_FILTER, "-frames:v", "1", "-f", "image2", "-"])
         .output();
     if let Ok(frame) = frame {
         if frame.status.success() && !frame.stdout.is_empty() {
