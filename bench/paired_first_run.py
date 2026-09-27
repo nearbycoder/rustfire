@@ -14,6 +14,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import campfire_env, wait_for_server
 from paired_join import browser
+from paired_room_shell import assert_equal, section
 from paired_turbo_fanout import MessageTagSequence
 
 
@@ -105,7 +106,7 @@ def check(port, database, campfire, image):
     assert status == 200 and "All Talk" in room_page
     assert fetch(opener, port, "/first_run")[:2] == (302, "/")
     assert fetch(browser(), port, "/")[:2] == (302, "/session/new")
-    return (account, [(name, email, role)], [(room_name, kind)], avatar_count), form_structure(page), page_shell(page)
+    return (account, [(name, email, role)], [(room_name, kind)], avatar_count), form_structure(page), page_shell(page), page
 
 
 def main():
@@ -130,6 +131,10 @@ def main():
                 rust_result = check(rust_port, rust_db, False, image)
             finally:
                 stop_server(rust)
+            vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
+            source_env["VAPID_PUBLIC_KEY"], source_env["VAPID_PRIVATE_KEY"] = subprocess.check_output(
+                [str(RUBY), "-e", vapid_code, str(rust_db.with_suffix(".vapid.der"))], text=True,
+            ).splitlines()
             with open(temp / "puma.log", "w+") as log:
                 source = subprocess.Popen([str(RUBY), str(RUBY.parent / "bundle"), "exec", "puma", "-C", "config/puma.rb"], cwd=source_root, env=source_env, stdout=log, stderr=log)
                 try:
@@ -147,6 +152,8 @@ def main():
                 mismatches = [(index, rust_item, source_item) for index, (rust_item, source_item) in enumerate(zip(rust_part, source_part)) if rust_item != source_item]
                 assert not mismatches and len(rust_part) == len(source_part), (len(rust_part), len(source_part), mismatches[:12])
             assert rust_result[2] == source_result[2], (rust_result[2], source_result[2])
+            for part in ("head", "body"):
+                assert_equal(f"first-run complete {part}", section(source_result[3].encode(), part), section(rust_result[3].encode(), part))
         finally:
             redis.terminate()
             redis.wait(timeout=10)

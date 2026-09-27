@@ -13,7 +13,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 from paired_join import browser
-from paired_room_shell import HeadMeta, section
+from paired_room_shell import HeadMeta, assert_equal, section
 from paired_turbo_fanout import MessageTagSequence
 
 
@@ -124,6 +124,10 @@ def main():
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(SOURCE, RUBY, BUNDLE, SOURCE / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
+        vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
+        camp_env["VAPID_PUBLIC_KEY"], camp_env["VAPID_PRIVATE_KEY"] = subprocess.check_output(
+            [str(RUBY), "-e", vapid_code, str(rust_db.with_suffix(".vapid.der"))], text=True,
+        ).splitlines()
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         camp_env["WEB_CONCURRENCY"] = "1"
         with sqlite3.connect(camp_db) as db:
@@ -163,6 +167,11 @@ def main():
                 mismatches = [(i, left, right) for i, (left, right) in enumerate(zip(rust_part, camp_part)) if left != right]
                 assert not mismatches and len(rust_part) == len(camp_part), (len(rust_part), len(camp_part), mismatches[:12])
             assert rust_shape[1] == camp_shape[1], (rust_shape[1], camp_shape[1])
+            for label, original, target in (("sign-in", camp_shape[2], rust_shape[2]), ("rejected sign-in", camp_shape[3], rust_shape[3]), ("rate-limited sign-in", camp_shape[4], rust_shape[4])):
+                if label != "sign-in":
+                    original = re.sub(r'(<div class="flash__inner shadow"[^>]*>\s*<img[^>]*>)\s*</span>', r'\1', original, count=1)
+                for part in ("head", "body"):
+                    assert_equal(f"{label} complete {part}", section(original.encode(), part), section(target.encode(), part))
             for target in ("nav", "main-content", "footer", "sidebar"):
                 rust_tokens = section(rust_shape[2].encode(), target)
                 camp_tokens = section(camp_shape[2].encode(), target)

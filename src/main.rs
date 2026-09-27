@@ -2286,14 +2286,14 @@ fn render(title: &str, body: &str, current: Option<&User>) -> Response {
     )
 }
 fn render_unauth(title: &str, body: &str, logo_version: Option<&str>) -> Response {
-    render_unauth_with_nav_and_flash(title, body, "", "", logo_version)
+    render_unauth_with_nav_and_flash(title, body, "", "", "", logo_version)
 }
 fn render_unauth_with_nav(title: &str, body: &str, nav: &str, logo_version: Option<&str>) -> Response {
-    render_unauth_with_nav_and_flash(title, body, nav, "", logo_version)
+    render_unauth_with_nav_and_flash(title, body, nav, "", "", logo_version)
 }
-fn render_unauth_with_nav_and_flash(title: &str, body: &str, nav: &str, flash: &str, logo_version: Option<&str>) -> Response {
+fn render_unauth_with_nav_and_flash(title: &str, body: &str, nav: &str, flash: &str, head_extra: &str, logo_version: Option<&str>) -> Response {
     let token = Uuid::new_v4().to_string();
-    let mut response = render_source_page_sections_with_logo(title, body, nav, "", "", "", "", "", flash, None, &token, logo_version);
+    let mut response = render_source_page_sections_with_logo(title, body, nav, "", "", "", "", head_extra, flash, None, &token, logo_version);
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
@@ -3718,7 +3718,7 @@ fn login_page(s: &AppState, headers: &HeaderMap, email_address: &str, rejection:
         account_name = esc(&account_name),
         email_address = esc(email_address),
     );
-    let mut response = render_unauth_with_nav_and_flash("Sign in", &body, "", flash, Some(&logo_version));
+    let mut response = render_unauth_with_nav_and_flash("Sign in", &body, "", flash, "<meta name=\"turbo-visit-control\" content=\"reload\">", Some(&logo_version));
     if let Some(status) = rejection {
         *response.status_mut() = status;
     }

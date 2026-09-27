@@ -13,7 +13,7 @@ import urllib.request
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
-from paired_room_shell import HeadMeta
+from paired_room_shell import HeadMeta, assert_equal, section
 from paired_turbo_fanout import MessageTagSequence
 
 
@@ -77,6 +77,7 @@ def check(port, database, signed_cookie):
     opener = browser()
     status, _, page, _ = fetch(opener, port, "/join/benchmark")
     assert status == 200, status
+    initial_page = page
     for field in ("user[name]", "user[email_address]", "user[password]", "user[avatar]"):
         assert f'name="{field}"' in page, field
     assert 'enctype="multipart/form-data"' in page
@@ -125,7 +126,7 @@ def check(port, database, signed_cookie):
         assert status == 200
         login_results.append(fetch(login_browser, port, "/session", {"email_address": address, "password": "signup-password"}, csrf_token(login_page))[0])
     assert (stored_email, login_results) == ("Mixed.Case@Example.invalid", [302, 401]), (stored_email, login_results)
-    return signup_result, navigation, icons
+    return signup_result, navigation, icons, initial_page, login
 
 
 def main():
@@ -136,14 +137,18 @@ def main():
         rust_port, source_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         source_env = seed_campfire(SOURCE, RUBY, BUNDLE, SOURCE / "storage/db/production.sqlite3", source_db, [], source_port, temp)
+        vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
+        source_env["VAPID_PUBLIC_KEY"], source_env["VAPID_PRIVATE_KEY"] = subprocess.check_output(
+            [str(RUBY), "-e", vapid_code, str(rust_db.with_suffix(".vapid.der"))], text=True,
+        ).splitlines()
         source_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
-        with sqlite3.connect(rust_db) as db:
-            db.execute("UPDATE users SET email_address='benchmark@example.invalid' WHERE id=1")
         with sqlite3.connect(source_db) as db:
             db.execute("UPDATE accounts SET name='Benchmark',join_code='benchmark' WHERE id=1")
             account_updated_at = db.execute("SELECT updated_at FROM accounts WHERE id=1").fetchone()[0]
+            owner_name = db.execute("SELECT name FROM users WHERE id=1").fetchone()[0]
         with sqlite3.connect(rust_db) as db:
             db.execute("UPDATE accounts SET updated_at=? WHERE id=1", [account_updated_at])
+            db.execute("UPDATE users SET name=?,email_address='benchmark@example.invalid' WHERE id=1", [owner_name])
         redis, redis_log = start_redis(temp, redis_port)
         try:
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": source_env["SECRET_KEY_BASE"]})
@@ -164,7 +169,10 @@ def main():
                     raise
                 finally:
                     stop_server(source)
-            assert rust_result == source_result, (rust_result, source_result)
+            assert rust_result[:3] == source_result[:3], (rust_result[:3], source_result[:3])
+            for label, source_page, target_page in (("invitation", source_result[3], rust_result[3]), ("duplicate-email sign-in", source_result[4], rust_result[4])):
+                for part in ("head", "body"):
+                    assert_equal(f"{label} complete {part}", section(source_page.encode(), part), section(target_page.encode(), part))
         finally:
             redis.terminate()
             redis.wait(timeout=10)
