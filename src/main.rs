@@ -1880,6 +1880,36 @@ fn flatten_inline_blob_presentation(
         }
     }).to_string()
 }
+fn canonicalize_attachment_galleries(input: &str) -> String {
+    if !input.contains("presentation") {
+        return input.to_string();
+    }
+    let mut document = ParsedHtml::parse_fragment(input);
+    let selector = Selector::parse("div").unwrap();
+    let galleries = document.select(&selector).filter_map(|node| {
+        let mut count = 0;
+        for child in node.children() {
+            if child.value().as_text().is_some_and(|text| text.trim().is_empty()) {
+                continue;
+            }
+            let Some(element) = child.value().as_element() else { return None };
+            if element.name() != "action-text-attachment" || element.attr("presentation") != Some("gallery") {
+                return None;
+            }
+            count += 1;
+        }
+        (count >= 2).then_some((node.id(), count))
+    }).collect::<Vec<_>>();
+    if galleries.is_empty() {
+        return input.to_string();
+    }
+    for (id, count) in galleries {
+        let replacement = ParsedHtml::parse_fragment(&format!("<div class='attachment-gallery attachment-gallery--{count}'></div>"));
+        let element = replacement.select(&selector).next().unwrap().value().clone();
+        *document.tree.get_mut(id).unwrap().value() = HtmlNode::Element(element);
+    }
+    document.root_element().inner_html()
+}
 fn link_uploaded_inline_blobs(
     db: &rusqlite::Connection,
     message_id: i64,
@@ -5590,7 +5620,7 @@ fn insert_message(
     db.execute("INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich && !body.trim().is_empty() {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     if rich {
-        let normalized = action_text_webhook_html(body);
+        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(body));
         let cleaned = strip_disallowed_rich_tags(&normalized);
         let inline_input = cleaned.as_deref().unwrap_or(&normalized);
         if !link_uploaded_inline_blobs(&db, id, inline_input, &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?.is_empty() {
@@ -6329,7 +6359,7 @@ async fn message_update(
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let mut newly_linked = Vec::new();
     let (plain, body_html, body_source, used_inline) = if rich {
-        let normalized = action_text_webhook_html(body);
+        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(body));
         let cleaned = strip_disallowed_rich_tags(&normalized);
         newly_linked = link_uploaded_inline_blobs(&db, mid, cleaned.as_deref().unwrap_or(&normalized), &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?;
         let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);
@@ -11466,8 +11496,9 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source, missing_search) in &batch {
-            let cleaned = strip_disallowed_rich_tags(source);
-            let (inline, used) = render_imported_inline_files(cleaned.as_deref().unwrap_or(source), &tx, *id, signing_key, imported_key, blob_key, true)
+            let gallery = canonicalize_attachment_galleries(source);
+            let cleaned = strip_disallowed_rich_tags(&gallery);
+            let (inline, used) = render_imported_inline_files(cleaned.as_deref().unwrap_or(&gallery), &tx, *id, signing_key, imported_key, blob_key, true)
                 .map_err(|status| format!("rendering imported inline files for message {id}: {status}"))?;
             let (trusted, plain_source) = replace_mention_attachments(&inline, &tx, signing_key, imported_key, avatar_key)
                 .map_err(|status| format!("rendering imported message {id}: {status}"))?;

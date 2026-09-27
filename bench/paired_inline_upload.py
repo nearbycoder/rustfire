@@ -36,9 +36,9 @@ def upload(port, cookie, csrf, filename, content_type, data):
     return metadata
 
 
-def post(port, cookie, csrf, name, metadata):
+def post(port, cookie, csrf, name, metadata, rich=None):
     attachment = f'<action-text-attachment sgid="{metadata["attachable_sgid"]}" content-type="{metadata["content_type"]}" filename="{metadata["filename"]}"></action-text-attachment>'
-    rich = f"<div>Before {attachment} After</div>"
+    rich = rich if rich is not None else f"<div>Before {attachment} After</div>"
     body = urllib.parse.urlencode({"message[body]": rich, "message[client_message_id]": f"inline-upload-{name}",
                                    "authenticity_token": csrf})
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
@@ -63,27 +63,32 @@ def normalized(structure):
             continue
         tag, attrs = item
         values = dict(attrs)
-        if tag == "img" and values.get("src", "").find("/rails/active_storage/representations/redirect/") >= 0:
+        if tag == "img" and "/rails/active_storage/representations/redirect/" in values.get("src", ""):
             path = urllib.parse.urlsplit(values["src"]).path
-            assert path.endswith("/moon.jpg"), path
-            values["src"] = "/rails/active_storage/representations/redirect/<blob>/<variation>/moon.jpg"
+            parts = path.split("/")
+            assert len(parts) >= 8 and parts[-1].endswith(".jpg"), path
+            variation = json.loads(base64.b64decode(parts[-2].split("--", 1)[0]))["_rails"]["data"]
+            values["src"] = f'/rails/active_storage/representations/redirect/<blob>/{variation["format"]}:{variation["resize_to_limit"]}/{parts[-1]}'
         result.append((tag, tuple(sorted(values.items()))))
     return result
 
 
-def image_preview(port, cookie, structure):
+def image_previews(port, cookie, structure, expected=1):
     paths = [dict(item[1])["src"] for item in structure
              if isinstance(item, tuple) and item[0] == "img" and
              "/rails/active_storage/representations/redirect/" in dict(item[1]).get("src", "")]
-    assert len(paths) == 1, paths
-    request = urllib.request.Request(f"http://127.0.0.1:{port}{urllib.parse.urlsplit(paths[0]).path}",
-                                     headers={"Cookie": cookie})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        assert response.status == 200 and response.headers.get_content_type() == "image/jpeg"
-        return hashlib.sha256(response.read()).hexdigest()
+    assert len(paths) == expected, paths
+    digests = []
+    for path in paths:
+        request = urllib.request.Request(f"http://127.0.0.1:{port}{urllib.parse.urlsplit(path).path}",
+                                         headers={"Cookie": cookie})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            assert response.status == 200 and response.headers.get_content_type() == "image/jpeg"
+            digests.append(hashlib.sha256(response.read()).hexdigest())
+    return tuple(digests)
 
 
-def stored_blob(database, campfire, upload_root, blob_id, data):
+def stored_blob(database, campfire, upload_root, blob_id, data, expected_links=1):
     with sqlite3.connect(database) as db:
         if campfire:
             key = db.execute("SELECT key FROM active_storage_blobs WHERE id=?", [blob_id]).fetchone()[0]
@@ -93,7 +98,7 @@ def stored_blob(database, campfire, upload_root, blob_id, data):
             key = db.execute("SELECT stored_name FROM inline_blobs WHERE id=?", [blob_id]).fetchone()[0]
             linked = db.execute("SELECT count(*) FROM inline_embeds WHERE blob_id=?", [blob_id]).fetchone()[0]
             path = upload_root / key
-    assert linked == 1, (blob_id, linked)
+    assert linked == expected_links, (blob_id, linked, expected_links)
     assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(data).digest(), path
     return path
 
@@ -147,12 +152,58 @@ def get_presentation(port, cookie, name, message_id):
 
 def workflow(port, cookie, csrf, database, upload_root, campfire):
     results = {}
+    uploads = {}
     for name, filename, content_type, data in CASES:
         metadata = upload(port, cookie, csrf, filename, content_type, data)
+        uploads[name] = metadata
         status, structure, payload = post(port, cookie, csrf, name, metadata)
         assert status == 200 and structure, (name, status, payload[:500])
         stored_blob(database, campfire, upload_root, metadata["id"], data)
-        results[name] = normalized(structure), image_preview(port, cookie, structure) if name == "image" else None, search_text(database, name)
+        results[name] = normalized(structure), image_previews(port, cookie, structure) if name == "image" else None, search_text(database, name)
+    image = uploads["image"]
+    image_data = CASES[1][3]
+    status, structure, payload = post(port, cookie, csrf, "image-copy", image)
+    assert status == 200 and structure, ("image-copy", status, payload[:500])
+    image_path = stored_blob(database, campfire, upload_root, image["id"], image_data, expected_links=2)
+    results["image_copy"] = normalized(structure), image_previews(port, cookie, structure), search_text(database, "image-copy")
+    image_id = message_id(database, "image")
+    image_copy_id = message_id(database, "image-copy")
+    status, location = edit(port, cookie, csrf, image_id, "<div>Original image removed</div>")
+    assert (status, location) == (302, f"/rooms/1/messages/{image_id}"), (status, location)
+    assert embedded_ids(database, image_id, campfire) == []
+    assert embedded_ids(database, image_copy_id, campfire) == [image["id"]]
+    stored_blob(database, campfire, upload_root, image["id"], image_data)
+    results["image_copy_after_first_remove"] = get_presentation(port, cookie, "image-copy", image_copy_id)
+    status, location = edit(port, cookie, csrf, image_copy_id, "<div>Copied image removed</div>")
+    assert (status, location) == (302, f"/rooms/1/messages/{image_copy_id}"), (status, location)
+    assert embedded_ids(database, image_copy_id, campfire) == []
+    if not campfire:
+        assert not image_path.exists(), image_path
+    gallery_a = upload(port, cookie, csrf, "gallery-a.jpg", "image/jpeg", image_data)
+    gallery_b = upload(port, cookie, csrf, "gallery-b.jpg", "image/jpeg", image_data)
+    gallery_attachments = "".join(
+        f'<action-text-attachment sgid="{blob["attachable_sgid"]}" content-type="image/jpeg" filename="{blob["filename"]}" presentation="gallery"></action-text-attachment>'
+        for blob in (gallery_a, gallery_b))
+    status, structure, payload = post(port, cookie, csrf, "gallery", gallery_a, f"<div>{gallery_attachments}</div>")
+    assert status == 200 and structure, ("gallery", status, payload[:500])
+    stored_blob(database, campfire, upload_root, gallery_a["id"], image_data)
+    gallery_b_path = stored_blob(database, campfire, upload_root, gallery_b["id"], image_data)
+    results["gallery"] = normalized(structure), image_previews(port, cookie, structure, 2), search_text(database, "gallery")
+    gallery_id = message_id(database, "gallery")
+    single = f'<div><action-text-attachment sgid="{gallery_a["attachable_sgid"]}" content-type="image/jpeg" filename="gallery-a.jpg" presentation="gallery"></action-text-attachment></div>'
+    status, location = edit(port, cookie, csrf, gallery_id, single)
+    assert (status, location) == (302, f"/rooms/1/messages/{gallery_id}"), (status, location)
+    assert embedded_ids(database, gallery_id, campfire) == [gallery_a["id"]]
+    gallery_a_path = stored_blob(database, campfire, upload_root, gallery_a["id"], image_data)
+    if not campfire:
+        assert not gallery_b_path.exists(), gallery_b_path
+    results["gallery_single"] = get_presentation(port, cookie, "gallery", gallery_id), search_text(database, "gallery")
+    status, location = edit(port, cookie, csrf, gallery_id, "<div>Gallery removed</div>")
+    assert (status, location) == (302, f"/rooms/1/messages/{gallery_id}"), (status, location)
+    assert embedded_ids(database, gallery_id, campfire) == []
+    results["gallery_removed"] = get_presentation(port, cookie, "gallery", gallery_id), search_text(database, "gallery")
+    if not campfire:
+        assert not gallery_a_path.exists(), gallery_a_path
     text_id = message_id(database, "text")
     changed_data = b"Revised inline note.\n"
     changed = upload(port, cookie, csrf, "changed.txt", "text/plain", changed_data)
@@ -208,7 +259,7 @@ def main():
                 finally:
                     stop_server(camp)
             assert rust_results == camp_results, (rust_results, camp_results)
-            print("PASS paired inline text/JPEG uploads, parsed presentation, preview bytes, saved originals, search text, and edit add/remove")
+            print("PASS paired inline text/JPEG uploads, gallery variation and bytes, search, edit add/remove, and shared-blob retention")
         finally:
             redis.terminate()
             redis.wait(timeout=10)
