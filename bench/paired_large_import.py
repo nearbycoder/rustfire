@@ -46,8 +46,8 @@ def page_signature(body):
     return hashlib.sha256(repr(tokens).encode()).hexdigest(), len(tokens)
 
 
-def pages(port, cookie, expected, label):
-    path = "/rooms/1/messages"
+def pages(port, cookie, expected, label, room_id=1):
+    path = f"/rooms/{room_id}/messages"
     seen = set()
     total_bytes = 0
     number = 0
@@ -68,7 +68,7 @@ def pages(port, cookie, expected, label):
         number += 1
         if number % 50 == 0:
             print(f"{label}: {number} pages, {len(seen)} messages", flush=True)
-        path = f"/rooms/1/messages?before={ids[0]}"
+        path = f"/rooms/{room_id}/messages?before={ids[0]}"
     print(f"{label}: {number} pages, {len(seen)} messages, {total_bytes} raw HTML bytes", flush=True)
 
 

@@ -25,8 +25,14 @@ type workerResult struct {
 }
 
 type target struct {
-	Path   string `json:"path"`
-	Cookie string `json:"cookie"`
+	Path             string `json:"path"`
+	Cookie           string `json:"cookie"`
+	ExpectedHex      string `json:"expected_sha256,omitempty"`
+	ExpectedETag     string `json:"expected_etag,omitempty"`
+	ExpectedModified string `json:"expected_last_modified,omitempty"`
+	ExpectedMessages int    `json:"expected_message_count,omitempty"`
+	ExpectedCSRF     int    `json:"expected_csrf_count,omitempty"`
+	expected         []byte
 }
 
 type report struct {
@@ -79,8 +85,8 @@ func main() {
 			}
 		}
 	}
-	if *expectedMessages < 0 || *expectedCSRF < 0 || (*expectedHex == "" && *expectedMessages == 0 && *expectedCSRF == 0) {
-		fmt.Fprintln(os.Stderr, "provide a body hash or a positive expected content count")
+	if *expectedMessages < 0 || *expectedCSRF < 0 {
+		fmt.Fprintln(os.Stderr, "expected content counts must not be negative")
 		os.Exit(2)
 	}
 	var expected []byte
@@ -89,6 +95,26 @@ func main() {
 		expected, err = hex.DecodeString(*expectedHex)
 		if err != nil || len(expected) != sha256.Size {
 			fmt.Fprintln(os.Stderr, "expected-sha256 must be a SHA-256 hex digest")
+			os.Exit(2)
+		}
+	}
+	for index := range targets {
+		item := &targets[index]
+		if item.ExpectedMessages < 0 || item.ExpectedCSRF < 0 {
+			fmt.Fprintln(os.Stderr, "target expected content counts must not be negative")
+			os.Exit(2)
+		}
+		item.expected = expected
+		if item.ExpectedHex != "" {
+			decoded, err := hex.DecodeString(item.ExpectedHex)
+			if err != nil || len(decoded) != sha256.Size {
+				fmt.Fprintln(os.Stderr, "target expected_sha256 must be a SHA-256 hex digest")
+				os.Exit(2)
+			}
+			item.expected = decoded
+		}
+		if item.expected == nil && item.ExpectedMessages == 0 && item.ExpectedCSRF == 0 && *expectedMessages == 0 && *expectedCSRF == 0 {
+			fmt.Fprintln(os.Stderr, "each target needs a body hash or a positive expected content count")
 			os.Exit(2)
 		}
 	}
@@ -130,21 +156,37 @@ func main() {
 		if *expectedGzip {
 			valid = valid && response.Uncompressed
 		}
-		if expected != nil {
+		if item.expected != nil {
 			digest := sha256.Sum256(body)
-			valid = valid && bytes.Equal(digest[:], expected)
+			valid = valid && bytes.Equal(digest[:], item.expected)
 		}
-		if *expectedMessages > 0 {
-			valid = valid && bytes.Count(body, []byte("data-message-id=")) == *expectedMessages
+		messageCount := *expectedMessages
+		if item.ExpectedMessages > 0 {
+			messageCount = item.ExpectedMessages
 		}
-		if *expectedCSRF > 0 {
-			valid = valid && bytes.Count(body, []byte("name=\"authenticity_token\""))+bytes.Count(body, []byte("name='authenticity_token'")) == *expectedCSRF
+		if messageCount > 0 {
+			valid = valid && bytes.Count(body, []byte("data-message-id=")) == messageCount
 		}
-		if *expectedETag != "" {
-			valid = valid && response.Header.Get("ETag") == *expectedETag
+		csrfCount := *expectedCSRF
+		if item.ExpectedCSRF > 0 {
+			csrfCount = item.ExpectedCSRF
 		}
-		if *expectedModified != "" {
-			valid = valid && response.Header.Get("Last-Modified") == *expectedModified
+		if csrfCount > 0 {
+			valid = valid && bytes.Count(body, []byte("name=\"authenticity_token\""))+bytes.Count(body, []byte("name='authenticity_token'")) == csrfCount
+		}
+		etag := *expectedETag
+		if item.ExpectedETag != "" {
+			etag = item.ExpectedETag
+		}
+		if etag != "" {
+			valid = valid && response.Header.Get("ETag") == etag
+		}
+		modified := *expectedModified
+		if item.ExpectedModified != "" {
+			modified = item.ExpectedModified
+		}
+		if modified != "" {
+			valid = valid && response.Header.Get("Last-Modified") == modified
 		}
 		if *expectedContentType != "" {
 			valid = valid && strings.SplitN(response.Header.Get("Content-Type"), ";", 2)[0] == *expectedContentType
