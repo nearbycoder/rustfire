@@ -10,6 +10,7 @@ import pathlib
 import sqlite3
 import subprocess
 import tempfile
+import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis
@@ -33,16 +34,22 @@ SUFFIXES = ("", ".html", ".json", ".turbo_stream")
 ACCEPTS = ("text/html", "application/json", "text/vnd.turbo-stream.html", "*/*")
 
 
-def request(port, path, cookie, accept, compare_406_bodies):
+def request(port, path, cookie, accept, compare_406_bodies, compare_error_bodies, compare_redirects):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     try:
         connection.request("GET", path, headers={"Cookie": cookie, "Accept": accept})
         response = connection.getresponse()
         body = response.read()
         content_type = (response.getheader("Content-Type") or "").split(";", 1)[0]
-        if compare_406_bodies:
-            return response.status, content_type, body if response.status == 406 else None
-        return response.status, content_type
+        result = (response.status, content_type)
+        if compare_406_bodies or compare_error_bodies:
+            statuses = (403, 406) if compare_error_bodies else (406,)
+            result += (body if response.status in statuses else None,)
+        if compare_redirects:
+            location = response.getheader("Location")
+            target = urllib.parse.urlsplit(location) if location else None
+            result += ((target.path + ("?" + target.query if target.query else "")) if target else None,)
+        return result
     finally:
         connection.close()
 
@@ -51,6 +58,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--all-accepts", action="store_true", help="compare HTML, JSON, Turbo, and wildcard Accept headers")
     parser.add_argument("--compare-406-bodies", action="store_true", help="also compare Not Acceptable response bodies")
+    parser.add_argument("--compare-error-bodies", action="store_true", help="also compare forbidden and Not Acceptable response bodies")
+    parser.add_argument("--compare-redirects", action="store_true", help="also compare redirect path and query")
+    parser.add_argument("--role", choices=("admin", "member", "anonymous"), default="admin", help="request as an admin, member, or signed-out visitor")
     args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-get-formats-") as scratch:
@@ -60,6 +70,10 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         seed_boost_message(rust_db, camp_db)
+        with sqlite3.connect(rust_db) as rust:
+            rust.execute("INSERT INTO sessions(user_id,token,csrf_token,created_at,last_active_at) VALUES(2,'benchmark-member-session','benchmark-member-csrf','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+        with sqlite3.connect(camp_db) as camp:
+            camp.execute("UPDATE users SET email_address='member@example.invalid',password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
         checkout = isolated_campfire(temp, redis_port)
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         redis, redis_log = start_redis(temp, redis_port)
@@ -71,7 +85,8 @@ def main():
         try:
             rust = start_server(rust_db, rust_port)
             try:
-                rust_responses = {case: request(rust_port, case[0], "session_token=benchmark-session", case[1], args.compare_406_bodies) for case in cases}
+                rust_cookie = {"admin": "session_token=benchmark-session", "member": "session_token=benchmark-member-session", "anonymous": ""}[args.role]
+                rust_responses = {case: request(rust_port, case[0], rust_cookie, case[1], args.compare_406_bodies, args.compare_error_bodies, args.compare_redirects) for case in cases}
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -79,7 +94,8 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, _ = login_campfire(camp_port)
-                    camp_responses = {case: request(camp_port, case[0], cookie, case[1], args.compare_406_bodies) for case in cases}
+                    camp_cookie = login_campfire(camp_port, email="member@example.invalid")[0] if args.role == "member" else cookie if args.role == "admin" else ""
+                    camp_responses = {case: request(camp_port, case[0], camp_cookie, case[1], args.compare_406_bodies, args.compare_error_bodies, args.compare_redirects) for case in cases}
                 finally:
                     stop_server(camp)
         finally:
@@ -89,7 +105,7 @@ def main():
     mismatches = [(case, rust_responses[case], camp_responses[case]) for case in cases if rust_responses[case] != camp_responses[case]]
     for (path, accept), rust_response, camp_response in mismatches:
         print(f"{path} Accept={accept}: Rustfire {rust_response}, Campfire {camp_response}")
-    print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} authenticated GET status/media-type cases")
+    print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} {args.role} GET status/media-type cases")
     if mismatches:
         raise AssertionError(f"{len(mismatches)} GET format cases differ")
 

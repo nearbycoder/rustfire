@@ -3193,12 +3193,7 @@ async fn reject_banned_ip(
             }
         }
     }
-    let browser_navigation = request.method() == Method::GET
-        && request
-            .headers()
-            .get(header::ACCEPT)
-            .and_then(|value| value.to_str().ok())
-            .is_none_or(|value| value.contains("text/html") || value.contains("*/*"));
+    let browser_navigation = request.method() == Method::GET;
     let bot_api_request = {
         let segments: Vec<_> = request.uri().path().split('/').filter(|part| !part.is_empty()).collect();
         segments.len() >= 4
@@ -3214,8 +3209,8 @@ async fn reject_banned_ip(
                 .map(|(_, key)| key.into_owned()))
             .is_some_and(|key| matches!(user(&s, request.headers()), Err(StatusCode::UNAUTHORIZED))
                 && bot_user(&s, key.trim()).is_ok());
-    let requested_path = request
-        .uri()
+    let requested_uri = request.extensions().get::<OriginalUri>().map(|uri| &uri.0).unwrap_or_else(|| request.uri());
+    let requested_path = requested_uri
         .path_and_query()
         .map(|value| value.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
@@ -4813,7 +4808,9 @@ fn not_acceptable_format(accept: &str) -> Response {
 }
 fn reject_html_format(headers: &HeaderMap, path: &str) -> Option<Response> {
     if let Some((_, format)) = path.rsplit('/').next().unwrap_or("").rsplit_once('.') {
-        return (format != "html").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
+        if !format.is_empty() && !format.bytes().all(|byte| byte.is_ascii_digit()) {
+            return (format != "html").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
+        }
     }
     let requested = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let first = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
@@ -11225,6 +11222,7 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     } else {
         None
     };
+    let forbidden_page = application_controller && matches!(req.method(), &Method::GET | &Method::HEAD);
     let mut response = next.run(req).await;
     if let Some(format) = rejected_format {
         if response.status().is_success()
@@ -11233,6 +11231,11 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
         {
             response = not_acceptable_format(format);
         }
+    }
+    if forbidden_page && response.status() == StatusCode::FORBIDDEN
+        && !response.headers().contains_key(header::CONTENT_TYPE)
+    {
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
     }
     if !response.status().is_informational()
         && !matches!(response.status(), StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED | StatusCode::NOT_ACCEPTABLE)
