@@ -20,6 +20,7 @@ from paired_turbo_fanout import seed_boost_message
 PAGES = (
     ("room", "/rooms/1", "#message_boost-fixture"),
     ("account", "/account/edit", "body"),
+    ("custom-styles", "/account/custom_styles/edit", "body"),
     ("profile", "/users/me/profile", "body"),
     ("search", "/searches?q=fixture", "body"),
     ("member", "/users/2", "body"),

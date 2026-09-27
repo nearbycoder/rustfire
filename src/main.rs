@@ -8109,8 +8109,8 @@ async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let styles: Option<String> = pool(&s)?
-        .query_row(
+    let db = pool(&s)?;
+    let styles: Option<String> = db.query_row(
             "SELECT custom_styles FROM accounts LIMIT 1",
             [],
             |r| r.get(0),
@@ -8128,14 +8128,14 @@ async fn custom_styles_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -
         ],
     );
     let action = esc(&public_url(&headers, "/account/custom_styles"));
-    Ok(render(
-        "Custom styles",
-        &format!(
-            "<nav class='account-settings-nav custom-styles-nav'><a href='/account/edit' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></nav><section class='panel panel--wide custom-styles-panel txt-align-center flex flex-column position-relative' style='view-transition-name: custom-styles'><form class='flex flex-column gap' data-controller='form' data-action='keydown.ctrl+enter->form#submit keydown.meta+enter->form#submit' action='{action}' method='post'><input type='hidden' name='_method' value='patch'><div class='panel__button'>{translation}</div><div class='pad-inline-double margin-inline'><h1 class='margin-none'>Custom CSS</h1><p class='flex flex-wrap align-center justify-center gap margin-none-block-start' style='--column-gap: 0.5ch; --row-gap: 0'><span>Add custom CSS styles.</span><img src='/assets/alert.svg' class='flex-inline colorize--black' width='16' height='16' aria-hidden='true'><span>Use Caution: you could break things.</span></p></div><label class='flex align-start gap flex-item-grow'><textarea name='account[custom_styles]' id='account_custom_styles' class='input input--code txt--small' placeholder='Add CSS styles…' autocomplete='off' spellcheck='false' autocorrect='off' autocapitalize='off' rows='16'>\n{}</textarea></label><button class='btn btn--reversed center txt-large' type='submit'><img src='/assets/check-7897ff7e.svg' aria-hidden='true' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></form></section>",
-            esc(styles.as_deref().unwrap_or(""))
-        ),
-        Some(&u),
-    ))
+    let token = u.csrf_token.as_deref().unwrap_or("");
+    let body = format!(
+        "<section class='panel panel--wide txt-align-center flex flex-column position-relative' style='view-transition-name: custom-styles'><form class='flex flex-column gap' data-controller='form' data-action='keydown.ctrl+enter->form#submit keydown.meta+enter->form#submit' action='{action}' accept-charset='UTF-8' method='post'><input type='hidden' name='_method' value='patch'><input type='hidden' name='authenticity_token' value='{}'><div class='panel__button'>{translation}</div><div class='pad-inline-double margin-inline'><h1 class='margin-none'>Custom CSS</h1><p class='flex flex-wrap align-center justify-center gap margin-none-block-start' style='--column-gap: 0.5ch; --row-gap: 0'><span>Add custom CSS styles.</span><img src='/assets/alert.svg' class='flex-inline colorize--black' width='16' height='16' aria-hidden='true'><span>Use Caution: you could break things.</span></p></div><label class='flex align-start gap flex-item-grow'><textarea name='account[custom_styles]' id='account_custom_styles' class='input input--code txt--small' placeholder='Add CSS styles…' autocomplete='off' spellcheck='false' autocorrect='off' autocapitalize='off' rows='16'>\n{}</textarea></label><button class='btn btn--reversed center txt-large' type='submit'><img src='/assets/check-7897ff7e.svg' aria-hidden='true' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></form></section>",
+        esc(token), esc(styles.as_deref().unwrap_or(""))
+    );
+    let nav = "<div class='flex-item-justify-start'><a href='/account/edit' class='btn'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></div>";
+    let has_logo: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)).map_err(db_err)?;
+    Ok(render_source_page_sections("Custom styles", &body, nav, "", "", "", if has_logo { "account-has-logo" } else { "" }, "", Some(&u), token))
 }
 async fn custom_styles_update(
     State(s): State<Arc<AppState>>,
