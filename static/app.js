@@ -489,9 +489,13 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       const targetId=stream.getAttribute('target');
       const target=targetId&&document.getElementById(targetId);
       if(!target||(target!==messages&&!messages.contains(target)))continue;
+      const keepScroll=target!==messages&&stream.hasAttribute('maintain_scroll');
+      const previousTop=messages.scrollTop,previousHeight=messages.scrollHeight;
+      const aboveFold=keepScroll&&target.getBoundingClientRect().top<messages.clientHeight;
+      const restoreScroll=()=>{if(keepScroll)messages.scrollTop=previousTop+(aboveFold?messages.scrollHeight-previousHeight:0)};
       const action=stream.getAttribute('action');
       if(action==='remove'){
-        if(target!==messages){target.remove();formatMessageGroups();}
+        if(target!==messages){target.remove();formatMessageGroups();restoreScroll();}
         continue;
       }
       const fragment=stream.querySelector('template')?.content.cloneNode(true);
@@ -516,11 +520,12 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
           if(scrollToLatest)messages.scrollTop=messages.scrollHeight;
           updateReturnButton();
           if(!catchingUp)for(const node of addedMessages){const sound=node.querySelector('.sound[data-sound-url-value]');if(sound)new Audio(sound.dataset.soundUrlValue).play().catch(()=>{});}
-        }else decorateOwn();
+        }else{decorateOwn();restoreScroll();}
       }else if(action==='replace'&&target!==messages){
         if(target.closest('.composer--edit'))continue;
         target.replaceWith(fragment);
         formatLocalTimes(messages);decorateOwn();formatMessageGroups();
+        restoreScroll();
       }
     }
   }

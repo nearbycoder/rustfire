@@ -10955,7 +10955,7 @@ fn turbo_room_event(payload: &Value) -> Option<String> {
         "message_updated" => {
             let client_message_id = esc(payload.get("client_message_id")?.as_str()?);
             Some(format!(
-                "<turbo-stream action=\"replace\" target=\"presentation_message_{client_message_id}\"><template>{}</template></turbo-stream>",
+                "<turbo-stream maintain_scroll=\"true\" action=\"replace\" target=\"presentation_message_{client_message_id}\"><template>{}</template></turbo-stream>",
                 payload.get("presentation_html")?.as_str()?
             ))
         }
@@ -12685,6 +12685,15 @@ mod tests {
         assert!(!super::acceptable_og_document_response(axum::http::StatusCode::CREATED, Some("text/html"), None));
         assert!(!super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("image/jpeg"), None));
         assert!(!super::acceptable_og_document_response(axum::http::StatusCode::OK, Some("text/html"), Some(5 * 1024 * 1024 + 1)));
+    }
+    #[test]
+    fn live_message_replace_requests_scroll_maintenance() {
+        let stream = super::turbo_room_event(&serde_json::json!({
+            "type": "message_updated",
+            "client_message_id": "message-1",
+            "presentation_html": "<div id='presentation_message_message-1'>Updated</div>"
+        })).unwrap();
+        assert!(stream.starts_with("<turbo-stream maintain_scroll=\"true\" action=\"replace\" target=\"presentation_message_message-1\">"));
     }
     #[test]
     fn opengraph_metadata_removes_entity_encoded_markup() {
