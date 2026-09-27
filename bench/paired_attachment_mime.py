@@ -6,6 +6,7 @@ import http.client
 import pathlib
 import re
 import sqlite3
+import struct
 import subprocess
 import tempfile
 import urllib.request
@@ -15,6 +16,8 @@ from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redi
 from paired_bot_admin import PNG, cleanup_campfire_uploads
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_link_preview import Presentation
+
+PREVIEW_CASES = {"gif-as-text", "webp-as-text", "tiff-as-text", "animated-gif-as-text", "oriented-jpeg-as-text"}
 
 
 def cases(large_mib=None, extended_dir=None):
@@ -31,6 +34,20 @@ def cases(large_mib=None, extended_dir=None):
             subprocess.run(["vips", "copy", str(files / "moon.jpg"), str(converted)],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             fixtures.append((f"{format}-as-text", converted.name, "text/plain", converted.read_bytes()))
+        animated = extended_dir / "animated.gif"
+        subprocess.run(["magick", "-delay", "10", "-size", "32x32", "xc:red",
+                        "-delay", "10", "-size", "32x32", "xc:blue", "-loop", "0", str(animated)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixtures.append(("animated-gif-as-text", animated.name, "text/plain", animated.read_bytes()))
+        landscape = extended_dir / "landscape.jpg"
+        subprocess.run(["magick", str(files / "moon.jpg"), "-resize", "80x40!", str(landscape)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        jpeg = landscape.read_bytes()
+        assert jpeg.startswith(b"\xff\xd8")
+        tiff = b"II" + struct.pack("<HIH", 42, 8, 1) + struct.pack("<HHII", 0x112, 3, 1, 6) + struct.pack("<I", 0)
+        exif = b"Exif\x00\x00" + tiff
+        oriented = jpeg[:2] + b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif + jpeg[2:]
+        fixtures.append(("oriented-jpeg-as-text", "oriented.jpg", "text/plain", oriented))
     if large_mib is not None:
         fixtures.append(("large-file", "large.bin", "application/octet-stream",
                          b"R" * (large_mib * 1024 * 1024 + 1)))
@@ -164,7 +181,7 @@ def main():
                 rust_types = saved(rust_db, False, temp / "uploads", fixtures)
                 rust_previews = {name: image_preview(rust_port, "session_token=benchmark-session", payload, name)
                                  for (name, _, _, _), payload in zip(fixtures, rust_payloads)
-                                 if name in {"gif-as-text", "webp-as-text", "tiff-as-text"}}
+                                 if name in PREVIEW_CASES}
                 rust_bad = post(rust_port, "session_token=benchmark-session", "benchmark-csrf", ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                 rust_bad_row = malformed_state(rust_db, False, temp / "uploads")
                 assert not list((temp / "uploads").glob("message-upload-*")), "Rustfire left staged composer files"
@@ -179,7 +196,7 @@ def main():
                     camp_types = saved(camp_db, True, REPOSITORY / "storage/files", fixtures)
                     camp_previews = {name: image_preview(camp_port, cookie, payload, name)
                                      for (name, _, _, _), payload in zip(fixtures, camp_payloads)
-                                     if name in {"gif-as-text", "webp-as-text", "tiff-as-text"}}
+                                     if name in PREVIEW_CASES}
                     camp_bad = post(camp_port, cookie, csrf, ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                     camp_bad_row = malformed_state(camp_db, True, REPOSITORY / "storage/files")
                 except Exception:
@@ -198,7 +215,7 @@ def main():
                 camp = presentation(camp_payload, case[0])
                 assert rust == camp, (case[0], next(((i,left,right) for i,(left,right) in enumerate(zip(rust,camp)) if left!=right), (len(rust),len(camp))))
             large_note = f", {args.large_mib} MiB plus one byte file" if args.large_mib else ""
-            image_note = ", generated GIF/WebP/TIFF" if args.extended_images else ""
+            image_note = ", generated GIF/WebP/TIFF, animated GIF, and EXIF-rotated JPEG" if args.extended_images else ""
             print(f"PASS paired message attachment types, saved original bytes, Turbo responses, malformed image failure{image_note}{large_note}")
         finally:
             redis.terminate()

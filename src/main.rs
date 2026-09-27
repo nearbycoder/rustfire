@@ -1161,12 +1161,42 @@ fn image_format(content_type: &str) -> Option<&'static str> {
 fn jpeg_dimensions(input: &std::path::Path) -> Option<(i64, i64)> {
     use std::io::{Read, Seek, SeekFrom};
 
+    fn exif_orientation(segment: &[u8]) -> Option<u16> {
+        let tiff = segment.strip_prefix(b"Exif\0\0")?;
+        let little = match tiff.get(..2)? {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let read_u16 = |offset: usize| -> Option<u16> {
+            let bytes: [u8; 2] = tiff.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+            Some(if little { u16::from_le_bytes(bytes) } else { u16::from_be_bytes(bytes) })
+        };
+        let read_u32 = |offset: usize| -> Option<u32> {
+            let bytes: [u8; 4] = tiff.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+            Some(if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) })
+        };
+        if read_u16(2)? != 42 {
+            return None;
+        }
+        let ifd = usize::try_from(read_u32(4)?).ok()?;
+        let count = usize::from(read_u16(ifd)?);
+        for index in 0..count {
+            let entry = ifd.checked_add(2)?.checked_add(index.checked_mul(12)?)?;
+            if read_u16(entry)? == 0x0112 && read_u16(entry + 2)? == 3 && read_u32(entry + 4)? == 1 {
+                return read_u16(entry + 8).filter(|orientation| (1..=8).contains(orientation));
+            }
+        }
+        None
+    }
+
     let mut file = std::fs::File::open(input).ok()?;
     let mut marker = [0u8; 2];
     file.read_exact(&mut marker).ok()?;
     if marker != [0xff, 0xd8] {
         return None;
     }
+    let mut orientation = None;
     loop {
         file.read_exact(&mut marker[..1]).ok()?;
         if marker[0] != 0xff {
@@ -1198,7 +1228,17 @@ fn jpeg_dimensions(input: &std::path::Path) -> Option<(i64, i64)> {
             file.read_exact(&mut frame).ok()?;
             let height = u16::from_be_bytes([frame[1], frame[2]]) as i64;
             let width = u16::from_be_bytes([frame[3], frame[4]]) as i64;
-            return (width > 0 && height > 0).then_some((width, height));
+            return (width > 0 && height > 0).then_some(if matches!(orientation, Some(5..=8)) {
+                (height, width)
+            } else {
+                (width, height)
+            });
+        }
+        if code == 0xe1 {
+            let mut segment = vec![0u8; usize::from(length - 2)];
+            file.read_exact(&mut segment).ok()?;
+            orientation = exif_orientation(&segment).or(orientation);
+            continue;
         }
         file.seek(SeekFrom::Current(i64::from(length - 2))).ok()?;
     }
@@ -11842,6 +11882,15 @@ mod tests {
         ];
         std::fs::write(&path, jpeg).unwrap();
         assert_eq!(super::jpeg_dimensions(&path), Some((3840, 2160)));
+        let mut oriented = jpeg[..2].to_vec();
+        oriented.extend_from_slice(&[
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0,
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0,
+            0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        oriented.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&path, &oriented).unwrap();
+        assert_eq!(super::jpeg_dimensions(&path), Some((2160, 3840)));
         std::fs::write(&path, &jpeg[..8]).unwrap();
         assert_eq!(super::jpeg_dimensions(&path), None);
         std::fs::remove_file(path).unwrap();
