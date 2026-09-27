@@ -24,6 +24,7 @@ DATA = b"paired direct upload\n"
 CHECKSUM = base64.b64encode(hashlib.md5(DATA).digest()).decode()
 PAYLOAD = json.dumps({"blob": {"filename": "paired-upload.txt", "byte_size": len(DATA),
                                "checksum": CHECKSUM, "content_type": "text/plain"}}).encode()
+LARGE_DATA = b"R" * (25 * 1024 * 1024 + 1)
 
 
 def raw_request(port, method, path, body=b"", headers=None):
@@ -111,6 +112,41 @@ def mime_case(port, cookie, csrf, database, upload_root, campfire, filename, con
     observations.append(("stored filename", stored_filename))
     assert path.read_bytes() == data, (filename, path)
     return path, observations
+
+
+def missing_mime_case(port, cookie, csrf, database, upload_root, campfire):
+    filename, data = "no-mime.bin", b"missing MIME payload\n"
+    payload = json.dumps({"blob": {"filename": filename, "byte_size": len(data),
+                                   "checksum": base64.b64encode(hashlib.md5(data).digest()).decode()}}).encode()
+    status, _, body = request(port, "POST", "/rails/active_storage/direct_uploads",
+                              cookie, csrf, payload, "application/json")
+    assert status == 200, ("missing MIME metadata", status, body[:120])
+    metadata = json.loads(body)
+    assert metadata["content_type"] is None and metadata["direct_upload"]["headers"] == {"Content-Type": None}
+    upload_status, _, _ = raw_request(port, "PUT", path_from_url(metadata["direct_upload"]["url"]),
+                                      data, {"Cookie": cookie})
+    assert upload_status == 204, ("missing MIME disk upload", upload_status)
+    proxy_path = f"/rails/active_storage/blobs/proxy/{metadata['signed_id']}/{filename}"
+    proxy_status, proxy_headers, proxy_body = read_response(port, proxy_path)
+    assert (proxy_status, proxy_body) == (200, data), ("missing MIME proxy", proxy_status, proxy_body)
+    redirect_status, redirect_location, _ = raw_request(port, "GET", proxy_path.replace("/blobs/proxy/", "/blobs/redirect/", 1))
+    assert redirect_status == 302, ("missing MIME redirect", redirect_status)
+    disk_status, disk_headers, disk_body = read_response(port, path_from_url(redirect_location))
+    if campfire:
+        assert disk_status == 500, ("source missing MIME disk error", disk_status)
+    else:
+        assert (disk_status, disk_body) == (200, data), ("Rustfire missing MIME disk", disk_status, disk_body[:100])
+    with sqlite3.connect(database) as db:
+        if campfire:
+            stored = db.execute("SELECT key FROM active_storage_blobs WHERE id=?", [metadata["id"]]).fetchone()[0]
+            path = upload_root / stored[:2] / stored[2:4] / stored
+        else:
+            stored = db.execute("SELECT storage_key FROM direct_upload_blobs WHERE id=?", [metadata["id"]]).fetchone()[0]
+            path = upload_root / stored
+    assert path.read_bytes() == data
+    observed = tuple((key, proxy_headers.get(key)) for key in
+                     ("content-type", "content-disposition", "x-content-type-options"))
+    return path, observed
 
 
 def workflow(port, cookie, csrf, database, upload_root, campfire):
@@ -203,14 +239,16 @@ def workflow(port, cookie, csrf, database, upload_root, campfire):
         ("  report:Q%$|?*.txt  ", "text/plain", b"an unsafe filename\n"),
         ("dir\\report/2026.txt", "text/plain", b"separators in filename\n"),
         ("bidirectional\u202eview.txt", "text/plain", b"direction override in filename\n"),
+        ("over-25-mib.bin", "application/octet-stream", LARGE_DATA),
     ):
         extra_path, observations = mime_case(port, cookie, csrf, database, upload_root, campfire,
                                               filename, content_type, data)
         extra_files.append(extra_path)
         extra_results.append((filename, observations))
-    return [path, *extra_files], (proxy_status, proxy_headers.get("content-type"), proxy_headers.get("content-disposition"),
+    missing_path, missing_observations = missing_mime_case(port, cookie, csrf, database, upload_root, campfire)
+    return [path, *extra_files, missing_path], (proxy_status, proxy_headers.get("content-type"), proxy_headers.get("content-disposition"),
                                   proxy_headers.get("cache-control"), bool(proxy_headers.get("etag")),
-                                  range_status, range_headers.get("content-range"), extra_results)
+                                  range_status, range_headers.get("content-range"), extra_results, missing_observations)
 
 
 def concurrent_metadata(port, cookie, csrf):
@@ -223,6 +261,30 @@ def concurrent_metadata(port, cookie, csrf):
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         ids = list(executor.map(create, range(16)))
     assert len(set(ids)) == 16, "Concurrent metadata allocations reused a blob ID"
+
+
+def metadata_boundaries(port, cookie, csrf):
+    observations = []
+    for label, filename, content_type, byte_size in (
+        ("long filename", "f" * 260 + ".txt", "text/plain", len(DATA)),
+        ("long MIME type", "long-mime.txt", "application/x-" + "x" * 250, len(DATA)),
+        ("negative size", "negative.txt", "text/plain", -1),
+        ("empty filename", "", "text/plain", len(DATA)),
+        ("empty MIME type", "empty-mime.txt", "", len(DATA)),
+        ("missing MIME type", "missing-mime.txt", None, len(DATA)),
+    ):
+        blob = {"filename": filename, "byte_size": byte_size, "checksum": CHECKSUM}
+        if content_type is not None:
+            blob["content_type"] = content_type
+        payload = json.dumps({"blob": blob}).encode()
+        status, _, body = request(port, "POST", "/rails/active_storage/direct_uploads",
+                                  cookie, csrf, payload, "application/json")
+        metadata = json.loads(body) if status == 200 else None
+        observations.append((label, status, None if metadata is None else (
+            metadata["filename"], metadata["content_type"], metadata["byte_size"],
+            metadata["direct_upload"]["headers"],
+            signed_metadata(path_from_url(metadata["direct_upload"]["url"]).rsplit("/", 1)[-1])["data"].get("content_type"))))
+    return observations
 
 
 def main():
@@ -242,6 +304,7 @@ def main():
         try:
             rust_files, rust_proxy = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, rust_uploads, False)
             concurrent_metadata(rust_port, "session_token=benchmark-session", "benchmark-csrf")
+            rust_boundaries = metadata_boundaries(rust_port, "session_token=benchmark-session", "benchmark-csrf")
         finally:
             stop_server(rust)
         log = open(temp / "puma.log", "w+")
@@ -253,6 +316,7 @@ def main():
             cookie, csrf = login_campfire(camp_port)
             camp_files, camp_proxy = workflow(camp_port, cookie, csrf, camp_db, repo / "storage/files", True)
             concurrent_metadata(camp_port, cookie, csrf)
+            camp_boundaries = metadata_boundaries(camp_port, cookie, csrf)
         except Exception:
             log.flush()
             log.seek(0)
@@ -269,12 +333,14 @@ def main():
                     except OSError:
                         pass
         assert rust_files[0].read_bytes() == DATA
-        assert rust_proxy[:-1] == camp_proxy[:-1], (rust_proxy[:-1], camp_proxy[:-1])
-        for (rust_name, rust_observations), (camp_name, camp_observations) in zip(rust_proxy[-1], camp_proxy[-1], strict=True):
+        assert rust_proxy[:-2] == camp_proxy[:-2], (rust_proxy[:-2], camp_proxy[:-2])
+        for (rust_name, rust_observations), (camp_name, camp_observations) in zip(rust_proxy[-2], camp_proxy[-2], strict=True):
             assert rust_name == camp_name
             for rust_observation, camp_observation in zip(rust_observations, camp_observations, strict=True):
                 assert rust_observation == camp_observation, (rust_name, rust_observation, camp_observation)
-        print("PASS matched direct-upload metadata, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
+        assert rust_proxy[-1] == camp_proxy[-1], ("missing MIME download", rust_proxy[-1], camp_proxy[-1])
+        assert rust_boundaries == camp_boundaries, (rust_boundaries, camp_boundaries)
+        print("PASS matched direct-upload metadata boundaries, concurrent blob IDs, authenticated writes, checksum rejection, redirect and proxy downloads")
 
 
 if __name__ == "__main__":

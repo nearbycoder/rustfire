@@ -9840,6 +9840,7 @@ async fn signed_blob_get(
     Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{disk_token}/{}", encoded_blob_filename(&filename)))))
 }
 fn active_storage_serving<'a>(content_type: &'a str, requested_disposition: Option<&str>) -> (&'a str, bool) {
+    let content_type = if content_type.is_empty() { "application/octet-stream" } else { content_type };
     let forced_binary = matches!(content_type,
         "text/html" | "image/svg+xml" | "application/postscript" | "application/x-shockwave-flash"
         | "text/xml" | "application/xml" | "application/xhtml+xml" | "application/mathml+xml"
@@ -9951,16 +9952,17 @@ async fn direct_upload_create(
 ) -> AppResult {
     user(&s, &headers)?;
     let blob = payload.get("blob").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let filename = blob.get("filename").and_then(Value::as_str).filter(|name| !name.is_empty() && name.len() <= 255).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let byte_size = blob.get("byte_size").and_then(Value::as_i64).filter(|size| (0..=25 * 1024 * 1024).contains(size)).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let filename = blob.get("filename").and_then(Value::as_str).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let byte_size = blob.get("byte_size").and_then(Value::as_i64).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let checksum = blob.get("checksum").and_then(Value::as_str).filter(|value| STANDARD.decode(value).is_ok_and(|digest| digest.len() == 16)).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let content_type = blob.get("content_type").and_then(Value::as_str).filter(|value| !value.is_empty() && value.len() <= 255).unwrap_or("application/octet-stream");
+    let content_type = blob.get("content_type").and_then(Value::as_str);
+    let stored_content_type = content_type.unwrap_or("");
     let storage_key = direct_upload_storage_key().map_err(db_err)?;
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let mut db = pool(&s)?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
     let id: i64 = tx.query_row("SELECT MAX(1000000000000,COALESCE((SELECT MAX(id)+1 FROM direct_upload_blobs),1000000000000),COALESCE((SELECT MAX(id)+1 FROM attachments),1000000000000),COALESCE((SELECT MAX(id)+1 FROM inline_blobs),1000000000000))", [], |r| r.get(0)).map_err(db_err)?;
-    tx.execute("INSERT INTO direct_upload_blobs(id,storage_key,filename,content_type,byte_size,checksum,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,storage_key,filename,content_type,byte_size,checksum,created_at]).map_err(db_err)?;
+    tx.execute("INSERT INTO direct_upload_blobs(id,storage_key,filename,content_type,content_type_is_null,byte_size,checksum,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,storage_key,filename,stored_content_type,content_type.is_none(),byte_size,checksum,created_at]).map_err(db_err)?;
     tx.commit().map_err(db_err)?;
     let upload_token = disk_token(&s.blob_signing_key, "blob_token", json!({"key":storage_key,"content_type":content_type,"content_length":byte_size,"checksum":checksum,"service_name":"local"})).map_err(db_err)?;
     Ok(Json(json!({
@@ -9980,15 +9982,15 @@ async fn direct_upload_put(
     user(&s, &headers)?;
     let data = disk_token_data(&s.blob_signing_key, &token, "blob_token").ok_or(StatusCode::NOT_FOUND)?;
     let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
-    let content_type = data.get("content_type").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
+    let content_type = data.get("content_type").ok_or(StatusCode::NOT_FOUND)?.as_str();
     let expected_length = data.get("content_length").and_then(Value::as_i64).ok_or(StatusCode::NOT_FOUND)?;
     let checksum = data.get("checksum").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
-    if headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) != Some(content_type)
+    if headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) != content_type
         || body.len() as i64 != expected_length
         || STANDARD.encode(openssl::hash::hash(MessageDigest::md5(), &body).map_err(db_err)?.as_ref()) != checksum {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
-    let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM direct_upload_blobs WHERE storage_key=?1 AND content_type=?2 AND byte_size=?3 AND checksum=?4)",params![storage_key,content_type,expected_length,checksum],|r|r.get(0)).map_err(db_err)?;
+    let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM direct_upload_blobs WHERE storage_key=?1 AND content_type=?2 AND content_type_is_null=?3 AND byte_size=?4 AND checksum=?5)",params![storage_key,content_type.unwrap_or(""),content_type.is_none(),expected_length,checksum],|r|r.get(0)).map_err(db_err)?;
     if !exists { return Err(StatusCode::NOT_FOUND); }
     let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
     tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
@@ -10903,7 +10905,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
-        CREATE TABLE IF NOT EXISTS direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,content_type_is_null INTEGER NOT NULL DEFAULT 0,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS inline_embeds(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,blob_id INTEGER NOT NULL REFERENCES inline_blobs(id) ON DELETE CASCADE,PRIMARY KEY(message_id,blob_id));
         CREATE INDEX IF NOT EXISTS idx_inline_embeds_blob ON inline_embeds(blob_id);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);
@@ -10917,6 +10919,14 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_insert AFTER INSERT ON messages BEGIN INSERT INTO message_search_index(rowid,body) VALUES(new.id,new.body); END;
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
+    let direct_upload_null_flag: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('direct_upload_blobs') WHERE name='content_type_is_null')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !direct_upload_null_flag {
+        conn.execute("ALTER TABLE direct_upload_blobs ADD COLUMN content_type_is_null INTEGER NOT NULL DEFAULT 0", [])?;
+    }
     let old_push_unique: bool = conn.query_row(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='push_subscriptions'",
         [],
@@ -11701,6 +11711,26 @@ mod tests {
         let conn = db.get().unwrap();
         let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=2", [], |row| row.get(0)).unwrap();
         assert_eq!(indexed, "report-Q-.txt");
+    }
+
+    #[test]
+    fn existing_direct_upload_table_gains_nullable_mime_marker() {
+        let db = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = db.get().unwrap();
+            conn.execute_batch("CREATE TABLE direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
+                INSERT INTO direct_upload_blobs(id,storage_key,filename,content_type,byte_size,checksum,created_at) VALUES(1,'old-key','old.txt','text/plain',3,'checksum','2026-01-01T00:00:00Z');").unwrap();
+        }
+        super::init_db(&db).unwrap();
+        let conn = db.get().unwrap();
+        let (content_type, was_null): (String, bool) = conn.query_row(
+            "SELECT content_type,content_type_is_null FROM direct_upload_blobs WHERE id=1", [],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!((content_type.as_str(),was_null),("text/plain",false));
     }
 
     #[test]
