@@ -4921,6 +4921,23 @@ fn requested_format(uri: &Uri) -> Option<std::borrow::Cow<'_, str>> {
             .map(|(_, value)| value)
     })
 }
+fn rails_not_found_type(uri: &Uri, accept: &str) -> &'static str {
+    if uri.path().starts_with("/join/") {
+        return "text/html; charset=UTF-8";
+    }
+    match requested_format(uri).as_deref() {
+        Some("json") => "application/json; charset=UTF-8",
+        Some("turbo_stream") if uri.path().contains("/avatar") => "text/vnd.turbo-stream.html; charset=UTF-8",
+        Some(_) => "text/html; charset=UTF-8",
+        None if accept.split(',').next().unwrap_or("").trim().starts_with("application/json") => "application/json; charset=UTF-8",
+        None => "text/html; charset=UTF-8",
+    }
+}
+fn set_rails_not_found_type(response: &mut Response, uri: &Uri, accept: &str) {
+    if response.status() == StatusCode::NOT_FOUND && !response.headers().contains_key(header::CONTENT_TYPE) {
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(rails_not_found_type(uri, accept)));
+    }
+}
 fn native_navigation_path(path: &str) -> bool {
     let base = path.split_once('.').map_or(path, |(base, _)| base);
     matches!(base, "/recede_historical_location" | "/resume_historical_location" | "/refresh_historical_location")
@@ -6894,9 +6911,6 @@ async fn room_edit(
 async fn render_room_edit(s: Arc<AppState>, headers: HeaderMap, rid: i64, kind: &str) -> AppResult {
     let u = user(&s, &headers)?;
     let r = room_for(&s, u.id, rid)?;
-    if !can_admin(&u, &r) {
-        return Err(StatusCode::FORBIDDEN);
-    }
     if r.kind == "Rooms::Direct" {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -6923,8 +6937,10 @@ async fn render_room_edit(s: Arc<AppState>, headers: HeaderMap, rid: i64, kind: 
     }
     let csrf = u.csrf_token.as_deref().unwrap_or("");
     let mut panels = room_form_panel(kind, Some(rid), &r.name, csrf, &rows, users.len());
-    let delete_url = public_url(&headers, &format!("/rooms/{rid}"));
-    panels.push_str(&format!("<section class=\"panel txt-align-center\"><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative max-width\" aria-label=\"Delete {}\" data-turbo-confirm=\"Are you sure you want to delete this room and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" width=\"20\" height=\"20\" /><span class=\"overflow-ellipsis\">{}</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></section>", esc(&r.name), esc(&r.name), esc(csrf)));
+    if can_admin(&u, &r) {
+        let delete_url = public_url(&headers, &format!("/rooms/{rid}"));
+        panels.push_str(&format!("<section class=\"panel txt-align-center\"><form class=\"button_to\" method=\"post\" action=\"{delete_url}\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button class=\"btn btn--negative max-width\" aria-label=\"Delete {}\" data-turbo-confirm=\"Are you sure you want to delete this room and all messages in it? This can’t be undone.\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/trash-708c7eb2.svg\" width=\"20\" height=\"20\" /><span class=\"overflow-ellipsis\">{}</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\" /></form></section>", esc(&r.name), esc(&r.name), esc(csrf)));
+    }
     Ok(render(
         &format!("Edit settings for {}", r.name),
         &panels,
@@ -7136,7 +7152,7 @@ async fn direct_edit(
     let u = user(&s, &headers)?;
     let room = room_for(&s, u.id, rid)?;
     if room.kind != "Rooms::Direct" {
-        return Err(StatusCode::NOT_FOUND);
+        return Ok(found_redirect("/"));
     }
     let db = pool(&s)?;
     let mut stmt = db.prepare("SELECT u.id,u.name,COALESCE(u.bio,''),u.updated_at FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.room_id=?1 AND (u.id!=?2 OR (SELECT count(*) FROM memberships WHERE room_id=?1)=1) ORDER BY m.id").map_err(db_err)?;
@@ -7194,13 +7210,14 @@ async fn direct_post_override(
 async fn direct_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(rid): Path<i64>,
+    Path(room_id): Path<String>,
 ) -> AppResult {
     let u = match user(&s, &headers) {
         Ok(user) => user,
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
         Err(error) => return Err(error),
     };
+    let rid = path_record_id(&room_id)?;
     let room = room_for(&s, u.id, rid)?;
     if room.kind != "Rooms::Direct" {
         return Err(StatusCode::NOT_FOUND);
@@ -9961,9 +9978,13 @@ async fn bot_delete(
 async fn bot_messages_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path((rid, key)): Path<(i64, String)>,
     Query(q): Query<Paging>,
 ) -> AppResult {
+    if requested_format(&uri).as_deref() == Some("html") {
+        return messages_index(State(s), headers, OriginalUri(uri), Path(rid.to_string()), Query(q)).await;
+    }
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
     if let Some(cursor) = q.after.or(q.before) {
@@ -11293,8 +11314,14 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
         }
     }
 }
-async fn health() -> impl IntoResponse {
-    "ok"
+async fn health(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Response {
+    let json = requested_format(&uri).as_deref() == Some("json")
+        || (requested_format(&uri).is_none() && headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with("application/json")));
+    if json {
+        ([(header::CONTENT_TYPE, "application/json; charset=UTF-8")], "ok").into_response()
+    } else {
+        Html("ok").into_response()
+    }
 }
 fn generate_join_code() -> Result<String, StatusCode> {
     const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -11401,6 +11428,24 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     }
     response
 }
+async fn rails_missing_route_type(req: Request, next: Next) -> Response {
+    let uri = req.uri().clone();
+    let accept = req.headers().get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+    let mut response = next.run(req).await;
+    if !uri.path().starts_with("/assets/") && !uri.path().starts_with("/static/")
+        && !uri.path().starts_with("/rails/") && uri.path() != "/cable"
+    {
+        set_rails_not_found_type(&mut response, &uri, &accept);
+    }
+    response
+}
+async fn missing_messages_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+    match user(&s, &headers) {
+        Ok(_) => Err(StatusCode::NOT_FOUND),
+        Err(StatusCode::UNAUTHORIZED) => Ok(found_redirect("/session/new")),
+        Err(error) => Err(error),
+    }
+}
 async fn webmanifest(State(s): State<Arc<AppState>>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
     let explicit_json = uri.path().ends_with(".json")
         || uri.query().is_some_and(|query| query.split('&').any(|part| part == "format=json"));
@@ -11470,7 +11515,8 @@ async fn service_worker(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Re
     });
     if !explicit_js && !accepts_js {
         let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
-        response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+        let content_type = if requested_format(&uri).as_deref() == Some("json") { "application/json; charset=UTF-8" } else { "text/html; charset=UTF-8" };
+        response.headers_mut().insert(header::CONTENT_TYPE, content_type.parse().unwrap());
         return response;
     }
     let mut r = include_str!("../static/service-worker.js").into_response();
@@ -12011,6 +12057,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/cable", get(ws_upgrade))
         .route("/rooms", get(rooms_index))
+        .route("/rooms/new", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/rooms/new.html", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/rooms/new.json", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/rooms/new.turbo_stream", get(|| async { StatusCode::NOT_FOUND }))
         .route(
             "/rooms/{id}",
             get(room_show).post(room_post_override).delete(room_delete),
@@ -12029,6 +12079,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/{id}/messages.json", get(messages_index).post(message_create))
         .route("/rooms/{id}/messages.turbo_stream", get(messages_index).post(message_create))
         .route("/rooms/{id}/messages/new", any(|| async { StatusCode::NOT_FOUND }))
+        .route("/rooms/{id}/messages/new.html", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/rooms/{id}/messages/new.json", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/rooms/{id}/messages/new.turbo_stream", get(|| async { StatusCode::NOT_FOUND }))
         .route(
             "/rooms/{id}/messages/{mid}",
             get(message_show)
@@ -12043,7 +12096,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/{id}/messages/{mid}/update", post(message_update))
         .route("/rooms/{id}/messages/{mid}/delete", post(message_delete))
         .route("/rooms/{id}/@{mid}", get(room_show_at))
-        .route("/rooms/{id}/edit", get(room_edit))
+        .route("/rooms/{id}/edit", get(|| async { StatusCode::NOT_FOUND }))
         .route(
             "/rooms/{id}/involvement",
             get(involvement_get)
@@ -12054,7 +12107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/{id}/update", post(room_update))
         .route("/rooms/{id}/delete", post(room_delete))
         .route("/rooms/opens/new", get(new_open_room))
+        .route("/rooms/opens/new.html", get(new_open_room))
+        .route("/rooms/opens/new.json", get(new_open_room))
+        .route("/rooms/opens/new.turbo_stream", get(new_open_room))
         .route("/rooms/closeds/new", get(new_closed_room))
+        .route("/rooms/closeds/new.html", get(new_closed_room))
+        .route("/rooms/closeds/new.json", get(new_closed_room))
+        .route("/rooms/closeds/new.turbo_stream", get(new_closed_room))
         .route(
             "/rooms/opens/{id}",
             get(room_kind_show)
@@ -12074,6 +12133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/opens/{id}/edit", get(room_kind_edit))
         .route("/rooms/closeds/{id}/edit", get(room_kind_edit))
         .route("/rooms/directs/new", get(direct_new))
+        .route("/rooms/directs/new.html", get(direct_new))
+        .route("/rooms/directs/new.json", get(direct_new))
+        .route("/rooms/directs/new.turbo_stream", get(direct_new))
         .route("/rooms/directs", get(room_namespace_index).post(direct_create))
         .route("/rooms/opens", get(room_namespace_index).post(create_open_room))
         .route("/rooms/closeds", get(room_namespace_index).post(create_closed_room))
@@ -12234,6 +12296,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/new.html", get(boost_new))
         .route("/messages/{id}/boosts/new.json", get(boost_new))
         .route("/messages/{id}/boosts/new.turbo_stream", get(boost_new))
+        .route("/messages", get(missing_messages_get))
+        .route("/messages/new", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/messages/new.html", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/messages/new.json", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/messages/new.turbo_stream", get(|| async { StatusCode::NOT_FOUND }))
+        .route("/messages/{id}", get(missing_messages_get))
+        .route("/messages/{id}/edit", get(missing_messages_get))
         .route(
             "/messages/{id}/boosts/{bid}",
             get(|| async { StatusCode::NOT_FOUND })
@@ -12321,12 +12390,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(response);
             }
             let binary = base == "/account/logo" || base.ends_with("/avatar");
+            let json_response = response.headers().get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/json"));
             let rejected = if native_navigation {
                 false
             } else {
                 match suffix {
                     "html" => base == "/account/users" || base.ends_with("/refresh") || base == "/autocompletable/users",
-                    "json" => !binary && base != "/autocompletable/users",
+                    "json" => !binary && !json_response && base != "/autocompletable/users" && base != "/up",
                     "turbo_stream" => !binary && !base.ends_with("/refresh"),
                     _ => false,
                 }
@@ -12336,7 +12408,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(response)
         }
-    }));
+    })).layer(axum::middleware::from_fn(rails_missing_route_type));
     let addr: SocketAddr = env::var("RUSTFIRE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse()?;

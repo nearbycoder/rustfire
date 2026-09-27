@@ -7,6 +7,7 @@ and Campfire runs from the pinned source in an isolated checkout and Redis.
 import argparse
 import http.client
 import pathlib
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -38,6 +39,31 @@ MIXED_PATHS = (
 )
 
 
+def inventory_paths(checkout, env):
+    """Expand the pinned Rails GET routes into one representative URL each."""
+    output = subprocess.check_output(
+        [str(RUBY), str(RUBY.parent / "bundle"), "exec", "bin/rails", "routes"],
+        cwd=checkout, env=env, text=True,
+    )
+    paths = []
+    for line in output.splitlines():
+        match = re.search(r"\bGET\s+(\S+)\s+\S+#\S+", line)
+        if not match:
+            continue
+        path = match.group(1).replace("(.:format)", "")
+        if path.startswith("/rails/"):
+            continue
+        for name, value in (
+            (":user_id", "me"), (":room_id", "1"),
+            (":message_id", "1"), (":join_code", "invalid"),
+            (":bot_key", "invalid"), (":id", "1"),
+        ):
+            path = path.replace(name, value)
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
 def request(port, path, cookie, accept, compare_406_bodies, compare_error_bodies, compare_redirects):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     try:
@@ -63,6 +89,8 @@ def main():
     parser.add_argument("--all-accepts", action="store_true", help="compare HTML, JSON, Turbo, and wildcard Accept headers")
     parser.add_argument("--query-formats", action="store_true", help="request ?format=html, json, and turbo_stream instead of path suffixes")
     parser.add_argument("--mixed-formats", action="store_true", help="combine format suffixes and conflicting ?format= values on selected paths")
+    parser.add_argument("--route-inventory", action="store_true", help="check every application GET route from the pinned Rails route table")
+    parser.add_argument("--exclude-source-500s", action="store_true", help="report but exclude routes that fail inside pinned Campfire")
     parser.add_argument("--compare-406-bodies", action="store_true", help="also compare Not Acceptable response bodies")
     parser.add_argument("--compare-error-bodies", action="store_true", help="also compare forbidden and Not Acceptable response bodies")
     parser.add_argument("--compare-redirects", action="store_true", help="also compare redirect path and query")
@@ -85,13 +113,14 @@ def main():
         redis, redis_log = start_redis(temp, redis_port)
         # Pinned Campfire routes /rooms/:id/settings to a missing controller and
         # returns 500 for all four formats, so it is not a usable parity case.
+        base_paths = inventory_paths(checkout, camp_env) if args.route_inventory else PATHS
         if args.mixed_formats:
             paths = [f"{path}.{suffix}?format={query}" for path in MIXED_PATHS
                      for suffix in ("html", "json", "turbo_stream") for query in ("html", "json", "turbo_stream")]
         elif args.query_formats:
-            paths = [f"{path}?format={format_name}" for path in PATHS for format_name in ("html", "json", "turbo_stream")]
+            paths = [f"{path}?format={format_name}" for path in base_paths for format_name in ("html", "json", "turbo_stream")]
         else:
-            paths = [path + suffix for path in PATHS for suffix in (SUFFIXES if path != "/" else ("",))]
+            paths = [path + suffix for path in base_paths for suffix in (SUFFIXES if path != "/" else ("",))]
         accepts = ACCEPTS if args.all_accepts else ("text/html",)
         cases = [(path, accept) for path in paths for accept in accepts]
         try:
@@ -114,10 +143,14 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    mismatches = [(case, rust_responses[case], camp_responses[case]) for case in cases if rust_responses[case] != camp_responses[case]]
+    excluded = [case for case in cases if args.exclude_source_500s and camp_responses[case][0] == 500]
+    for path, accept in excluded:
+        print(f"Excluded pinned-source 500: {path} Accept={accept}")
+    checked = [case for case in cases if case not in excluded]
+    mismatches = [(case, rust_responses[case], camp_responses[case]) for case in checked if rust_responses[case] != camp_responses[case]]
     for (path, accept), rust_response, camp_response in mismatches:
         print(f"{path} Accept={accept}: Rustfire {rust_response}, Campfire {camp_response}")
-    print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} {args.role} GET status/media-type cases")
+    print(f"Matched {len(checked) - len(mismatches)}/{len(checked)} {args.role} GET status/media-type cases ({len(excluded)} source 500s excluded)")
     if mismatches:
         raise AssertionError(f"{len(mismatches)} GET format cases differ")
 
