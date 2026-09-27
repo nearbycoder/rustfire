@@ -113,7 +113,7 @@ def main():
             assert "name='authenticity_token'" in setup_page
             with client().open(base + "/account/logo") as logo:
                 assert logo.status == 200 and logo.read(8) == b"\x89PNG\r\n\x1a\n"
-            assert request(admin, base, "/first_run", {"name": "Forged", "email_address": "forged@example.com", "password": "password123"}, headers={"X-CSRF-Token": "wrong"})[0] == 403
+            assert request(admin, base, "/first_run", {"name": "Forged", "email_address": "forged@example.com", "password": "password123"}, headers={"X-CSRF-Token": "wrong"})[0] == 422
             setup_boundary = "rustfire-initial-setup"
             setup_parts = []
             for field, value in (("authenticity_token", CSRF[admin]), ("user[name]", "Admin"), ("user[email_address]", "admin@example.com"), ("user[password]", "password123")):
@@ -135,7 +135,7 @@ def main():
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"http://127.0.0.1/secret"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"file:///etc/passwd"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/rooms/1/messages?before=999")[0] == 404
-            assert request(admin, base, "/rooms/1/messages", {"message[body]": "forged"}, headers={"X-CSRF-Token":"wrong"})[0] == 403
+            assert request(admin, base, "/rooms/1/messages", {"message[body]": "forged"}, headers={"X-CSRF-Token":"wrong"})[0] == 422
             form_only = urllib.request.Request(base + "/rooms/1/involvement", data=urllib.parse.urlencode({"_method":"put", "involvement":"mentions", "authenticity_token":CSRF[admin]}).encode())
             with admin.open(form_only) as res:
                 assert res.status == 200
@@ -435,11 +435,11 @@ def main():
             assert code == 200 and redirected.endswith("/rooms/1"), (code, redirected)
             code, _, _ = request(member, base, "/rooms/2/refresh?since=0", headers={"Accept":"text/vnd.turbo-stream.html"})
             assert code == 404
-            code, _, payload = request(member, base, "/autocompletable/users?room_id=2")
+            code, _, payload = request(member, base, "/autocompletable/users?room_id=2", headers={"Accept": "application/json"})
             assert code == 404
-            code, _, payload = request(admin, base, "/autocompletable/users?room_id=2")
+            code, _, payload = request(admin, base, "/autocompletable/users?room_id=2", headers={"Accept": "application/json"})
             assert code == 200 and [person["name"] for person in json.loads(payload)] == ["Admin"]
-            code, _, payload = request(member, base, "/autocompletable/users?room_id=1&query=Admin")
+            code, _, payload = request(member, base, "/autocompletable/users?room_id=1&query=Admin", headers={"Accept": "application/json"})
             admin_suggestion = json.loads(payload)[0]
             assert code == 200 and admin_suggestion["value"] == 1 and set(admin_suggestion) == {"value", "name", "avatar_url", "sgid"}
             avatar_url = urllib.parse.urlparse(admin_suggestion["avatar_url"])
@@ -506,7 +506,8 @@ def main():
             assert request(member, base, "/rooms/directs/3", {}, method="POST")[0] == 405
             code, alias_url, _ = request(member, base, "/rooms/directs/3")
             assert code == 200 and alias_url.endswith("/rooms/3")
-            assert request(member, base, "/rooms/directs/2/edit")[0] == 404
+            code, redirected, _ = request(member, base, "/rooms/directs/2/edit")
+            assert code == 200 and redirected.endswith("/rooms/3")
             code, _, _ = request(member, base, "/account/update", {"name": "Nope"})
             assert code == 403
             code, _, member_account = request(member, base, "/account/edit")
@@ -533,7 +534,7 @@ def main():
             assert request(admin, base, "/account.1", {"_method": "put", "account[settings][restrict_room_creation_to_administrators]": "true"}, method="POST")[0] == 200
             assert request(admin, base, "/account.1", {"_method": "put", "account[settings][restrict_room_creation_to_administrators]": "false"}, method="POST")[0] == 200
             assert request(admin, base, "/account", {"_method": "patch", "account[name]": "Team Fire"}, method="POST")[0] == 200
-            assert request(admin, base, "/account", {"account[name]": "Wrong"}, method="POST")[0] == 405
+            assert request(admin, base, "/account", {"account[name]": "Wrong"}, method="POST")[0] == 404
             code, _, page = request(admin, base, "/account/custom_styles/edit")
             assert code == 200 and "Custom styles" in page
             code, _, _ = request(member, base, "/account/custom_styles", {"_method": "patch", "account[custom_styles]": "body{color:red}"})
@@ -678,7 +679,7 @@ def main():
             webhook_url = f"http://127.0.0.1:{webhook_server.server_port}/bot"
             assert request(admin, base, "/account/bots/3/update", {"name":"Rust Robot", "webhook_url":webhook_url})[0] == 200
             assert webhook_url in html.unescape(request(admin, base, "/account/bots/3/edit")[2])
-            code, _, payload = request(admin, base, "/autocompletable/users?room_id=1&query=Rust%20Robot")
+            code, _, payload = request(admin, base, "/autocompletable/users?room_id=1&query=Rust%20Robot", headers={"Accept": "application/json"})
             bot_suggestion = json.loads(payload)[0]
             assert code == 200 and bot_suggestion["value"] == 3 and bot_suggestion["sgid"]
             def mention_html(user_id, text="selected mention"):
@@ -1050,7 +1051,7 @@ def main():
             assert "action='replace' target='message_imported-edited'" in payload and "imported edited" in payload
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT count(*) FROM messages WHERE id IN (?,?) AND created_at_ns IS NOT NULL AND updated_at_ns IS NOT NULL", (imported_old, imported_new)).fetchone()[0] == 2
-            code, _, suggestions = request(admin, base, "/autocompletable/users?room_id=1&query=Admin")
+            code, _, suggestions = request(admin, base, "/autocompletable/users?room_id=1&query=Admin", headers={"Accept": "application/json"})
             assert code == 200 and json.loads(suggestions)[0]["sgid"] == admin_mention_sgid
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT member_ids FROM direct_room_sets WHERE room_id=?", (retained_direct,)).fetchone() == ("1,2",)

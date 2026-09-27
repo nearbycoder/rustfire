@@ -6235,27 +6235,27 @@ async fn deliver_webhook(
         .unwrap_or("")
         .trim()
         .to_string();
-    let max = if kind == "text/plain" || kind == "text/html" {
-        1024 * 1024
-    } else {
-        25 * 1024 * 1024
-    };
     let mut reply = reply;
-    let mut data = Vec::new();
-    loop {
-        match reply.chunk().await {
-            Ok(Some(chunk)) if data.len() + chunk.len() <= max => data.extend_from_slice(&chunk),
-            Ok(None) => break,
-            Ok(Some(_)) => return Err(format!("Webhook reply exceeded {max} bytes")),
-            Err(error) => return Err(format!("Webhook reply read failed: {error}")),
-        }
-    }
     if text_reply && (kind == "text/plain" || kind == "text/html") {
+        let mut data = Vec::new();
+        while let Some(chunk) = reply.chunk().await.map_err(|error| format!("Webhook reply read failed: {error}"))? {
+            data.extend_from_slice(&chunk);
+        }
         let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Webhook reply bot lookup failed: {status}"))?;
         let text = String::from_utf8(data).map_err(|error| format!("Webhook text reply is invalid UTF-8: {error}"))?;
         insert_message(&s, &bot, message.room_id, &text, None, None, true, None, true)
             .map_err(|status| format!("Webhook text reply could not be saved: {status}"))?;
     } else if let Some(ext) = campfire_webhook_attachment_extension(&kind) {
+        let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+        tokio::fs::create_dir_all(&dir).await.map_err(|error| format!("Webhook attachment directory failed: {error}"))?;
+        let temporary = std::path::Path::new(&dir).join(format!("webhook-reply-{}", Uuid::new_v4()));
+        let cleanup = UploadTemporaryFile(temporary.clone());
+        let mut staged = tokio::fs::File::create(&temporary).await.map_err(|error| format!("Webhook attachment staging failed: {error}"))?;
+        while let Some(chunk) = reply.chunk().await.map_err(|error| format!("Webhook reply read failed: {error}"))? {
+            staged.write_all(&chunk).await.map_err(|error| format!("Webhook attachment write failed: {error}"))?;
+        }
+        staged.flush().await.map_err(|error| format!("Webhook attachment flush failed: {error}"))?;
+        drop(staged);
         let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Webhook reply bot lookup failed: {status}"))?;
         insert_message(
             &s,
@@ -6266,8 +6266,8 @@ async fn deliver_webhook(
             Some(Upload {
                 filename: format!("attachment.{ext}"),
                 content_type: kind,
-                bytes: data,
-                temporary: None,
+                bytes: Vec::new(),
+                temporary: Some(cleanup),
             }),
             false,
             None,

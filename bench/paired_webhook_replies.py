@@ -22,12 +22,14 @@ from paired_mention_webhook import BOT_ID, bot_index, bot_sgid, seed_bot
 
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=")
+LARGE_REPLY = b"rustfire-webhook-file\n" * ((26 * 1024 * 1024 // 22) + 1)
 REPLIES = {
     "text": (200, "text/plain", b"Hello back!"),
     "html": (200, "text/html", b"<strong>Bold reply</strong>"),
     "empty": (200, "text/plain", b""),
     "error_text": (500, "text/plain", b"Error body"),
     "image": (200, "image/png", PNG),
+    "large_zip": (200, "application/zip", LARGE_REPLY),
     "error_no_type": (500, None, b"Error body"),
 }
 
@@ -94,7 +96,7 @@ def workflow(port, cookie, csrf, database, campfire, storage_root):
         records.append(payload)
         if case != "error_no_type":
             expected_replies += 1
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 if len(bot_reply_rows(database, campfire)) >= expected_replies:
                     break
@@ -165,8 +167,8 @@ def main():
     assert [(row[0], row[1], row[2]) for row in rust_rows] == [(row[0], row[1], row[2]) for row in camp_rows], (rust_rows, camp_rows)
     assert rust_files == camp_files, (rust_files, camp_files)
     assert rust_messages == camp_messages, next(((left, right) for left, right in zip(rust_messages, camp_messages) if left != right), None)
-    assert len(rust_rows) == 5 and len(rust_messages) == 11
-    print("PASS paired webhook replies: text, HTML, blank text, non-200 text attachment, PNG bytes, and no-content-type error match pinned Campfire")
+    assert len(rust_rows) == 6 and len(rust_messages) == 13
+    print("PASS paired webhook replies: text, HTML, blank text, non-200 text attachment, PNG bytes, 26 MiB ZIP bytes, and no-content-type error match pinned Campfire")
 
 
 if __name__ == "__main__":
