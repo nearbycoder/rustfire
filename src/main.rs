@@ -11367,7 +11367,9 @@ async fn boosts_index(
     room_for(&s, u.id, rid)?;
     drop(db);
     let message = message_by_id(&s, rid, mid)?;
-    Ok(render("Boosts", &boost_area_html(&s, &message), Some(&u)))
+    let token = u.csrf_token.as_deref().unwrap_or("");
+    let body = csrf_forms(&boost_area_html(&s, &message), token);
+    Ok(render_source_page("Boosts", &body, "", Some(&u), token))
 }
 async fn boost_new(
     State(s): State<Arc<AppState>>,
@@ -11414,7 +11416,7 @@ async fn boost_new(
     if frame_request {
         Ok(Html(frame).into_response())
     } else {
-        Ok(render("Add a boost", &frame, Some(&u)))
+        Ok(render_source_page("Add a boost", &frame, "", Some(&u), u.csrf_token.as_deref().unwrap_or("")))
     }
 }
 async fn boost_delete(

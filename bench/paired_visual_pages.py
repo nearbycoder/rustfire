@@ -19,6 +19,8 @@ from paired_turbo_fanout import seed_boost_message
 
 PAGES = (
     ("room", "/rooms/1", "#message_boost-fixture"),
+    ("boosts", "/messages/1/boosts", "body"),
+    ("boost-new", "/messages/1/boosts/new", "body"),
     ("account", "/account/edit", "body"),
     ("custom-styles", "/account/custom_styles/edit", "body"),
     ("profile", "/users/me/profile", "body"),
@@ -109,7 +111,7 @@ def main():
             capture_output=True, text=True, timeout=15,
         )
         assert compared.returncode in (0, 1), compared.stderr
-        matched = re.search(r"\(([\d.]+)\)", compared.stderr)
+        matched = re.search(r"\(([\d.eE+-]+)\)", compared.stderr)
         assert matched, compared.stderr
         differences[label] = float(matched.group(1))
     print(f"{len(PAGES)} paired Chromium pages at {args.width}x{args.height}: {differences}")
