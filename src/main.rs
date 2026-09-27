@@ -10291,22 +10291,42 @@ async fn bot_delete(
     tx.commit().map_err(db_err)?;
     Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
+fn bot_pagination_not_found(headers: &HeaderMap, uri: &Uri) -> Response {
+    let mut response = rails_error_response(StatusCode::NOT_FOUND, headers, uri);
+    if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"application/json")) {
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=UTF-8"));
+    }
+    response
+}
 async fn bot_messages_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path((rid, key)): Path<(i64, String)>,
-    Query(q): Query<Paging>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> AppResult {
     if uri.path().ends_with(".html") {
         let mut params = HashMap::new();
-        if let Some(before) = q.before { params.insert("before".to_string(), before.to_string()); }
-        if let Some(after) = q.after { params.insert("after".to_string(), after.to_string()); }
+        if let Some(before) = q.get("before") { params.insert("before".to_string(), before.clone()); }
+        if let Some(after) = q.get("after") { params.insert("after".to_string(), after.clone()); }
         return messages_index(State(s), headers, OriginalUri(uri), Path(rid.to_string()), Query(params)).await;
     }
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
-    if let Some(cursor) = q.after.or(q.before) {
+    let before_value = q.get("before").filter(|value| !value.trim().is_empty());
+    let after_value = q.get("after").filter(|value| !value.trim().is_empty());
+    let (before, after) = if let Some(value) = before_value {
+        match value.parse::<i64>() {
+            Ok(cursor) => (Some(cursor), None),
+            Err(_) => return Ok(bot_pagination_not_found(&headers, &uri)),
+        }
+    } else if let Some(value) = after_value {
+        match value.parse::<i64>() {
+            Ok(cursor) => (None, Some(cursor)),
+            Err(_) => return Ok(bot_pagination_not_found(&headers, &uri)),
+        }
+    } else { (None, None) };
+    if let Some(cursor) = before.or(after) {
         let found: bool = pool(&s)?
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id=?2)",
@@ -10315,10 +10335,10 @@ async fn bot_messages_get(
             )
             .map_err(db_err)?;
         if !found {
-            return Err(StatusCode::NOT_FOUND);
+            return Ok(bot_pagination_not_found(&headers, &uri));
         }
     }
-    let messages = message_list_with_room_name(&s, rid, 40, q.before, q.after, false)?;
+    let messages = message_list_with_room_name(&s, rid, 40, before, after, false)?;
     let db = pool(&s)?;
     let count: i64 = db
         .query_row(
@@ -10340,7 +10360,7 @@ async fn bot_messages_get(
     r.headers_mut()
         .insert("x-total-count", count.to_string().parse().unwrap());
     if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
-        let (direction, cursor) = if q.after.is_some() {
+        let (direction, cursor) = if after_value.is_some() {
             ("after", last.id)
         } else {
             ("before", first.id)
