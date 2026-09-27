@@ -7557,11 +7557,14 @@ async fn search_get(
     if !query.trim().is_empty() {
         // Select the latest visible IDs before loading attachments, boosts, and rich text.
         let mut stmt=db.prepare("WITH hits AS MATERIALIZED (SELECT m.id,m.created_at_ns FROM message_search_index idx JOIN messages m ON m.id=idx.rowid JOIN memberships mem ON mem.room_id=m.room_id WHERE mem.user_id=?1 AND idx.body MATCH ?2 ORDER BY m.created_at_ns DESC,m.id DESC LIMIT 100) SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height,u.bio FROM hits h JOIN messages m ON m.id=h.id JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id ORDER BY h.created_at_ns DESC,h.id DESC").map_err(db_err)?;
-        messages = stmt
-            .query_map(params![u.id, query], chat_message_from_row)
-            .map_err(db_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(db_err)?;
+        let rows = match stmt.query_map(params![u.id, query], chat_message_from_row) {
+            Ok(rows) => rows,
+            Err(_) => return Ok(rails_exception_500_response(&headers, &uri)),
+        };
+        messages = match rows.collect::<Result<Vec<_>, _>>() {
+            Ok(messages) => messages,
+            Err(_) => return Ok(rails_exception_500_response(&headers, &uri)),
+        };
         messages.reverse();
         let mut room_names = HashMap::new();
         for message in &mut messages {
