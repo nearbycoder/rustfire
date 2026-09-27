@@ -1729,3 +1729,14 @@ On this release build, `python bench/paired_unsafe_route_inventory.py --all-acce
 `python bench/paired_message_parameter_edges.py` now passes **27/27** message-create forms against pinned Campfire `91d294f`: the earlier sixteen body shapes, six URL-encoded query/body combinations, and five multipart query/body combinations. The comparator checks status, media type, redirect or applicable error-body hash, message count, saved plain text and client ID, and whether a file remained attached. Campfire's query `message` group replaces the entire form `message` group, including an uploaded file; Rustfire now does the same in these cases. The source returns a packaged 500 for a query scalar `message=scalar`, while a query group with an unknown nested field creates a blank message.
 
 With `--edit-query-only`, the same probe passed **6/6** message-edit query/body cases on seeded messages. It checks response and saved text, client ID, attachment presence, and whether `updated_at` changed. A query group with only an unknown field is a successful no-op, while a submitted `client_message_id` alone updates that ID and advances the timestamp. Rustfire now matches those sampled effects. The existing five-case public edit format probe, Rust unit suite (**52/52**), and smoke suite passed afterward. These are sampled message writes; other multipart, attachment-edit, and WebSocket effects remain parity work.
+
+## Current-build paired rich-message mix after query parsing
+
+Release commit `40cd030` ran `bench/paired_message_multi.py` with four rooms, four users, 32 checked readers, three rich posts per second per room for ten seconds, and 100 browser-channel sockets per room spread across the users. Campfire used 22 Puma workers and Redis; Rustfire used one process. Both apps ran serially on the same host in each server order. The [full paired reports](results/message-query-current-build-mix-2026-09-27.json) preserve the command, resource samples, deliveries, and validation results.
+
+| Server order | Checked reads/s, Rustfire / Campfire | Read p95 ms, Rustfire / Campfire | Write p95 ms, Rustfire / Campfire |
+| --- | ---: | ---: | ---: |
+| Campfire first | 2,291.5 / 1,373.3 (**1.67×**) | 25.0 / 55.2 | 25.1 / 153.2 |
+| Rustfire first | 2,753.4 / 1,406.2 (**1.96×**) | 17.6 / 52.0 | 17.6 / 154.8 |
+
+Each order saved all 120 scheduled writes within the deadline, delivered all 12,000 message appends and 12,000 unread events per app, matched 480 captured append structures, and had zero checked read errors or paired validation errors. This is a short local workload point with no attachment uploads or push delivery. It supports a speed advantage for this equivalent tested mix on the current build; it does not establish a whole-app or sustained maximum-capacity advantage.
