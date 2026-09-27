@@ -55,8 +55,31 @@ def main():
         assert state(database, old_file) == before, "queued work changed while Rustfire was stopped"
         with sqlite3.connect(database) as db:
             db.execute("UPDATE attachment_jobs SET available_at_ms=?", [int(time.time() * 1000) - 1])
+            db.execute(
+                "UPDATE attachment_jobs SET claimed_at_ms=? WHERE kind='purge'",
+                [int(time.time() * 1000) - 61_000],
+            )
+            assert db.execute("SELECT COUNT(*) FROM attachment_jobs WHERE claimed_at_ms IS NOT NULL").fetchone()[0] == 1
+        old_file.unlink()
+        old_file.mkdir()
         process = start_server(database, port, {"RUSTFIRE_UPLOAD_DIR": str(uploads)})
         try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                with sqlite3.connect(database) as db:
+                    failed_purge = db.execute(
+                        "SELECT claimed_at_ms FROM attachment_jobs WHERE kind='purge'"
+                    ).fetchone()
+                during_failure = state(database, old_file)
+                if failed_purge and failed_purge[0] > int(time.time() * 1000) - 5_000 and during_failure[0][:3] == (2, 640.0, 640.0) and during_failure[1:] == (1, 1, True):
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError(("failed purge was not retained", during_failure, failed_purge))
+            old_file.rmdir()
+            old_file.write_bytes(OLD_FILE)
+            with sqlite3.connect(database) as db:
+                db.execute("UPDATE attachment_jobs SET claimed_at_ms=? WHERE kind='purge'", [int(time.time() * 1000) - 61_000])
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 after = state(database, old_file)
@@ -69,7 +92,7 @@ def main():
             assert hashlib.sha256(original.read_bytes()).digest() == hashlib.sha256(IMAGE.read_bytes()).digest()
         finally:
             stop_server(process)
-    print("PASS queued attachment analysis and purge resume after Rustfire restart")
+    print("PASS pending analysis, expired claim, and failed purge retry after Rustfire restart")
 
 
 if __name__ == "__main__":

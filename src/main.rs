@@ -9981,7 +9981,7 @@ fn process_attachment_job(s: &AppState) -> Result<bool, StatusCode> {
                     params![stored,attachment_id], |row| row.get(0),
                 ).map_err(db_err)?;
                 if !referenced {
-                    remove_attachment_files(&stored);
+                    remove_attachment_files_checked(&stored).map_err(db_err)?;
                     db.execute("DELETE FROM replaced_attachments WHERE id=?1 AND stored_name=?2",params![attachment_id,stored]).map_err(db_err)?;
                 }
             }
@@ -11635,36 +11635,42 @@ async fn signed_representation_get(
     let disk_token = disk_token(&s.blob_signing_key, "blob_key", json!({"key":storage_key,"disposition":disposition,"content_type":response_type,"service_name":"local","filename":variant_filename})).map_err(db_err)?;
     Ok(found_redirect(&public_url(&headers, &format!("/rails/active_storage/disk/{disk_token}/{}", encoded_blob_filename(&variant_filename)))))
 }
-fn remove_attachment_files(stored: &str) {
+fn remove_attachment_files_checked(stored: &str) -> std::io::Result<()> {
     let rails_key = stored.len() == 28 && stored.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
     if Uuid::parse_str(stored).is_err() && !rails_key {
-        return;
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid attachment storage key"));
     }
     let dir = std::path::PathBuf::from(
         env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
     );
-    let _ = std::fs::remove_file(dir.join(stored));
+    let mut first_error = None;
+    let mut remove = |path: &std::path::Path| {
+        if let Err(error) = std::fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound && first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    };
+    remove(&dir.join(stored));
     for kind in ["thumb", "poster"] {
-        let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-{kind}.webp")));
+        remove(&dir.join("variants").join(format!("{stored}-{kind}.webp")));
     }
     for format in ["png", "jpeg", "gif", "webp", "avif"] {
-        let _ = std::fs::remove_file(
-            dir.join("variants")
-                .join(format!("{stored}-thumb.{format}")),
-        );
-        let _ = std::fs::remove_file(
-            dir.join("variants")
-                .join(format!("{stored}-inline.{format}")),
-        );
-        let _ = std::fs::remove_file(
-            dir.join("variants")
-                .join(format!("{stored}-inline-gallery.{format}")),
-        );
+        remove(&dir.join("variants").join(format!("{stored}-thumb.{format}")));
+        remove(&dir.join("variants").join(format!("{stored}-inline.{format}")));
+        remove(&dir.join("variants").join(format!("{stored}-inline-gallery.{format}")));
     }
-    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-pdf.png")));
-    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-video.jpeg")));
-    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-pdf-gallery.png")));
-    let _ = std::fs::remove_file(dir.join("variants").join(format!("{stored}-inline-video-gallery.jpeg")));
+    remove(&dir.join("variants").join(format!("{stored}-inline-pdf.png")));
+    remove(&dir.join("variants").join(format!("{stored}-inline-video.jpeg")));
+    remove(&dir.join("variants").join(format!("{stored}-inline-pdf-gallery.png")));
+    remove(&dir.join("variants").join(format!("{stored}-inline-video-gallery.jpeg")));
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+fn remove_attachment_files(stored: &str) {
+    let _ = remove_attachment_files_checked(stored);
 }
 fn inline_blob_ids(db: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<i64>, StatusCode> {
     let mut query = db.prepare(sql).map_err(db_err)?;
