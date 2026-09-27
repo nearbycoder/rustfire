@@ -131,7 +131,7 @@ def main():
             assert request(admin, base, "/unfurl_link", json.dumps({"url":"file:///etc/passwd"}).encode(), method="POST", headers={"Content-Type":"application/json"})[0] == 204
             assert request(admin, base, "/rooms/1/messages?before=999")[0] == 404
             assert request(admin, base, "/rooms/1/messages", {"message[body]": "forged"}, headers={"X-CSRF-Token":"wrong"})[0] == 403
-            form_only = urllib.request.Request(base + "/rooms/1/involvement", data=urllib.parse.urlencode({"involvement":"mentions", "authenticity_token":CSRF[admin]}).encode())
+            form_only = urllib.request.Request(base + "/rooms/1/involvement", data=urllib.parse.urlencode({"_method":"put", "involvement":"mentions", "authenticity_token":CSRF[admin]}).encode())
             with admin.open(form_only) as res:
                 assert res.status == 200
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": "hello from smoke", "message[client_message_id]": "test-1"}, headers={"Accept": "application/json"})
@@ -237,7 +237,7 @@ def main():
             assert code == 200 and "hello edited" in page
             code, _, page = request(admin, base, "/rooms/1/settings")
             assert code == 200 and 'style="view-transition-name: edit-room-1"' in page
-            code, _, page = request(admin, base, "/account")
+            code, _, page = request(admin, base, "/account/edit")
             assert code == 200, (code, page[:500])
             assert "/assets/layout-ff6ddfc6.css" in page and "/account/custom_styles.css" not in page
             assert "<a class='btn' href='/rooms/1'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg'" in page
@@ -371,19 +371,19 @@ def main():
             assert code == 201
             code, _, page = request(member, base, "/users/me/sidebar")
             assert code == 200 and re.search(r'<a id="list_rooms_open_1"[^>]*class="[^"]*\bunread\b', page)
-            code, _, _ = request(member, base, "/rooms/1/involvement", {"involvement": "everything"})
+            code, _, _ = request(member, base, "/rooms/1/involvement", {"_method": "put", "involvement": "everything"})
             assert code == 200
             code, _, page = request(member, base, "/users/me/sidebar")
             assert code == 200 and re.search(r'<a id="list_rooms_open_1"[^>]*class="[^"]*\bunread\b', page)
             assert request(member, base, "/rooms/1")[0] == 200
             code, _, page = request(member, base, "/users/me/sidebar")
             assert code == 200 and re.search(r'<a id="list_rooms_open_1"[^>]*class="[^"]*\bunread\b', page)
-            assert request(member, base, "/rooms/1/involvement", {"involvement": "invisible"})[0] == 200
+            assert request(member, base, "/rooms/1/involvement", {"_method": "put", "involvement": "invisible"})[0] == 200
             with member.open(base + "/users/me/sidebar?active=1") as sidebar_response:
                 assert sidebar_response.headers["x-rustfire-active-room-accessible"] == "1"
                 assert 'id="list_rooms_open_1"' not in sidebar_response.read().decode()
             assert request(member, base, "/rooms/1")[0] == 200
-            assert request(member, base, "/rooms/1/involvement", {"involvement": "everything"})[0] == 200
+            assert request(member, base, "/rooms/1/involvement", {"_method": "put", "involvement": "everything"})[0] == 200
             code, _, open_form = request(admin, base, "/rooms/opens/new")
             assert code == 200 and 'style="view-transition-name: new-room"' in open_form
             assert 'action="/rooms/opens"' in open_form and 'name="room[name]"' in open_form
@@ -413,7 +413,7 @@ def main():
             code, _, _ = request(admin, base, "/rooms/closeds/2", {"room[name]": "Private Two", "user_ids[]": ["1", "2"]}, method="PATCH")
             assert code == 302
             assert request(member, base, "/rooms/2")[0] == 200
-            assert request(member, base, "/rooms/2/involvement", {"involvement": "everything"})[0] == 200
+            assert request(member, base, "/rooms/2/involvement", {"_method": "put", "involvement": "everything"})[0] == 200
             assert request(admin, base, "/rooms/2/messages", {"message[body]": "private unread"}, headers={"Accept": "application/json"})[0] == 201
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 membership_before = check_db.execute("SELECT id,involvement,unread_at FROM memberships WHERE room_id=2 AND user_id=2").fetchone()
@@ -488,10 +488,10 @@ def main():
             assert code == 200 and "Ping with</span>Admin</h1>" in page and 'id="messages_rooms_direct_3"' in page
             code, repeated_url, _ = request(admin, base, "/rooms/directs", {"user_ids": "2"})
             assert repeated_url == direct_url
-            assert request(member, base, "/rooms/3/involvement", {"involvement": "invisible"})[0] == 200
+            assert request(member, base, "/rooms/3/involvement", {"_method": "put", "involvement": "invisible"})[0] == 200
             assert 'id="list_rooms_direct_3"' not in request(member, base, "/users/me/sidebar")[2]
             assert request(member, base, "/rooms/3")[0] == 200
-            assert request(member, base, "/rooms/3/involvement", {"involvement": "everything"})[0] == 200
+            assert request(member, base, "/rooms/3/involvement", {"_method": "put", "involvement": "everything"})[0] == 200
             assert 'id="list_rooms_direct_3"' in request(member, base, "/users/me/sidebar")[2]
             code, _, page = request(member, base, "/rooms/directs/3/edit")
             assert code == 200 and "Edit settings for Admin" in page
@@ -511,7 +511,7 @@ def main():
             assert code == 200 and "Team Fire" in page, (code, page[:300])
             code, _, page = request(admin, base, "/account", {"account[name]": "Team Fire"}, method="PATCH")
             assert code == 302
-            code, _, page = request(admin, base, "/account")
+            code, _, page = request(admin, base, "/account/edit")
             assert code == 200 and "Team Fire" in page
             roster = page.split('<turbo-frame id="account_users">', 1)[1].split("</turbo-frame>", 1)[0]
             assert roster.index("<strong>Admin</strong>") < roster.index('<hr class="separator full-width"') < roster.index("<strong>Member Two</strong>")
@@ -531,9 +531,9 @@ def main():
             assert request(admin, base, "/account", {"account[name]": "Wrong"}, method="POST")[0] == 405
             code, _, page = request(admin, base, "/account/custom_styles/edit")
             assert code == 200 and "Custom styles" in page
-            code, _, _ = request(member, base, "/account/custom_styles", {"account[custom_styles]": "body{color:red}"})
+            code, _, _ = request(member, base, "/account/custom_styles", {"_method": "patch", "account[custom_styles]": "body{color:red}"})
             assert code == 403
-            code, _, page = request(admin, base, "/account/custom_styles", {"account[custom_styles]": "body{color:#123456}"})
+            code, _, page = request(admin, base, "/account/custom_styles", {"_method": "patch", "account[custom_styles]": "body{color:#123456}"})
             assert code == 200 and "body{color:#123456}" in page
             assert '<style data-turbo-track="reload">body{color:#123456}</style>' in page
             with sqlite3.connect(f"{tmp}/test.db") as styles_db:
@@ -632,7 +632,7 @@ def main():
             with admin.open(base+signed_avatar_url(3)) as res:
                 assert res.status==200 and res.headers.get_content_type()=="image/webp" and res.read()[:4]==b"RIFF"
             code, _, _ = request(client(), base, "/account/bots/3/key", {})
-            assert code == 401
+            assert code == 404
             code, _, page = request(admin, base, "/account/bots/3/update", {"name": "Rust Robot"})
             assert code == 200 and "Rust Robot" in page
             code, _, page = request(admin, base, f"/account/bots/{picture_bot_id}", {"_method":"delete"}, method="POST")
@@ -833,7 +833,7 @@ def main():
             assert code == 403
             code, _, _ = request(client(), base, f"/rooms/1/{key}/messages/{bot_id}", method="DELETE")
             assert code == 204
-            code, _, page = request(admin, base, "/account/bots/3/key", {})
+            code, _, page = request(admin, base, "/account/bots/3/key", {"_method": "put"})
             assert code == 200
             rotated = bot_key_from_page(page)
             assert rotated != key
@@ -877,10 +877,10 @@ def main():
             assert "Free cookies" in rendered and "once.campfire.test" not in rendered
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": "/play bell"}, headers={"Accept": "application/json"})
             assert code == 201
-            assert "data-sound='/static/sounds/bell.mp3'" in request(admin, base, "/rooms/1")[2]
+            assert "data-sound-url-value='/assets/bell-4dd04376.mp3'" in request(admin, base, "/rooms/1")[2]
             code, _, payload = request(admin, base, "/rooms/1/messages", {"message[body]": "<div>/play bell</div>", "message[format]": "html"}, headers={"Accept": "application/json"})
             assert code == 201
-            assert "data-sound='/static/sounds/bell.mp3'" in request(admin, base, f"/rooms/1/messages/{json.loads(payload)['id']}")[2]
+            assert "data-sound-url-value='/assets/bell-4dd04376.mp3'" in request(admin, base, f"/rooms/1/messages/{json.loads(payload)['id']}")[2]
             with admin.open(base + "/static/sounds/bell.mp3") as res:
                 assert res.status == 200 and res.headers.get_content_type() == "audio/mpeg" and len(res.read()) > 100
             with sqlite3.connect(f"{tmp}/test.db") as transfer_db:
@@ -955,7 +955,7 @@ def main():
             converted_room = int(re.search(r"/rooms/(\d+)$", converted_url).group(1))
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 original_membership = check_db.execute("SELECT id FROM memberships WHERE room_id=? AND user_id=1", (converted_room,)).fetchone()[0]
-            assert request(admin, base, f"/rooms/{converted_room}/involvement", {"involvement": "everything"})[0] == 200
+            assert request(admin, base, f"/rooms/{converted_room}/involvement", {"_method": "put", "involvement": "everything"})[0] == 200
             assert request(admin, base, f"/rooms/opens/{converted_room}", {"room[name]": "Opened"}, method="PATCH")[0] == 302
             with sqlite3.connect(f"{tmp}/test.db") as check_db:
                 assert check_db.execute("SELECT type FROM rooms WHERE id=?", (converted_room,)).fetchone()[0] == "Rooms::Open"

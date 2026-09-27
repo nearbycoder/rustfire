@@ -311,6 +311,17 @@ def workflow(port, cookie, csrf, database, users, clients, seconds):
     result["deactivate"] = status, urllib.parse.urlsplit(location).path, role_and_status(database), membership_state(database)
     status, _, _ = request(port, "DELETE", "/account/users/2", cookie, csrf)
     result["repeat_delete"] = status
+    with sqlite3.connect(database) as db:
+        old_join_code = db.execute("SELECT join_code FROM accounts").fetchone()[0]
+    status, location, payload = request(port, "POST", "/account/join_code", cookie, csrf, b"", "application/x-www-form-urlencoded")
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, location, payload[:200])
+    with sqlite3.connect(database) as db:
+        new_join_code = db.execute("SELECT join_code FROM accounts").fetchone()[0]
+    assert new_join_code != old_join_code and re.fullmatch(r"[A-Za-z0-9]{4}(?:-[A-Za-z0-9]{4}){2}", new_join_code), new_join_code
+    old_link = request(port, "GET", f"/join/{old_join_code}", "", "")[0]
+    new_link = request(port, "GET", f"/join/{new_join_code}", "", "")[0]
+    assert (old_link, new_link) == (404, 200), (old_link, new_link)
+    result["join_code_rotation"] = status, urllib.parse.urlsplit(location).path, old_link, new_link
     return result, performance
 
 

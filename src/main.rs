@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
 };
 mod notification_help;
 mod vips;
@@ -3506,7 +3506,7 @@ async fn first_run_post(
         let t = now();
         tx.execute(
             "INSERT INTO accounts(id,name,join_code,created_at,updated_at) VALUES(1,'Campfire',?1,?2,?2)",
-            params![Uuid::new_v4().to_string(), t],
+            params![generate_join_code()?, t],
         )
         .map_err(db_err)?;
         tx.execute("INSERT INTO users(name,email_address,password_digest,role,status,created_at,updated_at) VALUES(?1,?2,?3,1,0,?4,?4)",params![name,email,pw,t]).map_err(db_err)?;
@@ -8004,10 +8004,10 @@ async fn join_code_create(State(s): State<Arc<AppState>>, headers: HeaderMap) ->
     pool(&s)?
         .execute(
             "UPDATE accounts SET join_code=?1,updated_at=?2",
-            params![Uuid::new_v4().to_string(), now()],
+            params![generate_join_code()?, now()],
         )
         .map_err(db_err)?;
-    Ok(Redirect::to("/account").into_response())
+    Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn user_role_update(
     State(s): State<Arc<AppState>>,
@@ -11039,6 +11039,29 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
 async fn health() -> impl IntoResponse {
     "ok"
 }
+fn generate_join_code() -> Result<String, StatusCode> {
+    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut code = String::with_capacity(14);
+    let mut count = 0;
+    while count < 12 {
+        let mut bytes = [0u8; 24];
+        openssl::rand::rand_bytes(&mut bytes).map_err(db_err)?;
+        for byte in bytes {
+            if byte >= 248 {
+                continue;
+            }
+            if count == 4 || count == 8 {
+                code.push('-');
+            }
+            code.push(ALPHABET[(byte % 62) as usize] as char);
+            count += 1;
+            if count == 12 {
+                break;
+            }
+        }
+    }
+    Ok(code)
+}
 async fn campfire_response_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let asset = path.starts_with("/assets/") || path.starts_with("/static/");
@@ -11660,7 +11683,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let app = Router::new()
         .route("/", get(root))
-        .route("/up", get(health))
+        .route("/up", any(|| async { StatusCode::NOT_FOUND }).get(health))
         .route("/webmanifest", get(webmanifest))
         .route("/webmanifest.json", get(webmanifest))
         .route("/service-worker", get(service_worker))
@@ -11668,7 +11691,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/qr_code/{id}", get(qr_code_show))
         .route("/first_run", get(first_run_get).post(first_run_post))
         .route("/session/new", get(login_get))
-        .route("/session", post(session_post).delete(logout))
+        .route("/session", any(|| async { StatusCode::NOT_FOUND }).post(session_post).delete(logout))
         .route("/session/logout", post(logout))
         .route(
             "/session/transfers/{token}",
@@ -11750,8 +11773,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/searches/clear", post(search_clear).delete(search_clear))
         .route(
             "/account",
-            get(account_get)
-                .post(account_update)
+            any(|| async { StatusCode::NOT_FOUND }).post(account_update)
                 .patch(account_update)
                 .put(account_update),
         )
@@ -11763,7 +11785,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/account/edit", get(account_get))
         .route("/account/update", post(account_update))
-        .route("/account/custom_styles/edit", get(custom_styles_get))
+        .route("/account/custom_styles/edit", any(|| async { StatusCode::NOT_FOUND }).get(custom_styles_get))
         .route(
             "/account/custom_styles",
             post(custom_styles_post_override).put(custom_styles_update).patch(custom_styles_update),
@@ -11778,7 +11800,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/users.turbo_stream", get(account_users_index))
         .route(
             "/account/users/{id}",
-            post(user_admin_post)
+            any(|| async { StatusCode::NOT_FOUND }).post(user_admin_post)
                 .patch(user_role_update)
                 .put(user_role_update)
                 .delete(user_deactivate),
@@ -11846,7 +11868,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/account/bots/new", get(bot_new))
         .route(
             "/account/bots/{id}",
-            post(bot_post_override)
+            any(|| async { StatusCode::NOT_FOUND }).post(bot_post_override)
                 .patch(bot_update)
                 .put(bot_update)
                 .delete(bot_delete),
@@ -11917,6 +11939,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/rails/active_storage/representations/{token}/{variation}/{filename}",
             get(signed_representation_get),
         )
+        .method_not_allowed_fallback(|| async { StatusCode::NOT_FOUND })
         .nest_service("/assets", ServeDir::new("static/assets"))
         .nest_service("/static", ServeDir::new("static"))
         .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024))

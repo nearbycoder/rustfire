@@ -88,11 +88,13 @@ def check(port, database, campfire, image):
     assert (status, location) == (302, "/"), (status, location)
     with sqlite3.connect(database) as db:
         account = db.execute("SELECT name FROM accounts").fetchall()
+        join_code = db.execute("SELECT join_code FROM accounts").fetchone()[0]
         users = db.execute("SELECT id,name,email_address,role FROM users").fetchall()
         rooms = db.execute("SELECT id,name,type,creator_id FROM rooms").fetchall()
         memberships = db.execute("SELECT room_id,user_id FROM memberships").fetchall()
         avatar_count = db.execute("SELECT count(*) FROM active_storage_attachments WHERE record_type='User' AND name='avatar'").fetchone()[0] if campfire else db.execute("SELECT count(*) FROM avatars").fetchone()[0]
     assert account == [("Campfire",)], account
+    assert re.fullmatch(r"[A-Za-z0-9]{4}(?:-[A-Za-z0-9]{4}){2}", join_code), join_code
     assert len(users) == len(rooms) == len(memberships) == avatar_count == 1
     uid, name, email, role = users[0]
     rid, room_name, kind, creator = rooms[0]
