@@ -34,18 +34,28 @@ from paired_webhook_sustained import wait_for_queue
 REPLY = b"Acknowledged"
 
 
+def reply_for(index, mode):
+    if mode == "mixed":
+        text = f"Acknowledged {index:05d}"
+        return ("text/html", f"<strong>{text}</strong>".encode()) if index % 2 == 0 else ("text/plain", text.encode())
+    return "text/plain", REPLY
+
+
 class Receiver(BaseHTTPRequestHandler):
     received = queue.Queue()
     delay = 0
+    reply_mode = "text"
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        index = int(payload["message"]["body"]["plain"].removeprefix("load:"))
+        content_type, reply = reply_for(index, self.reply_mode)
         time.sleep(self.delay)
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(REPLY)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(reply)))
         self.end_headers()
-        self.wfile.write(REPLY)
+        self.wfile.write(reply)
         self.received.put((time.perf_counter(), payload))
 
     def log_message(self, *_):
@@ -82,7 +92,7 @@ def saved_replies(database, campfire):
     with sqlite3.connect(database) as db:
         if campfire:
             return db.execute("SELECT m.id,t.body FROM messages m JOIN action_text_rich_texts t ON t.record_type='Message' AND t.record_id=m.id AND t.name='body' WHERE m.creator_id=52 ORDER BY m.id").fetchall()
-        return db.execute("SELECT id,body FROM messages WHERE creator_id=52 ORDER BY id").fetchall()
+        return db.execute("SELECT id,COALESCE(body_source,body) FROM messages WHERE creator_id=52 ORDER BY id").fetchall()
 
 
 def trial(app, port, database, cookie, csrf, posts, rate, timeout, redis_port=None):
@@ -140,7 +150,8 @@ def trial(app, port, database, cookie, csrf, posts, rate, timeout, redis_port=No
     else:
         raise AssertionError((app, len(saved_replies(database, app == "campfire")), posts))
     saved_end = time.perf_counter()
-    assert len(replies) == posts and all(body == REPLY.decode() for _, body in replies), (app, replies[:3], len(replies))
+    expected_bodies = {reply_for(index, Receiver.reply_mode)[1].decode() for index in range(1, posts + 1)}
+    assert len(replies) == posts and {body for _, body in replies} == expected_bodies, (app, replies[:3], len(replies))
     wait_for_queue(app, database, redis_port)
     with sqlite3.connect(database) as db:
         if app == "rustfire":
@@ -230,26 +241,35 @@ def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate,
             capture.communicate(timeout=5)
 
 
-def check_reply_events(camp_file, rust_file, camp_db, rust_db, posts):
+def check_reply_events(camp_file, rust_file, camp_db, rust_db, posts, reply_mode):
     def parsed_events(path, database, campfire):
         events = json.loads(path.read_text())
-        expected_ids = {message_id for message_id, _ in saved_replies(database, campfire)}
+        saved = saved_replies(database, campfire)
+        expected_ids = {message_id for message_id, _ in saved}
         assert len(events) == posts and {message_id for message_id, _ in events} == expected_ids, (path, len(events), len(expected_ids))
-        result = []
+        by_index = {int(re.search(r"Acknowledged (\d{5})", body).group(1)): message_id for message_id, body in saved} if reply_mode == "mixed" else None
+        if by_index is not None:
+            assert len(by_index) == posts, (path, len(by_index), posts)
+        result = {}
         for index, (message_id, source) in enumerate(events, 1):
             matched = re.search(r"\bdata-message-id=['\"](\d+)['\"]", source)
             assert matched and int(matched.group(1)) == message_id, (path, index, message_id)
+            reply_index = int(re.search(r"Acknowledged (\d{5})", source).group(1)) if by_index is not None else index
+            if by_index is not None:
+                assert by_index.get(reply_index) == message_id, (path, reply_index, message_id)
             tags = StreamWithoutCsrfInputs()
             tags.feed(source)
             check_message_times(tags.attributes, f"{path} reply {index}")
             values = stable_multi_stream_values(tags.attributes, message_id, 1)
             stable_values = [(tag, tuple((key, re.sub(r"(?<=message_)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<client-id>", value) if value else value) for key, value in attrs)) for tag, attrs in values]
-            result.append((tags.tags, tags.attribute_keys, stable_values, tags.text))
+            result[reply_index] = (tags.tags, tags.attribute_keys, stable_values, tags.text)
         return result
 
     camp_events = parsed_events(camp_file, camp_db, True)
     rust_events = parsed_events(rust_file, rust_db, False)
-    for index, (camp, rust) in enumerate(zip(camp_events, rust_events), 1):
+    assert camp_events.keys() == rust_events.keys(), (camp_events.keys(), rust_events.keys())
+    for index in sorted(camp_events):
+        camp, rust = camp_events[index], rust_events[index]
         assert camp[0] == rust[0], f"Bot reply append {index} tags differ"
         assert camp[1] == rust[1], f"Bot reply append {index} attribute keys differ"
         assert camp[2] == rust[2], next(((item, left, right) for item, (left, right) in enumerate(zip(camp[2], rust[2])) if left != right), f"Bot reply append {index} attribute lengths differ")
@@ -290,6 +310,7 @@ def main():
     parser.add_argument("--posts", type=int, default=120)
     parser.add_argument("--rate", type=float, default=24)
     parser.add_argument("--delay-ms", type=int, default=25)
+    parser.add_argument("--reply-mode", choices=("text", "mixed"), default="text")
     parser.add_argument("--campfire-workers", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--campfire-first", action="store_true")
@@ -306,6 +327,7 @@ def main():
             parser.error("--resources requires psutil")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     Receiver.delay = args.delay_ms / 1000
+    Receiver.reply_mode = args.reply_mode
     receiver_port, rust_port, camp_port, redis_port = (free_port() for _ in range(4))
     receiver = ThreadingHTTPServer(("127.0.0.1", receiver_port), Receiver)
     thread = threading.Thread(target=receiver.serve_forever, daemon=True)
@@ -357,7 +379,7 @@ def main():
                 else:
                     (rust_report, rust_signatures), (camp_report, camp_signatures) = rust_trial(), camp_trial()
                 if args.sockets:
-                    checked_reply_events = check_reply_events(temp / "camp-reply-appends.json", temp / "rust-reply-appends.json", camp_db, rust_db, args.posts)
+                    checked_reply_events = check_reply_events(temp / "camp-reply-appends.json", temp / "rust-reply-appends.json", camp_db, rust_db, args.posts, args.reply_mode)
                     checked_post_events = check_post_events(temp / "camp-post-appends.json", temp / "rust-post-appends.json", camp_db, rust_db, args.posts)
             finally:
                 redis.terminate()
@@ -368,7 +390,7 @@ def main():
         receiver.server_close()
         thread.join(timeout=5)
     assert rust_signatures == camp_signatures, next(((left, right) for left, right in zip(rust_signatures, camp_signatures) if left != right), None)
-    report = {"source_revision": REVISION, "posts": args.posts, "rate": args.rate, "reply_delay_ms": args.delay_ms, "campfire_resque_workers": args.campfire_workers, "campfire_first": args.campfire_first, "sockets": args.sockets, "payloads_match": True, "rustfire": rust_report, "campfire": camp_report}
+    report = {"source_revision": REVISION, "posts": args.posts, "rate": args.rate, "reply_delay_ms": args.delay_ms, "reply_mode": args.reply_mode, "campfire_resque_workers": args.campfire_workers, "campfire_first": args.campfire_first, "sockets": args.sockets, "payloads_match": True, "rustfire": rust_report, "campfire": camp_report}
     if args.sockets:
         report["reply_append_events_match"] = checked_reply_events
         report["post_append_events_match"] = checked_post_events
