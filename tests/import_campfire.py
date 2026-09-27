@@ -491,7 +491,7 @@ def main():
         assert derived_image.returncode == 0, derived_image.stderr
         with sqlite3.connect(bad_target) as imported:
             assert imported.execute("SELECT width,height FROM inline_blobs WHERE id=11").fetchone() == (1, 1)
-    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, saved and rebuilt search text, ID high-water marks, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
+    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, saved and rebuilt search text, user/room/push ID high-water marks, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
 
 
 if __name__ == "__main__":
