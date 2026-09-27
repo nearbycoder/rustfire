@@ -112,6 +112,16 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     statuses["created_record"] = (name, role, state, len(token), webhook[0] if webhook else None, attachment, memberships)
     statuses["avatar_original_matches"] = avatar_file.read_bytes() == PNG
     assert re.fullmatch(r"[A-Za-z0-9]{12}", token), token
+    with sqlite3.connect(database) as db:
+        original_room_name = db.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]
+        db.execute("UPDATE rooms SET name=NULL WHERE id=1")
+    try:
+        null_room_status, _, null_room_page = request(port, "GET", "/account/bots", cookie, csrf)
+        assert null_room_status == 200, (null_room_status, null_room_page[:300])
+        documents["index_null_room"] = null_room_page
+    finally:
+        with sqlite3.connect(database) as db:
+            db.execute("UPDATE rooms SET name=? WHERE id=1", [original_room_name])
     status, _, page = request(port, "GET", "/account/bots", cookie, csrf)
     assert status == 200, (status, page[:300])
     documents["index"] = page
@@ -324,7 +334,7 @@ def main():
             for name, documents in (("rustfire", rust_documents), ("campfire", camp_documents)):
                 for page, body in documents.items():
                     (args.sample_dir / f"{name}-bot-{page}.html").write_bytes(body)
-        for page in ("new", "index", "edit", "edit_after_update", "edit_without_avatar"):
+        for page in ("new", "index", "index_null_room", "edit", "edit_after_update", "edit_without_avatar"):
             for part in ("head", "body"):
                 assert_equal(
                     f"bot {page} complete {part}",

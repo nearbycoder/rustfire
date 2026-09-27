@@ -40,6 +40,10 @@ def counts(database):
 
 def request(port, database, cookie, csrf, method, path, accept, body=b"", content_type="application/x-www-form-urlencoded", user_id=1):
     before = counts(database)
+    update_room_id = 1 if path in ("/rooms/opens/1", "/rooms/closeds/1") and method in ("PATCH", "PUT") else None
+    if update_room_id is not None:
+        with sqlite3.connect(database) as db:
+            original_room_updated_at = db.execute("SELECT updated_at FROM rooms WHERE id=?", [update_room_id]).fetchone()[0]
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
         connection.request(method, path, body=body, headers={
@@ -60,6 +64,14 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
                 involvement = db.execute(
                     "SELECT involvement FROM memberships WHERE room_id=1 AND user_id=?", [user_id]
                 ).fetchone()
+        room_state = None
+        if path in ("/rooms/opens", "/rooms/closeds", "/rooms/opens/1", "/rooms/closeds/1") and method in ("POST", "PATCH", "PUT"):
+            room_id = 2 if path in ("/rooms/opens", "/rooms/closeds") else 1
+            with sqlite3.connect(database) as db:
+                row = db.execute("SELECT name,type,updated_at FROM rooms WHERE id=?", [room_id]).fetchone()
+                members = tuple(user for (user,) in db.execute("SELECT user_id FROM memberships WHERE room_id=? ORDER BY user_id", [room_id]))
+            room_state = ((row[0], row[1]) if row else None, members,
+                          row[2] != original_room_updated_at if row and update_room_id is not None else None)
         return (
             response.status,
             (response.getheader("Content-Type") or "").split(";", 1)[0],
@@ -67,6 +79,7 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
             (len(body), hashlib.sha256(body).hexdigest()) if response.status in ERROR_STATUSES else None,
             tuple(end - start for start, end in zip(before, after)),
             involvement,
+            room_state,
         )
     finally:
         connection.close()
@@ -111,6 +124,10 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
                         request(camp_port, camp_db, camp_cookie, camp_csrf, "GET", path, accept, user_id=user_id),
                         request(camp_port, camp_db, camp_cookie, camp_csrf, "GET", "/users/me/profile", accept, user_id=user_id),
                     )
+                if body and path in ("/rooms/opens", "/rooms/closeds", "/rooms/opens/1", "/rooms/closeds/1"):
+                    room_id = 2 if path in ("/rooms/opens", "/rooms/closeds") else 1
+                    rust_result = (rust_result, request(rust_port, rust_db, rust_cookie, rust_csrf, "GET", f"/rooms/{room_id}", "text/html", user_id=user_id))
+                    camp_result = (camp_result, request(camp_port, camp_db, camp_cookie, camp_csrf, "GET", f"/rooms/{room_id}", "text/html", user_id=user_id))
                 return rust_result, camp_result
             except Exception:
                 log.flush()
@@ -130,6 +147,7 @@ def main():
     parser.add_argument("--limit", type=int, help="maximum number of selected cases")
     parser.add_argument("--show-source-log", action="store_true", help="print the Campfire server log for mismatches")
     parser.add_argument("--role", choices=("admin", "member"), default="admin")
+    parser.add_argument("--body", default="", help="literal URL-encoded request body; defaults to an empty form")
     args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-valid-write-routes-") as scratch:
@@ -137,6 +155,9 @@ def main():
         rust_base, camp_base = temp / "rust-base.sqlite3", temp / "camp-base.sqlite3"
         seed_rustfire(rust_base, free_port(), [])
         base_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_base, [], free_port(), temp)
+        with sqlite3.connect(camp_base) as source, sqlite3.connect(rust_base) as target:
+            source_name = source.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]
+            target.execute("UPDATE rooms SET name=? WHERE id=1", [source_name])
         if args.role == "member":
             with sqlite3.connect(rust_base) as db:
                 db.execute("DELETE FROM sessions")
@@ -159,7 +180,7 @@ def main():
         try:
             comparisons = []
             for index, case in enumerate(cases):
-                rust_result, camp_result = run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, role=args.role)
+                rust_result, camp_result = run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_port, body=args.body.encode(), role=args.role)
                 comparisons.append((case, rust_result, camp_result))
                 if rust_result != camp_result:
                     print(f"{case}: Rustfire {rust_result}, Campfire {camp_result}", flush=True)
@@ -172,7 +193,8 @@ def main():
             redis.wait(timeout=10)
             redis_log.close()
     mismatches = [item for item in comparisons if item[1] != item[2]]
-    print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} valid-CSRF empty-body route cases")
+    form_kind = "submitted-form" if args.body else "empty-body"
+    print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} valid-CSRF {form_kind} route cases")
     if mismatches:
         raise AssertionError(f"{len(mismatches)} valid-CSRF routes differ")
 

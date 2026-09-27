@@ -359,8 +359,8 @@ def main():
         for room_id, (rust_edit, camp_edit) in enumerate(zip(rust_edit_pages, camp_edit_pages), 2):
             assert panel_tree(rust_edit) == panel_tree(camp_edit), f"Direct settings panel differs for room {room_id}; use --sample-dir to inspect"
         # The pinned source returns its generic 500 page for this otherwise valid direct-room URL.
-        assert (rust_direct_show[0], rust_direct_show[1]) == (303, "/rooms/3"), rust_direct_show[:2]
-        assert (camp_direct_show[0], camp_direct_show[1]) == (500, ""), camp_direct_show[:2]
+        assert rust_direct_show == camp_direct_show, (rust_direct_show[:2], camp_direct_show[:2])
+        assert rust_direct_show[:2] == (500, ""), rust_direct_show[:2]
         assert rust_delete == camp_delete == (302, "/"), (rust_delete, camp_delete)
         assert rust_delete_stream == camp_delete_stream, (rust_delete_stream, camp_delete_stream)
         assert frame_tree(rust_deleted_sidebar, "user_sidebar") == frame_tree(camp_deleted_sidebar, "user_sidebar"), "Sidebar differs after direct-room deletion; use --sample-dir to inspect"

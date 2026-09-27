@@ -7227,13 +7227,13 @@ async fn create_room(
     }
     ensure_room_creation_allowed(&s, &u)?;
     let (values, user_ids) = fields(&raw);
+    if values.get("room").is_some_and(|value| !value.is_empty()) || values.contains_key("room[]") {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
     if !values.keys().any(|key| key.starts_with("room[") && key.ends_with(']')) {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
-    let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if name.trim().is_empty() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let name = values.get("room[name]").map(String::as_str);
     let mut db = pool(&s)?;
     let t = now();
     let ty = if kind == "opens" {
@@ -7244,7 +7244,7 @@ async fn create_room(
     let tx = db.transaction().map_err(db_err)?;
     tx.execute(
         "INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM rooms))+1 FROM id_sequences WHERE name='rooms'),?1,?2,?3,?4,?4)",
-        params![name.trim(), ty, u.id, t],
+        params![name, ty, u.id, t],
     )
     .map_err(db_err)?;
     let rid = tx.last_insert_rowid();
@@ -7270,7 +7270,12 @@ async fn create_room(
     }
     tx.commit().map_err(db_err)?;
     notify_room_lists(&s, ids.iter().copied());
-    broadcast_room_created(&s, &Room { id: rid, name: name.trim().to_owned(), kind: ty.to_owned(), creator_id: u.id }, &ids);
+    broadcast_room_created(&s, &Room { id: rid, name: name.unwrap_or_default().to_owned(), kind: ty.to_owned(), creator_id: u.id }, &ids);
+    let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+        .unwrap_or("").split(',').next().unwrap_or("").trim();
+    if kind == "closeds" && matches!(accepted_type, "application/json" | "text/vnd.turbo-stream.html") {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
     Ok(found_redirect(&format!("/rooms/{rid}")))
 }
 async fn create_open_room(
@@ -7335,7 +7340,7 @@ async fn room_update(
     let (values, user_ids) = fields(&raw);
     let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let kind = form_value(&values, "kind", "room[kind]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    update_room_values(&s, &u, rid, kind, name, user_ids)?;
+    update_room_values(&s, &u, rid, kind, Some(name), user_ids)?;
     Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
 }
 fn update_room_values(
@@ -7343,15 +7348,12 @@ fn update_room_values(
     u: &User,
     rid: i64,
     kind: &str,
-    name: &str,
+    name: Option<&str>,
     user_ids: Vec<i64>,
 ) -> Result<(), StatusCode> {
     let r = room_for(s, u.id, rid)?;
     if !can_admin(u, &r) || r.kind == "Rooms::Direct" {
         return Err(StatusCode::FORBIDDEN);
-    }
-    if name.trim().is_empty() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let ty = match kind {
         "opens" => "Rooms::Open",
@@ -7371,11 +7373,17 @@ fn update_room_values(
             .collect::<Result<_, _>>()
             .map_err(db_err)?
     };
-    tx.execute(
-        "UPDATE rooms SET name=?1,type=?2,updated_at=?3 WHERE id=?4",
-        params![name.trim(), ty, t, rid],
-    )
-    .map_err(db_err)?;
+    let original_name: Option<String> = tx.query_row(
+        "SELECT name FROM rooms WHERE id=?1", [rid], |row| row.get(0)
+    ).map_err(db_err)?;
+    let desired_name = name.map(str::to_owned).or_else(|| original_name.clone());
+    if r.kind != ty || desired_name != original_name {
+        tx.execute(
+            "UPDATE rooms SET name=?1,type=?2,updated_at=?3 WHERE id=?4",
+            params![desired_name, ty, t, rid],
+        )
+        .map_err(db_err)?;
+    }
     let mut revoked = Vec::new();
     if kind == "closeds" || r.kind != "Rooms::Open" {
         let requested: HashSet<i64> = user_ids.into_iter().collect();
@@ -7431,7 +7439,7 @@ fn update_room_values(
             .map_err(db_err)?
     };
     notify_room_lists(s, prior_members.union(&current_members).copied());
-    broadcast_room_updated(s, &Room { id: rid, name: name.trim().to_owned(), kind: ty.to_owned(), creator_id: r.creator_id }, &current_members);
+    broadcast_room_updated(s, &Room { id: rid, name: name.unwrap_or(&r.name).to_owned(), kind: ty.to_owned(), creator_id: r.creator_id }, &current_members);
     for id in revoked {
         let _ = s.revoked_users.send(id);
     }
@@ -7488,11 +7496,19 @@ async fn room_kind_update(
         Err(error) => return Err(error),
     }
     let (values, user_ids) = fields(&raw);
+    if values.get("room").is_some_and(|value| !value.is_empty()) || values.contains_key("room[]") {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
     if !values.keys().any(|key| key.starts_with("room[") && key.ends_with(']')) {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
-    let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let name = values.get("room[name]").map(String::as_str);
     update_room_values(&s, &u, rid, kind, name, user_ids)?;
+    let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+        .unwrap_or("").split(',').next().unwrap_or("").trim();
+    if kind == "closeds" && matches!(accepted_type, "application/json" | "text/vnd.turbo-stream.html") {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
     Ok(found_redirect(&format!("/rooms/{rid}")))
 }
 async fn room_kind_post_override(
@@ -10016,7 +10032,7 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     drop(q);
-    let mut room_query = db.prepare("SELECT m.user_id,r.id,r.name FROM memberships m JOIN rooms r ON r.id=m.room_id JOIN users u ON u.id=m.user_id WHERE u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL AND r.type!='Rooms::Direct' ORDER BY m.user_id,LOWER(r.name)").map_err(db_err)?;
+    let mut room_query = db.prepare("SELECT m.user_id,r.id,COALESCE(r.name,'') FROM memberships m JOIN rooms r ON r.id=m.room_id JOIN users u ON u.id=m.user_id WHERE u.role=2 AND u.status=0 AND u.bot_token IS NOT NULL AND r.type!='Rooms::Direct' ORDER BY m.user_id,LOWER(r.name)").map_err(db_err)?;
     let room_rows = room_query
         .query_map([], |r| {
             Ok((
