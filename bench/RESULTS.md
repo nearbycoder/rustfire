@@ -1469,3 +1469,7 @@ With the source modules as the default, `python bench/paired_room_shell.py --rea
 | Rustfire first | 3,531.1 / 11.34 ms | 1,136.9 / 70.43 ms |
 
 Rustfire served 2.65–3.11× as many checked room reads in these two short, same-host samples. The asset graph and sampled page sections matched before timing, but the client did not parse every measured body and the complete HTML documents still differ. This is one room and one account at 32 clients; it does not establish whole-app or maximum sustained capacity.
+
+## Missing-record write routes
+
+`python bench/paired_write_route_edges.py` passed 33 authenticated, valid-CSRF writes to missing users, bots, rooms, messages, boosts, and push subscriptions against pinned Campfire `91d294f`. It compared each status, media type, redirect path, body length, and SHA-256. The source returned its full 4,237-byte 404 page on sampled missing records and its 4,887-byte 500 page on three missing-room paths; Rustfire now matches those bytes. The sweep also found source redirects to `/` for absent room deletion and open/private room updates, and a 400 for an empty profile update. After the fix, Rustfire's release build passed this sweep, the 15-case security-header probe, 46 unit tests, smoke, and the existing route, CSRF, message-cache, and message-format probes. The source's 500 responses reflect its behavior on these requests; this test does not imply those paths are healthy or cover all invalid writes.

@@ -2213,6 +2213,8 @@ fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> R
         (StatusCode::NOT_FOUND, false) => include_str!("../static/errors/404.html"),
         (StatusCode::UNPROCESSABLE_ENTITY, true) => r#"{"status":422,"error":"Unprocessable Content"}"#,
         (StatusCode::UNPROCESSABLE_ENTITY, false) => include_str!("../static/errors/422.html"),
+        (StatusCode::INTERNAL_SERVER_ERROR, true) => r#"{"status":500,"error":"Internal Server Error"}"#,
+        (StatusCode::INTERNAL_SERVER_ERROR, false) => include_str!("../static/errors/500.html"),
         _ => "",
     };
     (status, [(header::CONTENT_TYPE, media)], body).into_response()
@@ -6456,7 +6458,17 @@ async fn message_create(
             matches!(f.format.as_deref(), None | Some("html")),
         )
     };
-    let m = insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), true)?;
+    let m = match insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), true) {
+        Ok(message) => message,
+        Err(StatusCode::NOT_FOUND) => {
+            let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM rooms WHERE id=?1)", [rid], |row| row.get(0)).map_err(db_err)?;
+            if !exists {
+                return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+            }
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Err(error) => return Err(error),
+    };
     if s.webhooks_enabled {
         if let Err(error) = enqueue_webhooks(&s, &m) {
             eprintln!("Rustfire webhook dispatch error: {error}");
@@ -7159,6 +7171,13 @@ async fn room_kind_update(
         "closeds"
     };
     let u = user(&s, &headers)?;
+    match room_for(&s, u.id, rid) {
+        Ok(room) if room.kind == "Rooms::Direct" => return Ok(found_redirect("/")),
+        Ok(room) if !can_admin(&u, &room) => return Err(StatusCode::FORBIDDEN),
+        Ok(_) => {}
+        Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
+        Err(error) => return Err(error),
+    }
     let (values, user_ids) = fields(&raw);
     let name = form_value(&values, "name", "room[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     update_room_values(&s, &u, rid, kind, name, user_ids)?;
@@ -7174,7 +7193,7 @@ async fn room_kind_post_override(
     let (values, _) = fields(&raw);
     match values.get("_method").map(String::as_str) {
         Some("patch" | "put") => room_kind_update(State(s), headers, OriginalUri(uri), Path(rid), RawForm(raw)).await,
-        Some("delete") => room_kind_delete(State(s), headers, Path(rid)).await,
+        Some("delete") => room_kind_delete(State(s), headers, OriginalUri(uri), Path(rid)).await,
         _ => Err(StatusCode::METHOD_NOT_ALLOWED),
     }
 }
@@ -7193,10 +7212,16 @@ async fn room_post_override(
 async fn room_kind_delete(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(rid): Path<i64>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    if room_for(&s, u.id, rid)?.kind == "Rooms::Direct" {
+    let room = match room_for(&s, u.id, rid) {
+        Ok(room) => room,
+        Err(StatusCode::NOT_FOUND) => return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri)),
+        Err(error) => return Err(error),
+    };
+    if room.kind == "Rooms::Direct" {
         return Err(StatusCode::NOT_FOUND);
     }
     room_delete(State(s), headers, Path(rid)).await
@@ -7247,9 +7272,13 @@ async fn direct_delete(
     Path(rid): Path<i64>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let room = room_for(&s, u.id, rid)?;
+    let room = match room_for(&s, u.id, rid) {
+        Ok(room) => room,
+        Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
+        Err(error) => return Err(error),
+    };
     if room.kind != "Rooms::Direct" {
-        return Err(StatusCode::NOT_FOUND);
+        return Ok(found_redirect("/"));
     }
     room_delete(State(s), headers, Path(rid)).await
 }
@@ -7287,7 +7316,11 @@ async fn room_delete(
     Path(rid): Path<i64>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let r = room_for(&s, u.id, rid)?;
+    let r = match room_for(&s, u.id, rid) {
+        Ok(room) => room,
+        Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
+        Err(error) => return Err(error),
+    };
     if !can_admin(&u, &r) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -8269,14 +8302,6 @@ async fn user_role_update(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    if !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let role = if f.get("user[role]").is_some_and(|role| role == "administrator") {
-        1
-    } else {
-        0
-    };
     let db = pool(&s)?;
     let prior: Option<i64> = db
         .query_row(
@@ -8287,6 +8312,14 @@ async fn user_role_update(
         .optional()
         .map_err(db_err)?;
     prior.ok_or(StatusCode::NOT_FOUND)?;
+    if !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let role = if f.get("user[role]").is_some_and(|role| role == "administrator") {
+        1
+    } else {
+        0
+    };
     db.execute(
         "UPDATE users SET role=?1,updated_at=?2 WHERE id=?3",
         params![role, now(), id],
@@ -8755,6 +8788,9 @@ async fn profile_post(
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         fields(&raw).0
     };
+    if f.is_empty() && avatar.is_none() {
+        return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")], "").into_response());
+    }
     let name = form_value(&f, "name", "user[name]").unwrap_or(&u.name);
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -9843,6 +9879,7 @@ async fn bot_update(
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
+    active_bot(&s, id)?;
     let (f, avatar) = bot_fields(&s, &headers, req).await?;
     let name = form_value(&f, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
@@ -11498,12 +11535,24 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
 }
 async fn rails_missing_route_type(req: Request, next: Next) -> Response {
     let uri = req.uri().clone();
-    let accept = req.headers().get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let mut response = next.run(req).await;
     if !uri.path().starts_with("/assets/") && !uri.path().starts_with("/static/")
         && !uri.path().starts_with("/rails/") && uri.path() != "/cable"
     {
-        set_rails_not_found_type(&mut response, &uri, &accept);
+        if method != Method::HEAD && response.status() == StatusCode::NOT_FOUND
+            && !response.headers().contains_key(header::CONTENT_TYPE)
+        {
+            let vary = response.headers().get(header::VARY).cloned();
+            response = rails_error_response(StatusCode::NOT_FOUND, &headers, &uri);
+            if let Some(vary) = vary {
+                response.headers_mut().insert(header::VARY, vary);
+            }
+        } else {
+            set_rails_not_found_type(&mut response, &uri, accept);
+        }
     }
     response
 }
