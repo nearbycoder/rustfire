@@ -35,6 +35,9 @@ REPLIES = {
     "large_zip": (200, "application/zip", LARGE_REPLY),
     "octet_stream": (200, "application/octet-stream", b"generic binary reply"),
     "unknown_type": (200, "application/x-rustfire-test", b"unregistered mime reply"),
+    "js_alias": (200, "application/javascript", b"console.log('hello')"),
+    "aac_alias": (200, "audio/mp4", b"sample audio alias"),
+    "html_alias": (200, "application/xhtml+xml", b"<p>sample HTML alias</p>"),
     "error_no_type": (500, None, b"Error body"),
 }
 
@@ -190,8 +193,8 @@ def main():
     assert [(row[0], row[1], row[2]) for row in rust_rows] == [(row[0], row[1], row[2]) for row in camp_rows], (rust_rows, camp_rows)
     assert rust_files == camp_files, (rust_files, camp_files)
     assert rust_messages == camp_messages, next(((left, right) for left, right in zip(rust_messages, camp_messages) if left != right), None)
-    assert len(rust_rows) == 11 and len(rust_messages) == 23
-    print("PASS paired webhook replies: text, HTML, eight-second streamed text, stalled text and file timeouts, blank text, non-200 text attachment, PNG bytes, 26 MiB ZIP bytes, generic and unregistered MIME attachments, and no-content-type error match pinned Campfire")
+    assert len(rust_rows) == 14 and len(rust_messages) == 29
+    print("PASS paired webhook replies: text, HTML, streamed replies, timeouts, blank text, non-200 text attachment, PNG and 26 MiB ZIP bytes, generic, unregistered, and aliased MIME attachments, and no-content-type error match pinned Campfire")
 
 
 if __name__ == "__main__":

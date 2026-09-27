@@ -6386,7 +6386,7 @@ async fn deliver_webhook(
         let text = String::from_utf8(data).map_err(|error| format!("Webhook text reply is invalid UTF-8: {error}"))?;
         insert_message(&s, &bot, message.room_id, &text, None, None, true, None, true)
             .map_err(|status| format!("Webhook text reply could not be saved: {status}"))?;
-    } else if let Some(ext) = campfire_webhook_attachment_extension(&kind) {
+    } else if let Some((content_type, ext)) = campfire_webhook_attachment_type(&kind) {
         let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
         tokio::fs::create_dir_all(&dir).await.map_err(|error| format!("Webhook attachment directory failed: {error}"))?;
         let temporary = std::path::Path::new(&dir).join(format!("webhook-reply-{}", Uuid::new_v4()));
@@ -6410,7 +6410,7 @@ async fn deliver_webhook(
             None,
             Some(Upload {
                 filename: format!("attachment.{ext}"),
-                content_type: kind,
+                content_type: content_type.to_string(),
                 bytes: Vec::new(),
                 temporary: Some(cleanup),
             }),
@@ -6427,8 +6427,19 @@ fn save_webhook_timeout_reply(s: &Arc<AppState>, bot_id: i64, room_id: i64) -> R
         .map_err(|status| format!("Timeout reply could not be saved: {status}"))?;
     Ok(())
 }
-fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
-    Some(match kind {
+fn campfire_webhook_attachment_type(kind: &str) -> Option<(&str, &'static str)> {
+    let canonical = match kind {
+        "application/xhtml+xml" => "text/html",
+        "application/javascript" | "application/x-javascript" => "text/javascript",
+        "application/jsonrequest" | "application/problem+json" | "text/x-json" => "application/json",
+        "application/x-gzip" => "application/gzip",
+        "application/x-xml" | "text/xml" => "application/xml",
+        "audio/mp4" => "audio/aac",
+        "text/yaml" => "application/x-yaml",
+        "vtt" => "text/vtt",
+        _ => kind,
+    };
+    Some((canonical, match canonical {
         "text/plain" => "text",
         "text/html" => "html",
         "text/javascript" => "js",
@@ -6470,7 +6481,7 @@ fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
         // Webhook#extract_attachment_from still saves it as `attachment.`.
         _ if !kind.is_empty() => "",
         _ => return None,
-    })
+    }))
 }
 async fn message_create(
     State(s): State<Arc<AppState>>,
@@ -13005,14 +13016,17 @@ mod tests {
 
     #[test]
     fn webhook_attachment_filenames_follow_campfire_mime_registry() {
-        assert_eq!(super::campfire_webhook_attachment_extension("image/jpeg"), Some("jpeg"));
-        assert_eq!(super::campfire_webhook_attachment_extension("application/zip"), Some("zip"));
-        assert_eq!(super::campfire_webhook_attachment_extension("audio/mpeg"), Some("mp3"));
-        assert_eq!(super::campfire_webhook_attachment_extension("text/plain"), Some("text"));
-        assert_eq!(super::campfire_webhook_attachment_extension("text/html"), Some("html"));
-        assert_eq!(super::campfire_webhook_attachment_extension("application/octet-stream"), Some(""));
-        assert_eq!(super::campfire_webhook_attachment_extension("application/x-rustfire-test"), Some(""));
-        assert_eq!(super::campfire_webhook_attachment_extension(""), None);
+        assert_eq!(super::campfire_webhook_attachment_type("image/jpeg"), Some(("image/jpeg", "jpeg")));
+        assert_eq!(super::campfire_webhook_attachment_type("application/zip"), Some(("application/zip", "zip")));
+        assert_eq!(super::campfire_webhook_attachment_type("audio/mpeg"), Some(("audio/mpeg", "mp3")));
+        assert_eq!(super::campfire_webhook_attachment_type("text/plain"), Some(("text/plain", "text")));
+        assert_eq!(super::campfire_webhook_attachment_type("text/html"), Some(("text/html", "html")));
+        assert_eq!(super::campfire_webhook_attachment_type("application/octet-stream"), Some(("application/octet-stream", "")));
+        assert_eq!(super::campfire_webhook_attachment_type("application/x-rustfire-test"), Some(("application/x-rustfire-test", "")));
+        assert_eq!(super::campfire_webhook_attachment_type("application/javascript"), Some(("text/javascript", "js")));
+        assert_eq!(super::campfire_webhook_attachment_type("audio/mp4"), Some(("audio/aac", "m4a")));
+        assert_eq!(super::campfire_webhook_attachment_type("application/xhtml+xml"), Some(("text/html", "html")));
+        assert_eq!(super::campfire_webhook_attachment_type(""), None);
     }
 
     #[test]
