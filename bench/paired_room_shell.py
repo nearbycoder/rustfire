@@ -114,12 +114,16 @@ class HeadMeta(HTMLParser):
         self.in_head = False
         self.values = {}
         self.links = {}
+        self.meta = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "head":
             self.in_head = True
         elif self.in_head and tag == "meta":
             values = dict(attrs)
+            if values.get("name") == "csrf-token":
+                values["content"] = "<generated-csrf>"
+            self.meta.append(tuple(sorted(values.items())))
             if "name" in values:
                 self.values[values["name"]] = values.get("content")
         elif self.in_head and tag == "link":
@@ -139,6 +143,7 @@ def assert_head_runtime_metadata(source, target):
         parser.feed(page.decode())
         pages.append(parser)
     original, rustfire = pages
+    assert original.meta == rustfire.meta, ("head meta tags", original.meta, rustfire.meta)
     for name in ("csrf-param", "action-cable-url", "turbo-prefetch", "current-user-id", "current-user-name"):
         assert name in original.values and original.values[name] == rustfire.values.get(name), (name, original.values.get(name), rustfire.values.get(name))
     assert original.values.get("csrf-token") and rustfire.values.get("csrf-token"), "Missing CSRF token metadata"
@@ -378,7 +383,9 @@ def compare_message_page(message_id, action, camp_port, camp_cookie, rust_port, 
     assert_head_runtime_metadata(source, target)
     for part in ("nav", "footer", "sidebar", "main-content"):
         assert_equal(f"message {message_id} {label} {part}", section(source, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths), section(target, part, normalize_times=True, ignore_csrf_inputs=ignore_csrf_inputs, normalize_blob_paths=normalize_blob_paths))
-    assert 'class="admin"' in target.decode()
+    source_body_class = re.search(r'<body class="([^"]*)"', source.decode()).group(1)
+    target_body_class = re.search(r'<body class="([^"]*)"', target.decode()).group(1)
+    assert source_body_class == target_body_class, ("message body class", source_body_class, target_body_class)
     return source, target
 
 
@@ -447,6 +454,12 @@ def main():
         rust_port, camp_port = free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [[2]])
         env = seed_campfire(repository, args.ruby, args.bundle_path, repository / "storage/db/production.sqlite3", camp_db, [[2]], camp_port, temp)
+        vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
+        public_key, private_key = subprocess.check_output(
+            [str(args.ruby), "-e", vapid_code, str(rust_db.with_suffix(".vapid.der"))], text=True,
+        ).splitlines()
+        env["VAPID_PUBLIC_KEY"] = public_key
+        env["VAPID_PRIVATE_KEY"] = private_key
         env["WEB_CONCURRENCY"] = str(args.campfire_workers if args.read_clients or args.read_media_clients else 1)
         with sqlite3.connect(camp_db) as camp, sqlite3.connect(rust_db) as rust:
             account = camp.execute("SELECT name,join_code,updated_at FROM accounts WHERE id=1").fetchone()

@@ -122,7 +122,7 @@ The paired invalid-key push probe now checks background cleanup and direct test 
 
 A separate controlled push-response probe now matches Campfire's saved subscription outcomes for background HTTP 404, 410, 503, and 204 and direct 404/410 failures. Only background 410 removes a row. This verifies response classification and persistence without a live push-service connection.
 
-- Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior, including remaining generated document-head metadata and HTML serialization differences
+- Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior across untested page states; the sampled room and message-page head metadata now matches after normalizing generated CSRF values
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior, remaining browser profiles, and actual cross-browser push delivery validation

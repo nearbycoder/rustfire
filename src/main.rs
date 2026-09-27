@@ -2344,7 +2344,7 @@ fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, foo
     } else {
         "<script defer src=\"/static/app.js\"></script>"
     };
-    let html = format!(r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+    let html = format!(r##"<!DOCTYPE html><html><head><title>{title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}{scripts}{head_extra}</head>
 <body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav>{flash}<main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
         title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
@@ -6626,10 +6626,13 @@ async fn message_show(
     Ok(if headers.get("x-rustfire-fragment").is_some() {
         Html(message_html(&s, &m, Some(&headers))).into_response()
     } else {
+        let has_logo: bool = pool(&s)?
+            .query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0))
+            .map_err(db_err)?;
         render_source_page_sections(
             "Rustfire",
             &message_html(&s, &m, Some(&headers)),
-            "", "", "", "", "", "",
+            "", "", "", "", if has_logo { "account-has-logo" } else { "" }, "",
             Some(&u),
             u.csrf_token.as_deref().unwrap_or(""),
         )
@@ -6692,8 +6695,11 @@ async fn message_edit(
         "<turbo-frame id='{frame_id}'><div class='message__body position-relative' data-controller='scroll-into-view'><div class='message__body-content message__body-content--editing gap'>{editor}</div><div class='message__actions flex flex-wrap'><a class='message__action-btn message__edit-close-btn txt-small btn btn--borderless' href='{action}'><img class='colorize--black' aria-hidden='true' src='/assets/remove-0e7a045d.svg'><span class='for-screen-reader'>Close editor and discard changes</span></a></div><form id='{delete_form_id}' data-turbo-frame='{frame_id}' action='{action}' accept-charset='UTF-8' method='post'><input type='hidden' name='_method' value='delete'></div></turbo-frame>"
     );
     let frame = csrf_forms(&frame, u.csrf_token.as_deref().unwrap_or(""));
+    let has_logo: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0))
+        .map_err(db_err)?;
     Ok(render_source_page_sections(
-        "Rustfire", &frame, "", "", "", "", "", "", Some(&u),
+        "Rustfire", &frame, "", "", "", "", if has_logo { "account-has-logo" } else { "" }, "", Some(&u),
         u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
