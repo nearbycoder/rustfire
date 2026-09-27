@@ -62,7 +62,7 @@ The offline importer preserves account settings and styles, user IDs and passwor
 
 If Campfire has push subscriptions, also set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to its original VAPID keys before import. The importer verifies the pair and creates Rustfire's key file so those subscriptions retain the same application server key.
 
-The importer currently stops if Campfire has unsupported or undecodable inline media or an unknown attachment type. It requires local Active Storage files and a stopped source app for a consistent snapshot. Rebuilt search text still needs parity checks for less common ActionText content. These cases, plus full rich-text rendering and media edge cases, remain migration parity work.
+The importer preserves unknown inline image subtypes as file attachments and previews valid `video/*` blobs, matching sampled Campfire behavior. It still stops if a previewable image or video cannot be decoded, if image dimensions conflict with saved metadata, or if it encounters an unknown Active Storage attachment record type. It requires local Active Storage files and a stopped source app for a consistent snapshot. Rebuilt search text still needs parity checks for less common ActionText content. These cases, plus full rich-text rendering and media edge cases, remain migration parity work.
 
 ## Implemented
 

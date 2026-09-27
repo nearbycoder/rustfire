@@ -246,12 +246,13 @@ def main():
             mention_plain, mention_html = imported.execute("SELECT body,body_html FROM messages WHERE id=3").fetchone()
             assert mention_plain == "@Rustfire Compare @Outside hello"
             assert 'class="mention"' in mention_html and "Rustfire Compare</div>" in mention_html
-            inline_html = imported.execute("SELECT body_html FROM messages WHERE id=4").fetchone()[0]
-            assert "<action-text-attachment" in inline_html and "attachment--file attachment--txt" in inline_html and "inline.txt" in inline_html and "1.21 KB" in inline_html, inline_html
+            inline_source, inline_html = imported.execute("SELECT body_source,body_html FROM messages WHERE id=4").fetchone()
+            assert "<action-text-attachment" in inline_source and "<action-text-attachment" not in inline_html, (inline_source, inline_html)
+            assert "inline.txt" in inline_html and "1.21 KB" in inline_html and "<img" not in inline_html, inline_html
             inline_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=10").fetchone()[0]
             assert (target_uploads / inline_stored).read_bytes() == file_bytes
             image_html = imported.execute("SELECT body_html FROM messages WHERE id=5").fetchone()[0]
-            assert "attachment--preview attachment--png" in image_html and 'width="1"' in image_html and 'height="1"' in image_html, image_html
+            assert "<img" in image_html and "pixel.png" in image_html, image_html
             image_url = re.search(r'<img src="([^"]+)"', image_html)
             assert image_url and "/rails/active_storage/representations/redirect/" in image_url.group(1), image_html
             assert variation_data(image_url.group(1)) == {"format": "png", "resize_to_limit": [1024, 768]}
@@ -261,7 +262,7 @@ def main():
             assert hashlib.sha256(image_variant.read_bytes()).hexdigest() == "8f4014cc056144e2b5446eb662167c125fa4fcbf2842127e0e528f0444db70e0"
             image_variant.unlink()
             pdf_html = imported.execute("SELECT body_html FROM messages WHERE id=6").fetchone()[0]
-            assert "attachment--preview attachment--pdf" in pdf_html, pdf_html
+            assert "<img" in pdf_html and "page.pdf" in pdf_html, pdf_html
             pdf_url = re.search(r'<img src="([^"]+)"', pdf_html)
             assert pdf_url and "/rails/active_storage/representations/redirect/" in pdf_url.group(1), pdf_html
             assert variation_data(pdf_url.group(1)) == {"resize_to_limit": [1024, 768]}
@@ -271,7 +272,7 @@ def main():
             assert hashlib.sha256(pdf_variant.read_bytes()).hexdigest() == "a8561bc9adcd5f210a4b06d6ddd858681bcb28f4af239dd485fddfb8c7979bd7"
             pdf_variant.unlink()
             video_html = imported.execute("SELECT body_html FROM messages WHERE id=7").fetchone()[0]
-            assert "attachment--preview attachment--mov" in video_html and 'width="320"' in video_html, video_html
+            assert "<img" in video_html and "alpha-centuri.mov" in video_html, video_html
             video_url = re.search(r'<img src="([^"]+)"', video_html)
             assert video_url and "/rails/active_storage/representations/redirect/" in video_url.group(1), video_html
             assert variation_data(video_url.group(1)) == {"resize_to_limit": [1024, 768]}
@@ -288,13 +289,13 @@ def main():
             assert variation_data(gallery_urls[1]) == {"resize_to_limit": [800, 600]}
             assert variation_data(gallery_urls[2]) == {"resize_to_limit": [800, 600]}
             tiff_html = imported.execute("SELECT body_html FROM messages WHERE id=9").fetchone()[0]
-            assert "attachment--preview attachment--tiff" in tiff_html, tiff_html
+            assert "<img" in tiff_html and "scan.tiff" in tiff_html, tiff_html
             tiff_url = re.search(r'<img src="([^"]+)"', tiff_html)
             assert tiff_url and variation_data(tiff_url.group(1)) == {"format": "png", "resize_to_limit": [1024, 768]}
             tiff_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=14").fetchone()[0]
             assert (target_uploads / tiff_stored).read_bytes() == tiff_bytes
             svg_html = imported.execute("SELECT body_html FROM messages WHERE id=10").fetchone()[0]
-            assert "attachment--file attachment--svg" in svg_html and "<img" not in svg_html, svg_html
+            assert "<img" not in svg_html and "icon.svg" in svg_html, svg_html
             svg_stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=15").fetchone()[0]
             assert (target_uploads / svg_stored).read_bytes() == svg_bytes
             assert imported.execute("SELECT id FROM attachments WHERE message_id=2").fetchone() == (7,)
@@ -381,7 +382,7 @@ def main():
                 plain, source, rendered = edited.execute("SELECT body,body_source,body_html FROM messages WHERE id=5").fetchone()
                 assert plain == "Edited picture [pixel.png] end", (plain, rendered)
                 assert "<action-text-attachment" in source and "data-trix-attachment" not in source, source
-                assert "attachment--preview attachment--png" in rendered and "<img" in rendered, rendered
+                assert "<img" in rendered and "pixel.png" in rendered, rendered
                 assert edited.execute("SELECT count(*) FROM inline_embeds WHERE message_id=5").fetchone() == (1,)
             remove_image = urllib.request.Request(f"http://127.0.0.1:{port}/rooms/1/messages/5",
                 data=urllib.parse.urlencode({"message[body]": "<div>No picture</div>"}).encode(), method="PATCH",
@@ -411,6 +412,39 @@ def main():
             server.terminate()
             server.wait(timeout=5)
         with sqlite3.connect(source_db) as fixture:
+            fixture.execute("UPDATE active_storage_blobs SET content_type='image/x-unsupported' WHERE id=10")
+        unknown_image_target = root / "unknown-image.sqlite3"
+        unknown_image_uploads = root / "unknown-image-uploads"
+        unknown_image_command = command.copy()
+        unknown_image_command[unknown_image_command.index("--target-db") + 1] = str(unknown_image_target)
+        unknown_image_command[unknown_image_command.index("--target-uploads") + 1] = str(unknown_image_uploads)
+        unknown_image = subprocess.run(unknown_image_command, env=environment, capture_output=True, text=True)
+        assert unknown_image.returncode == 0, unknown_image.stderr
+        with sqlite3.connect(unknown_image_target) as imported:
+            body = imported.execute("SELECT body_html FROM messages WHERE id=4").fetchone()[0]
+            assert "inline.txt" in body and "<img" not in body, body
+            stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=10").fetchone()[0]
+            assert (unknown_image_uploads / stored).read_bytes() == file_bytes
+        with sqlite3.connect(source_db) as fixture:
+            fixture.execute("UPDATE active_storage_blobs SET content_type='text/plain' WHERE id=10")
+            fixture.execute("UPDATE active_storage_blobs SET content_type='video/x-unsupported' WHERE id=13")
+        unknown_video_target = root / "unknown-video.sqlite3"
+        unknown_video_uploads = root / "unknown-video-uploads"
+        unknown_video_command = command.copy()
+        unknown_video_command[unknown_video_command.index("--target-db") + 1] = str(unknown_video_target)
+        unknown_video_command[unknown_video_command.index("--target-uploads") + 1] = str(unknown_video_uploads)
+        unknown_video = subprocess.run(unknown_video_command, env=environment, capture_output=True, text=True)
+        assert unknown_video.returncode == 0, unknown_video.stderr
+        with sqlite3.connect(unknown_video_target) as imported:
+            body = imported.execute("SELECT body_html FROM messages WHERE id=7").fetchone()[0]
+            assert "<img" in body and "alpha-centuri.mov" in body, body
+            assert imported.execute("SELECT content_type FROM inline_blobs WHERE id=13").fetchone() == ("video/x-unsupported",)
+            stored = imported.execute("SELECT stored_name FROM inline_blobs WHERE id=13").fetchone()[0]
+            variant = unknown_video_uploads / "variants" / f"{stored}-inline-video.jpeg"
+            assert hashlib.sha256(variant.read_bytes()).hexdigest() == "c2828b3402f711dc900fab8edcba2fe2df20b4786faa2eff2532dc83cf1f5897"
+        with sqlite3.connect(source_db) as fixture:
+            fixture.execute("UPDATE active_storage_blobs SET content_type='video/quicktime' WHERE id=13")
+        with sqlite3.connect(source_db) as fixture:
             fixture.execute("UPDATE active_storage_blobs SET content_type='video/x-unsupported' WHERE id=10")
         bad_target = root / "must-not-exist.sqlite3"
         bad_uploads = root / "must-not-exist-uploads"
@@ -430,7 +464,7 @@ def main():
         assert derived_image.returncode == 0, derived_image.stderr
         with sqlite3.connect(bad_target) as imported:
             assert imported.execute("SELECT width,height FROM inline_blobs WHERE id=11").fetchone() == (1, 1)
-    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos, member-only mention recipients, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; missing image dimensions are derived and inconsistent metadata fails safely")
+    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, saved and rebuilt search text, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
 
 
 if __name__ == "__main__":

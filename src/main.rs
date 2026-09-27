@@ -4582,10 +4582,7 @@ fn sniff_upload_content_type<'a>(bytes: &[u8], declared: &'a str) -> &'a str {
     declared
 }
 fn safe_inline_video(content_type: &str) -> bool {
-    matches!(
-        content_type,
-        "video/mp4" | "video/webm" | "video/quicktime" | "video/ogg"
-    )
+    content_type.starts_with("video/")
 }
 async fn room_show(
     State(s): State<Arc<AppState>>,
