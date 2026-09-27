@@ -26,6 +26,9 @@ LARGE_REPLY = b"rustfire-webhook-file\n" * ((26 * 1024 * 1024 // 22) + 1)
 REPLIES = {
     "text": (200, "text/plain", b"Hello back!"),
     "html": (200, "text/html", b"<strong>Bold reply</strong>"),
+    "slow_text": (200, "text/plain", b"slow stream reply"),
+    "stalled_text": (200, "text/plain", b"late reply"),
+    "stalled_file": (200, "application/zip", b"partial-and-never-completes"),
     "empty": (200, "text/plain", b""),
     "error_text": (500, "text/plain", b"Error body"),
     "image": (200, "image/png", PNG),
@@ -47,7 +50,24 @@ class Receiver(BaseHTTPRequestHandler):
             self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        if data:
+        if case in ("stalled_text", "stalled_file"):
+            self.received.put((case, payload))
+            if case == "stalled_file":
+                self.wfile.write(data[:7])
+                self.wfile.flush()
+            time.sleep(8)
+            try:
+                self.wfile.write(data if case == "stalled_text" else data[7:])
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if case == "slow_text":
+            for index, chunk in enumerate((b"slow ", b"stream ", b"reply")):
+                if index:
+                    time.sleep(4)
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        elif data:
             self.wfile.write(data)
         self.received.put((case, payload))
 
@@ -138,6 +158,7 @@ def main():
                 rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "0", "RUSTFIRE_UPLOAD_DIR": str(rust_uploads)})
                 try:
                     rust_result = workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False, rust_uploads)
+                    assert not list(rust_uploads.glob("webhook-reply-*")), "stalled attachment left a temporary file"
                 finally:
                     stop_server(rust)
                 with open(temp / "puma.log", "w+") as puma_log, open(temp / "worker.log", "w+") as worker_log:
@@ -167,8 +188,8 @@ def main():
     assert [(row[0], row[1], row[2]) for row in rust_rows] == [(row[0], row[1], row[2]) for row in camp_rows], (rust_rows, camp_rows)
     assert rust_files == camp_files, (rust_files, camp_files)
     assert rust_messages == camp_messages, next(((left, right) for left, right in zip(rust_messages, camp_messages) if left != right), None)
-    assert len(rust_rows) == 6 and len(rust_messages) == 13
-    print("PASS paired webhook replies: text, HTML, blank text, non-200 text attachment, PNG bytes, 26 MiB ZIP bytes, and no-content-type error match pinned Campfire")
+    assert len(rust_rows) == 9 and len(rust_messages) == 19
+    print("PASS paired webhook replies: text, HTML, eight-second streamed text, stalled text and file timeouts, blank text, non-200 text attachment, PNG bytes, 26 MiB ZIP bytes, and no-content-type error match pinned Campfire")
 
 
 if __name__ == "__main__":

@@ -6216,10 +6216,7 @@ async fn deliver_webhook(
         Ok(response) => response,
         Err(error) => {
             if error.is_timeout() {
-                let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Timeout reply bot lookup failed: {status}"))?;
-                insert_message(&s, &bot, message.room_id, "Failed to respond within 7 seconds", None, None, false, None, false)
-                    .map_err(|status| format!("Timeout reply could not be saved: {status}"))?;
-                return Ok(());
+                return save_webhook_timeout_reply(&s, bot_id, message.room_id);
             }
             return Err(format!("Webhook request failed: {error}"));
         }
@@ -6238,7 +6235,11 @@ async fn deliver_webhook(
     let mut reply = reply;
     if text_reply && (kind == "text/plain" || kind == "text/html") {
         let mut data = Vec::new();
-        while let Some(chunk) = reply.chunk().await.map_err(|error| format!("Webhook reply read failed: {error}"))? {
+        while let Some(chunk) = match reply.chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) if error.is_timeout() => return save_webhook_timeout_reply(&s, bot_id, message.room_id),
+            Err(error) => return Err(format!("Webhook reply read failed: {error}")),
+        } {
             data.extend_from_slice(&chunk);
         }
         let bot = webhook_bot_user(&s, bot_id).map_err(|status| format!("Webhook reply bot lookup failed: {status}"))?;
@@ -6251,7 +6252,11 @@ async fn deliver_webhook(
         let temporary = std::path::Path::new(&dir).join(format!("webhook-reply-{}", Uuid::new_v4()));
         let cleanup = UploadTemporaryFile(temporary.clone());
         let mut staged = tokio::fs::File::create(&temporary).await.map_err(|error| format!("Webhook attachment staging failed: {error}"))?;
-        while let Some(chunk) = reply.chunk().await.map_err(|error| format!("Webhook reply read failed: {error}"))? {
+        while let Some(chunk) = match reply.chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) if error.is_timeout() => return save_webhook_timeout_reply(&s, bot_id, message.room_id),
+            Err(error) => return Err(format!("Webhook reply read failed: {error}")),
+        } {
             staged.write_all(&chunk).await.map_err(|error| format!("Webhook attachment write failed: {error}"))?;
         }
         staged.flush().await.map_err(|error| format!("Webhook attachment flush failed: {error}"))?;
@@ -6274,6 +6279,12 @@ async fn deliver_webhook(
             false,
         ).map_err(|status| format!("Webhook attachment reply could not be saved: {status}"))?;
     }
+    Ok(())
+}
+fn save_webhook_timeout_reply(s: &Arc<AppState>, bot_id: i64, room_id: i64) -> Result<(), String> {
+    let bot = webhook_bot_user(s, bot_id).map_err(|status| format!("Timeout reply bot lookup failed: {status}"))?;
+    insert_message(s, &bot, room_id, "Failed to respond within 7 seconds", None, None, false, None, false)
+        .map_err(|status| format!("Timeout reply could not be saved: {status}"))?;
     Ok(())
 }
 fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
@@ -12009,7 +12020,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         revoked_users: broadcast::channel(1024).0,
         trusted_proxies,
         webhook_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(7))
+            .connect_timeout(std::time::Duration::from_secs(7))
+            .read_timeout(std::time::Duration::from_secs(7))
             .redirect(reqwest::redirect::Policy::none())
             .build()?,
         webhook_slots: Arc::new(Semaphore::new(64)),
