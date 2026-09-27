@@ -525,6 +525,12 @@ def main():
                     source_filename = source_db.execute("SELECT b.filename FROM active_storage_blobs b JOIN active_storage_attachments a ON a.blob_id=b.id WHERE a.record_type='Message' AND a.record_id=7 AND a.name='attachment'").fetchone()[0]
                     target_filename = target_db.execute("SELECT filename FROM attachments WHERE message_id=7").fetchone()[0]
                     assert (source_filename, target_filename) == ("report:Q?.txt", "report:Q?.txt"), (source_filename, target_filename)
+                    source_search = source_db.execute("SELECT body FROM message_search_index WHERE rowid=7").fetchone()[0]
+                    target_search = target_db.execute("SELECT body FROM message_search_index WHERE rowid=7").fetchone()[0]
+                    assert source_search == target_search == "report-Q-.txt", (source_search, target_search)
+                for port, cookie in ((camp_port, camp_cookie), (rust_port, "session_token=benchmark-session")):
+                    search_status, _, search_body = raw_get(port, "/searches?q=report-Q-.txt", cookie)
+                    assert search_status == 200 and b"room-page-unsafe-filename" in search_body, ("attachment search", port, search_status, search_body[:120])
                 unsafe_source, unsafe_target = compare_message_page(7, "", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, ignore_csrf_inputs=True, normalize_blob_paths=True)
                 compare_message_page(7, "/edit", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_blob_paths=True)
                 compare_room("original with unsafe filename", "/rooms/1", camp_port, camp_cookie, rust_port, "session_token=benchmark-session", args.sample_dir, normalize_times=True, ignore_csrf_inputs=True, normalize_blob_paths=True)
@@ -532,6 +538,14 @@ def main():
                 source_unsafe_route = original_blob_routes(unsafe_source, camp_port, camp_cookie, expected_name, b"filename check")
                 target_unsafe_route = original_blob_routes(unsafe_target, rust_port, "session_token=benchmark-session", expected_name, b"filename check")
                 assert source_unsafe_route == target_unsafe_route, ("unsafe filename blob routes", source_unsafe_route, target_unsafe_route)
+                for edited_body, indexed_name in (("<div>Updated caption</div>", "Updated caption"), ("", expected_name)):
+                    for port, cookie, csrf, database in ((camp_port, camp_cookie, camp_csrf, camp_db), (rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db)):
+                        form = urllib.parse.urlencode({"_method": "patch", "message[body]": edited_body, "authenticity_token": csrf})
+                        edit_status, _, edit_response = request(port, "POST", "/rooms/1/messages/7", cookie, csrf, form, "application/x-www-form-urlencoded")
+                        assert edit_status == 302, ("attachment edit", port, edit_status, edit_response[:120])
+                        with sqlite3.connect(database) as db:
+                            indexed = db.execute("SELECT body FROM message_search_index WHERE rowid=7").fetchone()[0]
+                        assert indexed == indexed_name, ("attachment edit index", port, indexed, indexed_name)
                 print("PASS room shell across original, direct, and private rooms")
             finally:
                 stop_server(rust)

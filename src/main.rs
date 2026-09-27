@@ -1050,6 +1050,17 @@ fn rails_sanitized_filename(filename: &str) -> String {
         })
         .collect()
 }
+fn refresh_file_only_search_entry(db: &rusqlite::Connection, message_id: i64) -> Result<(), StatusCode> {
+    let raw_filename: Option<String> = db.query_row(
+        "SELECT a.filename FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.id=?1 AND m.body=''",
+        [message_id],
+        |row| row.get(0),
+    ).optional().map_err(db_err)?;
+    if let Some(raw_filename) = raw_filename {
+        db.execute("UPDATE message_search_index SET body=?1 WHERE rowid=?2",params![rails_sanitized_filename(&raw_filename),message_id]).map_err(db_err)?;
+    }
+    Ok(())
+}
 fn rails_filename_approximation(character: char) -> &'static str {
     match character {
         c if "ÀÁÂÃÄÅĀĂĄ".contains(c) => "A",
@@ -5422,9 +5433,14 @@ fn insert_message(
             (None, None)
         };
         db.execute("INSERT INTO attachments(message_id,filename,content_type,stored_name,created_at,width,height) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,file.filename,file.content_type,stored,t,width,height]).map_err(db_err)?;
+        let attachment_id = db.last_insert_rowid();
+        let presented_filename = rails_sanitized_filename(&file.filename);
+        if plain.is_empty() {
+            refresh_file_only_search_entry(&db, id)?;
+        }
         Some(Attachment {
-            id: db.last_insert_rowid(),
-            filename: rails_sanitized_filename(&file.filename),
+            id: attachment_id,
+            filename: presented_filename,
             content_type: file.content_type,
             width,
             height,
@@ -6129,6 +6145,9 @@ async fn message_update(
         ],
     )
     .map_err(db_err)?;
+    if plain.is_empty() {
+        refresh_file_only_search_entry(&db, mid)?;
+    }
     for blob_id in old_inline.iter().filter(|id| !used_inline.contains(id)) {
         db.execute("DELETE FROM inline_embeds WHERE message_id=?1 AND blob_id=?2", params![mid, blob_id])
             .map_err(db_err)?;
@@ -9578,6 +9597,9 @@ async fn bot_message_update(
     if found == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
+    if body.is_empty() {
+        refresh_file_only_search_entry(&db, mid)?;
+    }
     db.execute("DELETE FROM inline_embeds WHERE message_id=?1", [mid]).map_err(db_err)?;
     purge_orphan_inline_blobs(&db, &old_inline)?;
     touch_room(&db, rid)?;
@@ -11118,6 +11140,24 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         transaction.execute("INSERT INTO app_secrets(name,value) VALUES('attachment_fts_migrated',X'01')", [])?;
         transaction.commit()?;
     }
+    let attachment_search_repairs = {
+        let mut query = conn.prepare("SELECT m.id,a.filename,idx.body FROM messages m JOIN attachments a ON a.message_id=m.id JOIN message_search_index idx ON idx.rowid=m.id WHERE m.body=''")?;
+        query.query_map([], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(id, raw, indexed)| {
+                let presented = rails_sanitized_filename(&raw);
+                (presented != indexed).then_some((id, presented))
+            })
+            .collect::<Vec<_>>()
+    };
+    if !attachment_search_repairs.is_empty() {
+        let transaction = conn.transaction()?;
+        for (id, presented) in attachment_search_repairs {
+            transaction.execute("UPDATE message_search_index SET body=?1 WHERE rowid=?2", params![presented,id])?;
+        }
+        transaction.commit()?;
+    }
     conn.execute(
         "INSERT OR IGNORE INTO direct_room_sets(room_id,member_ids) SELECT r.id,COALESCE((SELECT group_concat(user_id,',') FROM (SELECT user_id FROM memberships WHERE room_id=r.id ORDER BY user_id)),'') FROM rooms r WHERE r.type='Rooms::Direct' AND NOT EXISTS(SELECT 1 FROM direct_room_sets d WHERE d.room_id=r.id)",
         [],
@@ -11652,6 +11692,15 @@ mod tests {
         conn.execute("UPDATE messages SET body='A caption' WHERE id=1", []).unwrap();
         let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=1", [], |row| row.get(0)).unwrap();
         assert_eq!(indexed, "A caption");
+        conn.execute_batch("INSERT INTO messages(id,room_id,creator_id,body,client_message_id,created_at,updated_at) VALUES(2,1,1,'','unsafe-attachment','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+            INSERT INTO attachments(id,message_id,filename,content_type,stored_name,created_at) VALUES(2,2,'report:Q?.txt','text/plain','stored-unsafe','2026-01-01T00:00:00Z');").unwrap();
+        let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=2", [], |row| row.get(0)).unwrap();
+        assert_eq!(indexed, "report:Q?.txt");
+        drop(conn);
+        super::init_db(&db).unwrap();
+        let conn = db.get().unwrap();
+        let indexed: String = conn.query_row("SELECT body FROM message_search_index WHERE rowid=2", [], |row| row.get(0)).unwrap();
+        assert_eq!(indexed, "report-Q-.txt");
     }
 
     #[test]
