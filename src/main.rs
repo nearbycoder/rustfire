@@ -1163,23 +1163,23 @@ fn analyze_image_and_thumbnail(
     kind: &str,
     format: &str,
 ) -> (Option<i64>, Option<i64>) {
-    let dimension = |field: &str| -> Option<i64> {
-        let output = std::process::Command::new("vipsheader")
-            .args(["-f", field])
-            .arg(input)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        String::from_utf8(output.stdout)
-            .ok()?
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|value| *value > 0)
-    };
-    let dimensions = (dimension("width"), dimension("height"));
+    let dimensions = std::process::Command::new("vipsheader")
+        .arg("-a")
+        .arg(input)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let dimension = |field: &str| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix(field))
+                    .and_then(|value| value.trim().parse::<i64>().ok())
+                    .filter(|value| *value > 0)
+            };
+            (dimension("width:"), dimension("height:"))
+        })
+        .unwrap_or((None, None));
     let cache = input
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))

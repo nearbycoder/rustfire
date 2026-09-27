@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from direct_lookup import ROOT, free_port, start_server, stop_server
+from direct_lookup import ROOT, free_port, p95, start_server, stop_server
 from message_markup import check_message_markup
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_bot_admin import cleanup_campfire_uploads
@@ -52,7 +52,7 @@ def writer(port, cookie, csrf, image, count, seconds, result):
             if response.status != 200 or not response.getheader("Content-Type", "").startswith("text/vnd.turbo-stream.html") or f"message_{client_id}".encode() not in body:
                 raise AssertionError((index, response.status, response.getheader("Content-Type"), body[:150]))
             samples.append((time.monotonic() - begun) * 1000)
-        result.update({"count": len(samples), "p95_ms": sorted(samples)[int(.95 * (len(samples) - 1))], "max_ms": max(samples), "elapsed_s": time.monotonic() - started})
+        result.update({"count": len(samples), "p95_ms": p95(samples), "max_ms": max(samples), "elapsed_s": time.monotonic() - started})
     except Exception as error:
         result["error"] = repr(error)
     finally:
@@ -141,12 +141,13 @@ def main():
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--sockets", type=int, default=0)
     parser.add_argument("--rustfire-first", action="store_true")
+    parser.add_argument("--report", type=pathlib.Path)
     args = parser.parse_args()
     if args.clients < 1 or args.seconds < 2 or args.write_rate <= 0 or args.campfire_workers < 1 or args.sockets < 0:
         parser.error("clients, seconds, write rate, and workers must be positive; seconds >= 2; sockets >= 0")
     count = round(args.seconds * args.write_rate)
-    if not 1 <= count <= 100:
-        parser.error("use 1–100 JPEG writes per trial")
+    if not 1 <= count <= 500:
+        parser.error("use 1–500 JPEG writes per trial")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     image = (REPOSITORY / "test/fixtures/files/black_hole.jpg").read_bytes()
     with tempfile.TemporaryDirectory(prefix="paired-image-mix-") as scratch:
@@ -232,10 +233,14 @@ def main():
                 assert left == right, (index, next(((pos, a, b) for pos, (a, b) in enumerate(zip(left, right)) if a != b), (len(left), len(right))))
         passed = camp_result["writes"]["deadline_met"] and rust_result["writes"]["deadline_met"]
         print("PASS paired JPEG upload/read mix" if passed else "FAIL JPEG writer exceeded read interval")
-        print(json.dumps({"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate,
+        report = {"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate,
             "writes": count, "image_bytes": len(image), "parsed_page_tokens": len(camp_tokens), "sockets": args.sockets,
             "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first,
-            "rustfire": rust_result, "campfire": camp_result}, sort_keys=True))
+            "rustfire": rust_result, "campfire": camp_result}
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(report, sort_keys=True))
         if not passed:
             raise SystemExit(1)
 
