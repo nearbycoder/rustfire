@@ -10298,6 +10298,14 @@ fn bot_pagination_not_found(headers: &HeaderMap, uri: &Uri) -> Response {
     }
     response
 }
+fn bot_xml_error(status: StatusCode) -> Response {
+    let name = if status == StatusCode::NOT_ACCEPTABLE { "Not Acceptable" } else { "Internal Server Error" };
+    let body = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hash>\n  <status type=\"integer\">{}</status>\n  <error>{name}</error>\n</hash>\n", status.as_u16());
+    (status, [(header::CONTENT_TYPE, "application/xml; charset=UTF-8")], body).into_response()
+}
+fn bot_path_format(uri: &Uri) -> Option<&str> {
+    uri.path().rsplit('/').next()?.rsplit_once('.').map(|(_, format)| format)
+}
 async fn bot_messages_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -10309,9 +10317,7 @@ async fn bot_messages_get(
     room_for(&s, u.id, rid)?;
     let html_format = uri.path().ends_with(".html");
     if uri.path().ends_with(".xml") {
-        return Ok((StatusCode::NOT_ACCEPTABLE,
-            [(header::CONTENT_TYPE, "application/xml; charset=UTF-8")],
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hash>\n  <status type=\"integer\">406</status>\n  <error>Not Acceptable</error>\n</hash>\n").into_response());
+        return Ok(bot_xml_error(StatusCode::NOT_ACCEPTABLE));
     }
     let before_value = q.get("before").filter(|value| !value.trim().is_empty());
     let after_value = q.get("after").filter(|value| !value.trim().is_empty());
@@ -10391,6 +10397,7 @@ async fn bot_messages_get(
 async fn bot_messages_post(
     State(s): State<Arc<AppState>>,
     Path((rid, key)): Path<(i64, String)>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     req: Request,
 ) -> AppResult {
@@ -10461,14 +10468,24 @@ async fn bot_messages_post(
             .parse()
             .unwrap(),
     );
+    let media = match bot_path_format(&uri) {
+        Some("html") => "text/html",
+        Some("turbo_stream") => "text/vnd.turbo-stream.html",
+        Some("xml") => "application/xml",
+        Some("json") | None => "application/json",
+        Some(_) => "text/html",
+    };
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(media));
     Ok(r)
 }
 async fn bot_message_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, key, mid)): Path<(i64, String, i64)>,
+    OriginalUri(uri): OriginalUri,
+    Path((rid, key, raw_mid)): Path<(i64, String, String)>,
     body: String,
 ) -> AppResult {
+    let mid = path_record_id(&raw_mid)?;
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
@@ -10507,13 +10524,24 @@ async fn bot_message_update(
         room_id: rid,
         payload: json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":m.client_message_id,"body":body,"presentation_html":presentation_html}).to_string(),
     });
-    Ok(Json(message_json(&s, &m, Some(&headers))?).into_response())
+    match bot_path_format(&uri) {
+        Some("html") => Ok((StatusCode::FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::LOCATION, &format!("/rooms/{rid}/messages/{mid}"))]).into_response()),
+        Some("turbo_stream") => Ok(not_acceptable_format("")),
+        Some("xml") => Ok(bot_xml_error(StatusCode::NOT_ACCEPTABLE)),
+        Some("json") | None => {
+            let mut response = Json(message_json(&s, &m, Some(&headers))?).into_response();
+            response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+            Ok(response)
+        }
+        Some(_) => Ok(not_acceptable_format("")),
+    }
 }
 async fn bot_message_delete(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, key, mid)): Path<(i64, String, i64)>,
+    Path((rid, key, raw_mid)): Path<(i64, String, String)>,
 ) -> AppResult {
+    let mid = path_record_id(&raw_mid)?;
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
@@ -11428,6 +11456,7 @@ async fn boost_delete_post_override(
 async fn bot_boost_create(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path((rid, key, mid)): Path<(i64, String, i64)>,
     body: Bytes,
 ) -> AppResult {
@@ -11475,13 +11504,26 @@ async fn bot_boost_create(
         .unwrap_or(&s.avatar_signing_key);
     let avatar_url = public_url(&headers, &avatar_path(avatar_key, bot.id, &bot.updated_at)?);
     let message_url = public_url(&headers, &format!("/rooms/{rid}/messages/{mid}"));
-    Ok((StatusCode::CREATED, Json(json!({"id":id,"content":content,"created_at":created_at,"booster":{"id":bot.id,"name":bot.name,"role":"bot","avatar_url":avatar_url},"message":{"id":mid,"url":message_url}}))).into_response())
+    match bot_path_format(&uri) {
+        Some("html") | Some("turbo_stream") => {
+            let mut response = rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri);
+            response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=UTF-8"));
+            Ok(response)
+        }
+        Some("xml") => Ok(bot_xml_error(StatusCode::INTERNAL_SERVER_ERROR)),
+        _ => {
+            let mut response = (StatusCode::CREATED, Json(json!({"id":id,"content":content,"created_at":created_at,"booster":{"id":bot.id,"name":bot.name,"role":"bot","avatar_url":avatar_url},"message":{"id":mid,"url":message_url}}))).into_response();
+            response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+            Ok(response)
+        }
+    }
 }
 async fn bot_boost_delete(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, key, mid, bid)): Path<(i64, String, i64, i64)>,
+    Path((rid, key, mid, raw_bid)): Path<(i64, String, i64, String)>,
 ) -> AppResult {
+    let bid = path_record_id(&raw_bid)?;
     let bot = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, bot.id, rid)?;
     let content: Option<String> = pool(&s)?
@@ -12739,9 +12781,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         )))
         .with_state(state);
-    // Rails treats a recognized suffix as a requested response format. Axum
-    // matches it as a different path, so retry unmatched GETs against the
-    // unsuffixed route while retaining OriginalUri for handler negotiation.
+    // Rails treats a path suffix as a requested response format. Axum matches
+    // it as a different path, so retry supported reads and bot writes against
+    // the unsuffixed route while retaining OriginalUri for negotiation.
     let format_router = core_router.clone();
     let app = core_router.fallback_service(tower::service_fn(move |mut request: Request| {
         let format_router = format_router.clone();
@@ -12754,9 +12796,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let native_navigation = native_navigation_path(base);
             let bot_message_list = base.starts_with("/rooms/") && base.ends_with("/messages")
                 && base.matches('/').count() == 4;
+            let bot_write_path = base.starts_with("/rooms/")
+                && (bot_message_list || (base.ends_with("/boosts") && base.matches('/').count() == 6));
+            let bot_write_method = bot_write_path && matches!(request.method(), &Method::POST | &Method::PATCH | &Method::PUT | &Method::DELETE);
             if (!native_navigation && !matches!(suffix, "html" | "json" | "turbo_stream")
-                && !(bot_message_list && suffix == "xml"))
-                || !matches!(request.method(), &Method::GET | &Method::HEAD)
+                && !(bot_message_list && suffix == "xml") && !bot_write_method)
+                || (!matches!(request.method(), &Method::GET | &Method::HEAD) && !bot_write_method)
             {
                 return Ok(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
             }
@@ -12777,7 +12822,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let json_response = response.headers().get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.starts_with("application/json"));
-            let rejected = if native_navigation {
+            let rejected = if native_navigation || bot_write_method {
                 false
             } else {
                 match suffix {
