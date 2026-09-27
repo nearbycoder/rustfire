@@ -4929,6 +4929,7 @@ fn rails_not_found_type(uri: &Uri, accept: &str) -> &'static str {
         Some("json") => "application/json; charset=UTF-8",
         Some("turbo_stream") if uri.path().contains("/avatar") => "text/vnd.turbo-stream.html; charset=UTF-8",
         Some(_) => "text/html; charset=UTF-8",
+        None if uri.path().contains("/avatar") && accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html") => "text/vnd.turbo-stream.html; charset=UTF-8",
         None if accept.split(',').next().unwrap_or("").trim().starts_with("application/json") => "application/json; charset=UTF-8",
         None => "text/html; charset=UTF-8",
     }
@@ -9982,7 +9983,7 @@ async fn bot_messages_get(
     Path((rid, key)): Path<(i64, String)>,
     Query(q): Query<Paging>,
 ) -> AppResult {
-    if requested_format(&uri).as_deref() == Some("html") {
+    if uri.path().ends_with(".html") {
         return messages_index(State(s), headers, OriginalUri(uri), Path(rid.to_string()), Query(q)).await;
     }
     let u = bot_api_actor(&s, &headers, &key)?;
@@ -11447,6 +11448,9 @@ async fn missing_messages_get(State(s): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 async fn webmanifest(State(s): State<Arc<AppState>>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
+    if requested_format(&uri).is_some_and(|format| format != "json") {
+        return Ok(not_acceptable_format(""));
+    }
     let explicit_json = uri.path().ends_with(".json")
         || uri.query().is_some_and(|query| query.split('&').any(|part| part == "format=json"));
     let accepts_json = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|accept| {
@@ -11513,11 +11517,10 @@ async fn service_worker(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Re
             matches!(part.trim().split(';').next(), Some("text/javascript" | "application/javascript" | "text/*" | "*/*"))
         })
     });
-    if !explicit_js && !accepts_js {
-        let mut response = StatusCode::NOT_ACCEPTABLE.into_response();
-        let content_type = if requested_format(&uri).as_deref() == Some("json") { "application/json; charset=UTF-8" } else { "text/html; charset=UTF-8" };
-        response.headers_mut().insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-        return response;
+    if (requested_format(&uri).is_some() && !explicit_js) || (!explicit_js && !accepts_js) {
+        let json = requested_format(&uri).as_deref() == Some("json")
+            || (requested_format(&uri).is_none() && headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with("application/json")));
+        return not_acceptable_format(if json { "application/json" } else { "" });
     }
     let mut r = include_str!("../static/service-worker.js").into_response();
     r.headers_mut().insert(
