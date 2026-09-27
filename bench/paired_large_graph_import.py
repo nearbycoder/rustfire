@@ -29,7 +29,7 @@ STAMP = "2026-01-01 00:00:00.000000"
 SEARCH_QUERIES = ("Imported", "room 4")
 
 
-def seed_large_graph(database, messages_per_room):
+def seed_large_graph(database, messages_per_room, with_subscription):
     with sqlite3.connect(database) as db:
         db.execute("UPDATE users SET email_address='member@example.invalid',password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
         db.executemany("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(?,?,?,?,?,?)", (
@@ -57,7 +57,8 @@ def seed_large_graph(database, messages_per_room):
         db.executemany("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?)", messages)
         db.executemany("INSERT INTO action_text_rich_texts(name,body,record_type,record_id,created_at,updated_at) VALUES('body',?,'Message',?,?,?)", rich_texts)
         db.executemany("INSERT INTO message_search_index(rowid,body) VALUES(?,?)", search_rows)
-        db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(1,1,'https://push.example.test/large-graph','test-p256dh','test-auth','test',?,?)", (STAMP, STAMP))
+        if with_subscription:
+            db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(1,1,'https://push.example.test/large-graph','test-p256dh','test-auth','test',?,?)", (STAMP, STAMP))
 
 
 def fixture_vapid_keys():
@@ -188,6 +189,7 @@ def main():
     parser.add_argument("--ruby", type=Path, default=Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=Path, default=Path("/tmp/rustfire-baseline/bundle"))
     parser.add_argument("--messages-per-room", type=int, default=1_000)
+    parser.add_argument("--vapid-state", choices=("absent", "configured", "subscribed"), default="subscribed")
     parser.add_argument("--read-clients", type=int, nargs="*", default=[])
     parser.add_argument("--search-clients", type=int, nargs="*", default=[])
     parser.add_argument("--read-seconds", type=float, default=5.0)
@@ -210,9 +212,13 @@ def main():
         camp_port, rust_port, redis_port = free_port(), free_port(), free_port()
         environment = seed_campfire(repository, ruby, bundle_path,
             repository / "storage/db/production.sqlite3", source_db, [], camp_port, temp)
-        seed_large_graph(source_db, args.messages_per_room)
+        seed_large_graph(source_db, args.messages_per_room, args.vapid_state == "subscribed")
         vapid_public, vapid_private = fixture_vapid_keys()
-        environment["VAPID_PUBLIC_KEY"], environment["VAPID_PRIVATE_KEY"] = vapid_public, vapid_private
+        if args.vapid_state == "absent":
+            environment.pop("VAPID_PUBLIC_KEY", None)
+            environment.pop("VAPID_PRIVATE_KEY", None)
+        else:
+            environment["VAPID_PUBLIC_KEY"], environment["VAPID_PRIVATE_KEY"] = vapid_public, vapid_private
         environment["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         redis, redis_log = start_redis(temp, redis_port)
         try:
@@ -234,16 +240,27 @@ def main():
                 finally:
                     stop_server(camp)
             started = time.monotonic()
+            importer_env = dict(os.environ, RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE=environment["SECRET_KEY_BASE"])
+            if args.vapid_state == "absent":
+                importer_env.pop("RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY", None)
+                importer_env.pop("RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY", None)
+            else:
+                importer_env.update(RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY=vapid_public,
+                    RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY=vapid_private)
             importer = subprocess.run(("python", "tools/import_campfire.py", "--source-db", str(source_db),
                 "--source-files", str(repository / "storage/files"), "--target-db", str(target_db),
                 "--target-uploads", str(uploads), "--rustfire-bin", "target/release/rustfire"),
-                env=dict(os.environ, RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE=environment["SECRET_KEY_BASE"],
-                    RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY=vapid_public, RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY=vapid_private),
+                env=importer_env,
                 check=True, text=True, capture_output=True)
             elapsed = time.monotonic() - started
             counts = json.loads(importer.stdout)
             total_messages = args.messages_per_room * len(ROOMS)
-            assert counts["rooms"] == 4 and counts["messages"] == total_messages and counts["memberships"] == 7 and counts["push_subscriptions"] == 1, counts
+            expected_push = int(args.vapid_state == "subscribed")
+            assert counts["rooms"] == 4 and counts["messages"] == total_messages and counts["memberships"] == 7 and counts["push_subscriptions"] == expected_push, counts
+            with sqlite3.connect(target_db) as imported:
+                flag = imported.execute("SELECT preserve_missing_vapid FROM account_settings WHERE id=1").fetchone()[0]
+            assert flag == int(args.vapid_state == "absent"), flag
+            assert target_db.with_suffix(".vapid.der").exists() == (args.vapid_state != "absent")
             print(f"import: {total_messages} messages in {elapsed:.2f}s", flush=True)
             rust = start_server(target_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(uploads),
                 "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": environment["SECRET_KEY_BASE"]})
@@ -275,7 +292,8 @@ def main():
                     args.report.write_text(json.dumps({"source_revision": revision,
                         "rustfire_revision": subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
                         "fixture": {"rooms": 4, "users": 2, "messages_per_room": args.messages_per_room,
-                            "total_messages": total_messages, "targets": len(targets), "pages_checked": checked_pages},
+                            "total_messages": total_messages, "targets": len(targets), "pages_checked": checked_pages,
+                            "vapid_state": args.vapid_state},
                         "seconds": args.read_seconds, "campfire_workers": args.campfire_workers,
                         "trials": trials}, indent=2) + "\n")
             if args.search_clients:
@@ -289,7 +307,7 @@ def main():
                         "fixture": {"rooms": 4, "users": 2, "messages_per_room": args.messages_per_room,
                             "total_messages": total_messages, "search_targets": len(search_targets),
                             "search_result_counts": [item["expected_message_count"] for item in search_targets],
-                            "search_queries": list(SEARCH_QUERIES)},
+                            "search_queries": list(SEARCH_QUERIES), "vapid_state": args.vapid_state},
                         "seconds": args.read_seconds, "campfire_workers": args.campfire_workers,
                         "trials": trials}, indent=2) + "\n")
         finally:

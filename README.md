@@ -27,7 +27,7 @@ Configuration:
 - `RUSTFIRE_PUBLIC_URL` — public origin for invite, device sign-in, and message copy links, for example `https://chat.example.com`; otherwise request Host and the secure-cookie setting determine the origin, with the bind address as fallback when no request is available
 - `RUSTFIRE_DISABLE_WEBHOOKS` — set to `true` to suppress outbound bot webhook delivery
 - `RUSTFIRE_DISABLE_PUSH` — set to `true` to suppress outbound Web Push delivery
-- `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid.
+- `RUSTFIRE_VAPID_KEY_FILE` — persistent VAPID private-key path; defaults beside the SQLite database as a `.vapid.der` file. Keep this file when moving or restoring an installation so existing browser subscriptions remain valid. A Campfire import without a supplied source key preserves its keyless state and creates no file.
 - `RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE` — optional original Campfire secret key base, used to issue and verify Rails mention, avatar, blob, and device-transfer IDs with Campfire's verifier keys. Keep it configured while imported messages or attachments use those IDs. Rustfire also accepts IDs signed with its own persistent keys.
 - `RUSTFIRE_TRUSTED_PROXY_IPS` — comma-separated IPs of reverse proxies that append `X-Forwarded-For`; empty by default. Session IPs and bans use the direct peer unless it is listed here.
 - `APP_VERSION` and `GIT_REVISION` — optional Campfire-style response version headers. `X-Version` uses `APP_VERSION`, then `GIT_REVISION`, then `0`; `X-Rev` uses `GIT_REVISION` or an empty value.
@@ -80,9 +80,7 @@ With the same import fixture, ten-second checked room-page reads at 32, 128, and
 
 On the imported 40-message room, the same ten-second, both-order sweep measured **3.06–4.55×** Rustfire throughput with lower p95 latency and zero checked errors in either app. See [the 40-message results](bench/results/imported-room-40-reads.json). This is a sampled room read, not a maximum-scale or full-app claim.
 
-If Campfire has push subscriptions, also set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to its original VAPID keys before import. The importer verifies the pair and creates Rustfire's key file so those subscriptions retain the same application server key.
-
-When a source installation has no configured VAPID key and no push subscriptions, Rustfire currently generates its own key at startup. The VAPID public-key metadata and push opt-in behavior then differ from that Campfire state; exact parity for this case remains open.
+If Campfire has configured VAPID keys, set `RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY` and `RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY` to the original pair before import, even if there are no current push subscriptions. The importer verifies the pair and preserves the public key. These variables are required when subscriptions exist. Without a supplied pair and without subscriptions, the imported account remains keyless like a keyless Campfire source; a new Rustfire account still generates its own key. To enable push later on a keyless import, install a VAPID key file at the configured path and restart Rustfire.
 
 The importer preserves unknown inline image subtypes as file attachments and previews valid `video/*` blobs, matching sampled Campfire behavior. It still stops if a previewable image or video cannot be decoded, if image dimensions conflict with saved metadata, or if it encounters an unknown Active Storage attachment record type. It requires local Active Storage files and a stopped source app for a consistent snapshot. Rebuilt search text still needs parity checks for less common ActionText content. These cases, plus full rich-text rendering and media edge cases, remain migration parity work.
 

@@ -300,10 +300,15 @@ def main():
         has_push = source_check.execute("SELECT EXISTS(SELECT 1 FROM push_subscriptions)").fetchone()[0]
     finally:
         source_check.close()
-    if has_push and not (os.environ.get("RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY") and os.environ.get("RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY")):
+    vapid_private = os.environ.get("RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY")
+    vapid_public = os.environ.get("RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY")
+    if bool(vapid_private) != bool(vapid_public):
+        parser.error("RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY and RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY must be supplied together")
+    has_vapid = bool(vapid_private and vapid_public)
+    if has_push and not has_vapid:
         parser.error("existing push subscriptions require RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY and RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY")
     target_vapid = args.target_db.with_suffix(".vapid.der")
-    if has_push and target_vapid.exists():
+    if target_vapid.exists():
         parser.error(f"target VAPID key file already exists: {target_vapid}")
     args.target_db.parent.mkdir(parents=True, exist_ok=True)
     args.target_uploads.parent.mkdir(parents=True, exist_ok=True)
@@ -315,7 +320,7 @@ def main():
         stage_vapid = stage_db.with_suffix(".vapid.der")
         environment = dict(os.environ, RUSTFIRE_DB=str(stage_db), RUSTFIRE_UPLOAD_DIR=str(stage_uploads), RUSTFIRE_VAPID_KEY_FILE=str(stage_vapid))
         subprocess.run((binary, "--init-db"), env=environment, check=True)
-        if has_push:
+        if has_vapid:
             subprocess.run((binary, "--import-campfire-vapid"), env=environment, check=True)
         source = sqlite3.connect(f"{args.source_db.resolve().as_uri()}?mode=ro", uri=True)
         target = sqlite3.connect(stage_db)
@@ -323,6 +328,7 @@ def main():
             target.execute("PRAGMA foreign_keys=ON")
             target.execute("BEGIN IMMEDIATE")
             counts = import_data(source, target, args.source_files, stage_uploads)
+            target.execute("UPDATE account_settings SET preserve_missing_vapid=? WHERE id=1", (int(not has_vapid),))
             target.commit()
         finally:
             target.close()
@@ -334,14 +340,14 @@ def main():
         checkpoint.close()
         published = []
         try:
-            for path in (args.target_db, args.target_uploads, target_vapid if has_push else None):
+            for path in (args.target_db, args.target_uploads, target_vapid if has_vapid else None):
                 if path is not None and path.exists():
                     raise FileExistsError(path)
             os.replace(stage_uploads, args.target_uploads)
             published.append(args.target_uploads)
             os.replace(stage_db, args.target_db)
             published.append(args.target_db)
-            if has_push:
+            if has_vapid:
                 os.replace(stage_vapid, target_vapid)
                 published.append(target_vapid)
         except Exception:

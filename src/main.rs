@@ -2344,10 +2344,13 @@ fn render_source_page_sections_with_logo(title: &str, body: &str, nav: &str, foo
     } else {
         "<script defer src=\"/static/app.js\"></script>"
     };
+    let vapid_meta = VAPID_PUBLIC.get().map(String::as_str).filter(|key| !key.is_empty())
+        .map(|key| format!("<meta name=\"vapid-public-key\" content=\"{}\">", esc(key)))
+        .unwrap_or_else(|| "<meta name=\"vapid-public-key\">".to_string());
     let html = format!(r##"<!DOCTYPE html><html><head><title>{title}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable"><meta name="vapid-public-key" content="{vapid}"><meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}{scripts}{head_extra}</head>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content"><meta name="view-transition" content="same-origin"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="csrf-param" content="authenticity_token"><meta name='csrf-token' content='{token}'>{current_user_meta}<meta name="action-cable-url" content="/cable">{vapid_meta}<meta name="turbo-prefetch" content="true"><link rel="manifest" href="/webmanifest.json"><link rel="icon" href="{logo_url}" type="image/png"><link rel="apple-touch-icon" href="{logo_url}">{styles}{custom_styles}{scripts}{head_extra}</head>
 <body class="{body_class}" data-controller="local-time lightbox"><a href="#main-content" class="skip-navigation btn">Skip to main content</a><nav id="nav">{nav}</nav>{flash}<main id="main-content">{body}<footer id="footer">{footer}</footer></main><aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">{sidebar}</aside><dialog class="lightbox" aria-label="Image Viewer (Press escape to close)" data-lightbox-target="dialog" data-action="close->lightbox#reset"><img src="" class="lightbox__image" data-lightbox-target="zoomedImage"><form method="dialog" class="lightbox__btn"><button class="btn"><img src="/assets/remove-0e7a045d.svg" aria-hidden="true"><span class="for-screen-reader">Close image viewer</span></button></form><a href="" class="lightbox__btn--download btn hide-in-ios-pwa" data-lightbox-target="download"><img src="/assets/download-04029899.svg" aria-hidden="true"><span class="for-screen-reader">Download file</span></a><button class="lightbox__btn--share btn" data-controller="web-share" data-action="web-share#share" data-web-share-files-value="" data-lightbox-target="share"><img src="/assets/share-bf28da4f.svg" aria-hidden="true"><span class="for-screen-reader">Share file</span></button></dialog><a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon-3d9986c5.png" alt="Campfire logo" width="256" height="216"></a></body></html>"##,
-        title = esc(title), token = esc(&token), vapid = VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""), custom_styles = custom_styles_tag()
+        title = esc(title), token = esc(&token), custom_styles = custom_styles_tag()
     );
     Html(if current.is_some() { html } else { csrf_forms(&html, token) }).into_response()
 }
@@ -2940,13 +2943,14 @@ fn secure_cookie_suffix() -> &'static str {
         ""
     }
 }
-fn load_vapid_key(
-    db_path: &std::path::Path,
-) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
-    use std::io::Write;
-    let path = env::var("RUSTFIRE_VAPID_KEY_FILE")
+fn vapid_key_path(db_path: &std::path::Path) -> std::path::PathBuf {
+    env::var("RUSTFIRE_VAPID_KEY_FILE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| db_path.with_extension("vapid.der"));
+        .unwrap_or_else(|_| db_path.with_extension("vapid.der"))
+}
+fn load_vapid_key(db_path: &std::path::Path) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let path = vapid_key_path(db_path);
     let der = if path.exists() {
         std::fs::read(&path)?
     } else {
@@ -3004,9 +3008,7 @@ fn import_campfire_vapid_key(db_path: &std::path::Path) -> Result<(), Box<dyn st
         return Err("Campfire VAPID public and private keys do not match".into());
     }
     let der = EcKey::from_private_components(&group, &private, &public)?.private_key_to_der()?;
-    let path = env::var("RUSTFIRE_VAPID_KEY_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| db_path.with_extension("vapid.der"));
+    let path = vapid_key_path(db_path);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -11851,7 +11853,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     let fts_needs_rebuild = fts_definition.is_some_and(|sql| !sql.contains("tokenize=porter"));
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,join_code TEXT NOT NULL UNIQUE,custom_styles TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS account_settings(id INTEGER PRIMARY KEY CHECK(id=1),restrict_room_creation INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS account_settings(id INTEGER PRIMARY KEY CHECK(id=1),restrict_room_creation INTEGER NOT NULL DEFAULT 0,preserve_missing_vapid INTEGER NOT NULL DEFAULT 0);
         INSERT OR IGNORE INTO account_settings(id,restrict_room_creation) VALUES(1,0);
         CREATE TABLE IF NOT EXISTS app_secrets(name TEXT PRIMARY KEY,value BLOB NOT NULL);
         INSERT OR IGNORE INTO app_secrets(name,value) VALUES('mention_sgid',randomblob(32));
@@ -11908,6 +11910,14 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_fts_update AFTER UPDATE OF body ON messages BEGIN UPDATE message_search_index SET body=new.body WHERE rowid=new.id; END;
         CREATE TRIGGER IF NOT EXISTS message_fts_delete AFTER DELETE ON messages BEGIN DELETE FROM message_search_index WHERE rowid=old.id; END;")?;
     ensure_failed_webhook_retry_column(&conn)?;
+    let has_missing_vapid_flag: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('account_settings') WHERE name='preserve_missing_vapid')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_missing_vapid_flag {
+        conn.execute("ALTER TABLE account_settings ADD COLUMN preserve_missing_vapid INTEGER NOT NULL DEFAULT 0", [])?;
+    }
     let direct_upload_null_flag: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('direct_upload_blobs') WHERE name='content_type_is_null')",
         [],
@@ -12291,7 +12301,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .optional()?
         .flatten();
     let _ = CUSTOM_STYLES.set(RwLock::new(custom_styles));
-    let (vapid_private, vapid_public) = load_vapid_key(std::path::Path::new(&db_path))?;
+    let db_path_ref = std::path::Path::new(&db_path);
+    let preserve_missing_vapid: bool = db.get()?.query_row(
+        "SELECT preserve_missing_vapid FROM account_settings WHERE id=1", [], |row| row.get(0)
+    )?;
+    let (vapid_private, vapid_public) = if preserve_missing_vapid && !vapid_key_path(db_path_ref).exists() {
+        (Vec::new(), String::new())
+    } else {
+        load_vapid_key(db_path_ref)?
+    };
     let _ = VAPID_PUBLIC.set(vapid_public.clone());
     let has_push_subscriptions: bool =
         db.get()?
