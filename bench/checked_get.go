@@ -32,6 +32,7 @@ type target struct {
 	ExpectedModified string `json:"expected_last_modified,omitempty"`
 	ExpectedMessages int    `json:"expected_message_count,omitempty"`
 	ExpectedCSRF     int    `json:"expected_csrf_count,omitempty"`
+	ExpectedContains string `json:"expected_contains,omitempty"`
 	expected         []byte
 }
 
@@ -159,6 +160,9 @@ func main() {
 		if item.expected != nil {
 			digest := sha256.Sum256(body)
 			valid = valid && bytes.Equal(digest[:], item.expected)
+		}
+		if item.ExpectedContains != "" {
+			valid = valid && bytes.Contains(body, []byte(item.ExpectedContains))
 		}
 		messageCount := *expectedMessages
 		if item.ExpectedMessages > 0 {
