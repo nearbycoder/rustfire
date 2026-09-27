@@ -12,12 +12,13 @@ const base = new URL(args.base);
 const cookie = args.cookie;
 const socketCount = Number(args.sockets ?? 1);
 const messageCount = Number(args.messages ?? 1);
+const botReplyCount = Number(args['bot-replies'] ?? 0);
 const roomId = Number(args.room ?? 1);
 const clientPrefix = args['client-prefix'] ?? 'mixed';
 const firstId = Number(args['first-id'] ?? 41);
 const timeoutMs = Number(args.timeout ?? 60000);
 const browserChannels = args['browser-channels'] === '1';
-if (!cookie || base.protocol !== 'http:' || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || !Number.isSafeInteger(roomId) || roomId < 1 || !Number.isSafeInteger(firstId) || firstId < 0 || !/^[A-Za-z0-9-]+$/.test(clientPrefix)) {
+if (!cookie || base.protocol !== 'http:' || !Number.isSafeInteger(socketCount) || socketCount < 1 || !Number.isSafeInteger(messageCount) || messageCount < 1 || !Number.isSafeInteger(botReplyCount) || botReplyCount < 0 || !Number.isSafeInteger(roomId) || roomId < 1 || !Number.isSafeInteger(firstId) || firstId < 0 || !/^[A-Za-z0-9-]+$/.test(clientPrefix)) {
   throw new Error('Use --base http://host:port --cookie name=value --sockets N --messages N [--room N --client-prefix PREFIX --first-id N]');
 }
 
@@ -50,10 +51,12 @@ const streamPattern = new RegExp(`<turbo-stream\\b[^>]*\\baction=["']append["'][
 const clientPattern = new RegExp(`\\bid=["']message_${clientPrefix}-(\\d+)["']`);
 const sockets = [];
 const seen = Array.from({ length: socketCount }, () => new Set());
+const repliesSeen = Array.from({ length: socketCount }, () => new Set());
 const unreadSeen = Array(socketCount).fill(0);
 const readSeen = Array(socketCount).fill(0);
 const events = args['events-file'] ? Array(messageCount).fill(null) : null;
 let received = 0;
+let replyReceived = 0;
 let unexpected = 0;
 let closedEarly = 0;
 let sampled = false;
@@ -87,7 +90,7 @@ function connect(index) {
       else closedEarly++;
     };
     socket.on('error', fail);
-    socket.on('close', () => { if (!ready) fail(new Error(`Socket ${index} closed before subscription`)); else if (seen[index].size < messageCount) closedEarly++; });
+    socket.on('close', () => { if (!ready) fail(new Error(`Socket ${index} closed before subscription`)); else if (seen[index].size < messageCount || repliesSeen[index].size < botReplyCount) closedEarly++; });
     socket.on('connect', () => {
       const key = crypto.randomBytes(16).toString('base64');
       socket.write(`GET /cable HTTP/1.1\r\nHost: ${base.host}\r\nOrigin: ${base.origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${cookie}\r\n\r\n`);
@@ -140,9 +143,7 @@ function connect(index) {
           const clientId = html.match(clientPattern)?.[1];
           const messageId = html.match(/\bdata-message-id=["'](\d+)["']/)?.[1];
           const number = Number(clientId);
-          if (!stream || !clientId || !Number.isSafeInteger(number) || number < 1 || number > messageCount || !Number.isSafeInteger(Number(messageId)) || Number(messageId) < 1 || (firstId && Number(messageId) !== firstId + number - 1) || seen[index].has(number)) {
-            unexpected++;
-          } else {
+          if (clientId && stream && Number.isSafeInteger(number) && number >= 1 && number <= messageCount && Number.isSafeInteger(Number(messageId)) && Number(messageId) > 0 && (!firstId || Number(messageId) === firstId + number - 1) && !seen[index].has(number)) {
             seen[index].add(number);
             received++;
             if (index === 0 && number === 1 && args['sample-file'] && !sampled) {
@@ -150,6 +151,11 @@ function connect(index) {
               sampled = true;
             }
             if (index === 0 && events) events[number - 1] = html;
+          } else if (botReplyCount && stream && /\bdata-user-id=["']52["']/.test(html) && html.includes('Acknowledged') && Number.isSafeInteger(Number(messageId)) && Number(messageId) > 0 && !repliesSeen[index].has(messageId)) {
+            repliesSeen[index].add(messageId);
+            replyReceived++;
+          } else {
+            unexpected++;
           }
         }
       }
@@ -171,12 +177,13 @@ try {
   }
   const started = Date.now();
   const expected = socketCount * messageCount;
+  const expectedReplies = socketCount * botReplyCount;
   const expectedRead = browserChannels ? socketCount * (socketCount + 1) / 2 : 0;
-  while ((received < expected || browserChannels && unreadReceived < expected) && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
-  if (received === expected && (!browserChannels || unreadReceived === expected)) await new Promise(resolve => setTimeout(resolve, 100));
+  while ((received < expected || replyReceived < expectedReplies || browserChannels && unreadReceived < expected) && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
+  if (received === expected && replyReceived === expectedReplies && (!browserChannels || unreadReceived === expected)) await new Promise(resolve => setTimeout(resolve, 100));
   if (events) fs.writeFileSync(args['events-file'], JSON.stringify(events));
-  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, unexpected, closed_early: closedEarly, sampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
-  if (received !== expected || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;
+  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, bot_replies: botReplyCount, reply_expected: expectedReplies, reply_received: replyReceived, reply_missed: expectedReplies - replyReceived, unexpected, closed_early: closedEarly, sampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
+  if (received !== expected || replyReceived !== expectedReplies || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;
 } finally {
   for (const socket of sockets) socket.destroy();
 }

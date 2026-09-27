@@ -1,6 +1,7 @@
 """Measure matched user posts, bot webhooks, and saved text replies on both apps."""
 
 import argparse
+import concurrent.futures
 import html
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +10,7 @@ import math
 import os
 import pathlib
 import queue
+import select
 import signal
 import sqlite3
 import subprocess
@@ -17,7 +19,7 @@ import threading
 import time
 import urllib.parse
 
-from direct_lookup import free_port, start_server, stop_server
+from direct_lookup import ROOT, free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis, wait_for_worker
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_message_cache import resource_snapshot
@@ -84,18 +86,23 @@ def trial(app, port, database, cookie, csrf, posts, rate, timeout, redis_port=No
     sgid = bot_sgid(port, cookie, app == "campfire")
     interval = 1 / rate
     begun = time.perf_counter()
-    starts = {}
-    post_durations = []
-    lag = []
-    for index in range(posts):
-        due = begun + index * interval
-        time.sleep(max(0, due - time.perf_counter()))
+
+    def timed_post(index, due):
         started = time.perf_counter()
-        starts[index] = started
-        lag.append(max(0, started - due))
         post(port, cookie, csrf, sgid, index)
-        post_durations.append(time.perf_counter() - started)
-    sending_end = time.perf_counter()
+        return index, started, time.perf_counter(), max(0, started - due)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(64, posts)) as executor:
+        futures = []
+        for index in range(1, posts + 1):
+            due = begun + (index - 1) * interval
+            time.sleep(max(0, due - time.perf_counter()))
+            futures.append(executor.submit(timed_post, index, due))
+        completed = [future.result(timeout=35) for future in futures]
+    starts = {index: started for index, started, _, _ in completed}
+    sending_end = max(ended for _, _, ended, _ in completed)
+    post_durations = [ended - started for _, started, ended, _ in completed]
+    lag = [delay for _, _, _, delay in completed]
     received = []
     deadline = time.monotonic() + timeout
     while len(received) < posts:
@@ -143,7 +150,7 @@ def trial(app, port, database, cookie, csrf, posts, rate, timeout, redis_port=No
         "posts": posts,
         "webhooks": len(received),
         "replies": len(replies),
-        "offered_posts_per_second": round(posts / (sending_end - begun), 2),
+        "completed_posts_per_second": round(posts / (sending_end - begun), 2),
         "webhook_p95_ms": round(percentile(delivery_latencies, 95) * 1000, 2),
         "post_p95_ms": round(percentile(post_durations, 95) * 1000, 2),
         "schedule_lag_p95_ms": round(percentile(lag, 95) * 1000, 2),
@@ -183,6 +190,38 @@ def sampled_trial(process_pids, *args):
     return report, signatures
 
 
+def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, sockets, redis_port=None):
+    if not sockets:
+        return sampled_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, redis_port)
+    command = [
+        "node", "bench/capture_message_appends.mjs", "--base", f"http://127.0.0.1:{port}",
+        "--cookie", cookie, "--room", "1", "--client-prefix", "paired-reply-load",
+        "--first-id", "0", "--sockets", str(sockets), "--messages", str(posts),
+        "--bot-replies", str(posts), "--timeout", str(round((timeout + posts / rate + 30) * 1000)),
+        "--await-start", "1",
+    ]
+    capture = subprocess.Popen(command, cwd=ROOT, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        ready, _, _ = select.select([capture.stdout], [], [], 60)
+        marker = capture.stdout.readline().strip() if ready else ""
+        assert marker == "READY", (app, marker)
+        capture.stdin.write("START\n")
+        capture.stdin.flush()
+        capture.stdin.close()
+        capture.stdin = None
+        report, signatures = sampled_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, redis_port)
+        stdout, stderr = capture.communicate(timeout=timeout + posts / rate + 35)
+        assert capture.returncode == 0, (app, stdout, stderr)
+        delivery = json.loads(stdout.strip().splitlines()[-1])
+        assert delivery["received"] == posts * sockets and delivery["reply_received"] == posts * sockets, (app, delivery)
+        report["socket_delivery"] = delivery
+        return report, signatures
+    finally:
+        if capture.poll() is None:
+            capture.kill()
+            capture.communicate(timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--posts", type=int, default=120)
@@ -191,11 +230,12 @@ def main():
     parser.add_argument("--campfire-workers", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--campfire-first", action="store_true")
+    parser.add_argument("--sockets", type=int, default=0, help="subscribe room-message sockets and check both user and bot appends")
     parser.add_argument("--resources", action="store_true", help="sample server-process PSS (requires psutil)")
     parser.add_argument("--report", type=pathlib.Path)
     args = parser.parse_args()
-    if min(args.posts, args.rate, args.campfire_workers, args.timeout) <= 0 or args.delay_ms < 0:
-        parser.error("posts, rate, workers, and timeout must be positive; delay must be nonnegative")
+    if min(args.posts, args.rate, args.campfire_workers, args.timeout) <= 0 or args.delay_ms < 0 or args.sockets < 0:
+        parser.error("posts, rate, workers, and timeout must be positive; delay and sockets must be nonnegative")
     if args.resources:
         try:
             import psutil  # noqa: F401
@@ -226,7 +266,7 @@ def main():
                 def rust_trial():
                     server = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "0"})
                     try:
-                        return sampled_trial((server.pid,) if args.resources else (), "rustfire", rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", args.posts, args.rate, args.timeout)
+                        return captured_trial((server.pid,) if args.resources else (), "rustfire", rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", args.posts, args.rate, args.timeout, args.sockets)
                     finally:
                         stop_server(server)
 
@@ -241,7 +281,7 @@ def main():
                                 wait_for_worker(redis_port, worker)
                             cookie, csrf = login_campfire(camp_port)
                             process_pids = (camp.pid, redis.pid, *(worker.pid for worker in workers)) if args.resources else ()
-                            return sampled_trial(process_pids, "campfire", camp_port, camp_db, cookie, csrf, args.posts, args.rate, args.timeout, redis_port)
+                            return captured_trial(process_pids, "campfire", camp_port, camp_db, cookie, csrf, args.posts, args.rate, args.timeout, args.sockets, redis_port)
                         finally:
                             stop_server(camp)
                             for worker in workers:
@@ -262,7 +302,7 @@ def main():
         receiver.server_close()
         thread.join(timeout=5)
     assert rust_signatures == camp_signatures, next(((left, right) for left, right in zip(rust_signatures, camp_signatures) if left != right), None)
-    report = {"source_revision": REVISION, "posts": args.posts, "rate": args.rate, "reply_delay_ms": args.delay_ms, "campfire_resque_workers": args.campfire_workers, "campfire_first": args.campfire_first, "payloads_match": True, "rustfire": rust_report, "campfire": camp_report}
+    report = {"source_revision": REVISION, "posts": args.posts, "rate": args.rate, "reply_delay_ms": args.delay_ms, "campfire_resque_workers": args.campfire_workers, "campfire_first": args.campfire_first, "sockets": args.sockets, "payloads_match": True, "rustfire": rust_report, "campfire": camp_report}
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
