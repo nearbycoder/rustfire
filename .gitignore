@@ -5,3 +5,9 @@
 *.db-wal
 __pycache__/
 *.pyc
+.env
+.env.*
+*.pem
+*.key
+*.vapid.der
+bench/results/*.log

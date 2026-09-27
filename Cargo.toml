@@ -2,6 +2,9 @@
 name = "rustfire"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/nearbycoder/rustfire"
+description = "An in-progress Rust implementation of ONCE Campfire"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "ws"] }
