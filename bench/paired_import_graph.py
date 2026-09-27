@@ -31,6 +31,7 @@ CASES = {
     "sidebar": "/users/me/sidebar",
     "search": "/searches?q=constellation",
 }
+MEMBER_CASES = {**CASES, "hidden": "/rooms/4"}
 
 
 def seed_graph(database):
@@ -53,6 +54,7 @@ def seed_graph(database):
         (4, "<div>constellation hidden</div>", "constellation hidden"),
         (5, "<div>Private follow-up <em>italic</em></div>", "Private follow-up italic"))
     with sqlite3.connect(database) as db:
+        db.execute("UPDATE users SET email_address='member@example.invalid',password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
         db.executemany("INSERT INTO rooms(id,name,type,creator_id,created_at,updated_at) VALUES(?,?,?,?,?,?)", rooms)
         db.executemany("INSERT INTO memberships(room_id,user_id,involvement,unread_at,created_at,updated_at) VALUES(?,?,?,?,?,?)", memberships)
         db.executemany("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?)",
@@ -67,36 +69,39 @@ def seed_graph(database):
         db.execute("INSERT INTO push_subscriptions(id,user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at) VALUES(1,1,'https://push.example.test/import-graph','test-p256dh','test-auth','test',?,?)", (STAMP, STAMP))
 
 
-def capture(port, cookie, csrf):
+def capture(port, cookie, csrf, cases, inaccessible_room=None):
     pages = {}
-    for name, path in CASES.items():
+    for name, path in cases.items():
         headers = {"User-Agent": AGENT}
         if name == "sidebar":
             headers["Turbo-Frame"] = "user_sidebar"
         status, _, body = request(port, "GET", path, cookie, csrf, extra_headers=headers)
         assert status == 200, (name, path, status, body[:300])
         pages[name] = body
-    status, location, _ = request(port, "GET", "/rooms/4", cookie, csrf, extra_headers={"User-Agent": AGENT})
-    assert status == 302, (status, location)
+    location = None
+    if inaccessible_room is not None:
+        status, location, _ = request(port, "GET", f"/rooms/{inaccessible_room}", cookie, csrf, extra_headers={"User-Agent": AGENT})
+        assert status == 302, (status, location)
     return pages, location
 
 
-def compare(source, target):
+def compare(source, target, label, expected_search_ids):
     search_ids = re.findall(rb'data-message-id=["\'](\d+)', source["search"])
-    assert search_ids == [b"1", b"2", b"3"], search_ids
-    assert re.findall(rb'/searches\?q=(constellation|private)', source["search"])[:2] == [b"constellation", b"private"]
+    assert search_ids == expected_search_ids, search_ids
+    if label == "administrator":
+        assert re.findall(rb'/searches\?q=(constellation|private)', source["search"])[:2] == [b"constellation", b"private"]
     assert "🎉".encode() in source["private"]
-    for name in CASES:
+    for name in source:
         if name == "sidebar":
             options = dict(normalize_times=True, normalize_avatar_paths=True,
                 normalize_blob_paths=True, normalize_text_origins=True, ignore_csrf_inputs=True)
-            assert_equal("imported sidebar frame", section(source[name], "user_sidebar", **options),
+            assert_equal(f"imported {label} sidebar frame", section(source[name], "user_sidebar", **options),
                 section(target[name], "user_sidebar", **options))
             continue
         for part in ("head", "body"):
             options = dict(normalize_times=True, normalize_avatar_paths=True,
                 normalize_blob_paths=True, normalize_text_origins=True, ignore_csrf_inputs=True)
-            assert_equal(f"imported {name} {part}", section(source[name], part, **options),
+            assert_equal(f"imported {label} {name} {part}", section(source[name], part, **options),
                 section(target[name], part, **options))
 
 
@@ -131,7 +136,9 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
-                    source, source_redirect = capture(camp_port, cookie, csrf)
+                    member_cookie, member_csrf = login_campfire(camp_port, "member@example.invalid")
+                    source, source_redirect = capture(camp_port, cookie, csrf, CASES, inaccessible_room=4)
+                    member_source, _ = capture(camp_port, member_cookie, member_csrf, MEMBER_CASES)
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -160,18 +167,21 @@ def main():
             rust = start_server(target_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(uploads),
                 "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": environment["SECRET_KEY_BASE"]})
             try:
-                target, target_redirect = capture(rust_port, cookie, csrf)
+                target, target_redirect = capture(rust_port, cookie, csrf, CASES, inaccessible_room=4)
+                member_target, _ = capture(rust_port, member_cookie, member_csrf, MEMBER_CASES)
             finally:
                 stop_server(rust)
             assert source_redirect == f"http://127.0.0.1:{camp_port}/", source_redirect
             assert target_redirect == f"http://127.0.0.1:{rust_port}/", target_redirect
             if args.sample_dir:
                 args.sample_dir.mkdir(parents=True, exist_ok=True)
-                for label, documents in (("campfire", source), ("rustfire", target)):
+                for label, documents in (("campfire", source), ("rustfire", target),
+                    ("campfire-member", member_source), ("rustfire-member", member_target)):
                     for name, body in documents.items():
                         (args.sample_dir / f"{label}-{name}.html").write_bytes(body)
-            compare(source, target)
-            print("PASS imported open/private/direct room pages, boost, sidebar, search, and inaccessible room redirect")
+            compare(source, target, "administrator", [b"1", b"2", b"3"])
+            compare(member_source, member_target, "member", [b"1", b"2", b"3", b"4"])
+            print("PASS imported administrator and member room pages, boost, sidebar, search, and inaccessible room redirect")
         finally:
             redis.terminate()
             redis.wait(timeout=10)
