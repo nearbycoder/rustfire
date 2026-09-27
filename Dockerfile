@@ -18,6 +18,5 @@ ENV RUSTFIRE_ADDR=0.0.0.0:3000 \
     RUSTFIRE_DB=/data/rustfire.db \
     RUSTFIRE_UPLOAD_DIR=/data/uploads
 USER rustfire
-VOLUME ["/data"]
 EXPOSE 3000
 CMD ["rustfire"]
