@@ -2158,6 +2158,34 @@ fn found_redirect(path: &str) -> Response {
     response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
     response
 }
+fn error_media_type(headers: &HeaderMap, uri: &Uri) -> HeaderValue {
+    // Rails treats the numeric format on /account.1 as an explicit HTML error
+    // response even when the Accept header requests JSON.
+    let json = match requested_format(uri).as_deref() {
+        Some("json") => true,
+        Some(_) => false,
+        None if uri.path() == "/account.1" => false,
+        None => headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+            .is_some_and(|accept| accept.split(',').next().unwrap_or("").trim().split(';').next() == Some("application/json")),
+    };
+    if json { HeaderValue::from_static("application/json; charset=utf-8") }
+    else { HeaderValue::from_static("text/html; charset=utf-8") }
+}
+fn invalid_authenticity_response(headers: &HeaderMap, uri: &Uri) -> Response {
+    rails_error_response(StatusCode::UNPROCESSABLE_ENTITY, headers, uri)
+}
+fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> Response {
+    let media = error_media_type(headers, uri);
+    let json = media.as_bytes().starts_with(b"application/json");
+    let body = match (status, json) {
+        (StatusCode::NOT_FOUND, true) => r#"{"status":404,"error":"Not Found"}"#,
+        (StatusCode::NOT_FOUND, false) => include_str!("../static/errors/404.html"),
+        (StatusCode::UNPROCESSABLE_ENTITY, true) => r#"{"status":422,"error":"Unprocessable Content"}"#,
+        (StatusCode::UNPROCESSABLE_ENTITY, false) => include_str!("../static/errors/422.html"),
+        _ => "",
+    };
+    (status, [(header::CONTENT_TYPE, media)], body).into_response()
+}
 fn path_record_id(value: &str) -> Result<i64, StatusCode> {
     let value = value.trim_start();
     let sign_len = usize::from(value.starts_with('+') || value.starts_with('-'));
@@ -3121,7 +3149,36 @@ async fn reject_banned_ip(
             Err(code) => return code.into_response(),
             _ => {}
         }
-        let path = request.uri().path();
+        let path = request.uri().path().to_string();
+        if matches!(path.as_str(), "/account" | "/account.1") && request.method() == Method::POST {
+            let content_type = request.headers().get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+            let (parts, body) = request.into_parts();
+            let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
+                Ok(bytes) => bytes,
+                Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            };
+            let tunneled = if content_type.starts_with("application/x-www-form-urlencoded") {
+                form_urlencoded::parse(&bytes).any(|(key, value)| key == "_method" && matches!(value.as_ref(), "patch" | "put"))
+            } else if content_type.starts_with("multipart/form-data") {
+                let marker = b"name=\"_method\"";
+                bytes.windows(marker.len()).position(|window| window == marker)
+                    .and_then(|start| {
+                        let following = &bytes[start + marker.len()..];
+                        let value_start = following.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+                        let value = &following[value_start..];
+                        let value_end = value.windows(2).position(|window| window == b"\r\n")?;
+                        Some(matches!(&value[..value_end], b"patch" | b"put"))
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if !tunneled {
+                return rails_error_response(StatusCode::NOT_FOUND, &parts.headers, &parts.uri);
+            }
+            request = Request::from_parts(parts, Body::from(bytes));
+        }
         let anonymous_direct_upload = path == "/rails/active_storage/direct_uploads"
             && request.method() == Method::POST
             && session_token(&s, request.headers()).is_none();
@@ -3187,7 +3244,7 @@ async fn reject_banned_ip(
                     false
                 };
                 if !form_valid {
-                    return (if anonymous_direct_upload { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::FORBIDDEN }).into_response();
+                    return if anonymous_direct_upload { StatusCode::UNPROCESSABLE_ENTITY.into_response() } else { invalid_authenticity_response(&parts.headers, &parts.uri) };
                 }
                 request = Request::from_parts(parts, Body::from(bytes));
             }
