@@ -59,13 +59,15 @@ def writer(port, cookie, csrf, image, count, seconds, result):
         connection.close()
 
 
-def measure(binary, port, cookie, csrf, image, clients, seconds, count, sockets=0, events_file=None):
+def measure(binary, port, cookie, csrf, image, clients, seconds, count, sockets=0, events_file=None, browser_channels=False):
     capture = None
     if sockets:
         capture_command = ["node", "bench/capture_message_appends.mjs", "--base", f"http://127.0.0.1:{port}",
                            "--cookie", cookie, "--room", "1", "--client-prefix", "image-mixed", "--first-id", "41",
                            "--sockets", str(sockets), "--messages", str(count),
                            "--timeout", str(round((seconds + 60) * 1000)), "--events-file", str(events_file)]
+        if browser_channels:
+            capture_command.extend(("--browser-channels", "1"))
         capture = subprocess.Popen(capture_command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         ready, _, _ = select.select([capture.stdout], [], [], 60)
         marker = capture.stdout.readline().strip() if ready else ""
@@ -140,11 +142,14 @@ def main():
     parser.add_argument("--write-rate", type=float, default=1)
     parser.add_argument("--campfire-workers", type=int, default=22)
     parser.add_argument("--sockets", type=int, default=0)
+    parser.add_argument("--browser-channels", action="store_true", help="subscribe each socket to the room's browser channels")
     parser.add_argument("--rustfire-first", action="store_true")
     parser.add_argument("--report", type=pathlib.Path)
     args = parser.parse_args()
     if args.clients < 1 or args.seconds < 2 or args.write_rate <= 0 or args.campfire_workers < 1 or args.sockets < 0:
         parser.error("clients, seconds, write rate, and workers must be positive; seconds >= 2; sockets >= 0")
+    if args.browser_channels and not args.sockets:
+        parser.error("--browser-channels requires --sockets")
     count = round(args.seconds * args.write_rate)
     if not 1 <= count <= 500:
         parser.error("use 1–500 JPEG writes per trial")
@@ -177,7 +182,8 @@ def main():
                 try:
                     first = fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")[2]
                     result = measure(binary, rust_port, "session_token=benchmark-session", "benchmark-csrf", image,
-                                     args.clients, args.seconds, count, args.sockets, temp / "rust-events.json" if args.sockets else None)
+                                     args.clients, args.seconds, count, args.sockets, temp / "rust-events.json" if args.sockets else None,
+                                     args.browser_channels)
                     final = fetch(rust_port, "session_token=benchmark-session", "/rooms/1/messages")[2]
                     check_final_page(final, count)
                     check_uploads(rust_db, temp / "rust-uploads", count, image, False)
@@ -193,7 +199,8 @@ def main():
                         cookie, csrf = login_campfire(camp_port)
                         first = fetch(camp_port, cookie, "/rooms/1/messages")[2]
                         result = measure(binary, camp_port, cookie, csrf, image, args.clients, args.seconds, count,
-                                         args.sockets, temp / "camp-events.json" if args.sockets else None)
+                                         args.sockets, temp / "camp-events.json" if args.sockets else None,
+                                         args.browser_channels)
                         final = fetch(camp_port, cookie, "/rooms/1/messages")[2]
                         check_final_page(final, count)
                         check_uploads(camp_db, REPOSITORY / "storage/files", count, image, True)
@@ -235,6 +242,7 @@ def main():
         print("PASS paired JPEG upload/read mix" if passed else "FAIL JPEG writer exceeded read interval")
         report = {"clients": args.clients, "seconds": args.seconds, "write_rate": args.write_rate,
             "writes": count, "image_bytes": len(image), "parsed_page_tokens": len(camp_tokens), "sockets": args.sockets,
+            "browser_channels": args.browser_channels,
             "campfire_workers": args.campfire_workers, "rustfire_first": args.rustfire_first,
             "rustfire": rust_result, "campfire": camp_result}
         if args.report:

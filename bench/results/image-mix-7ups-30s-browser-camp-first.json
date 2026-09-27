@@ -1,0 +1,92 @@
+{
+  "browser_channels": true,
+  "campfire": {
+    "reads": {
+      "clients": 64,
+      "errors": 0,
+      "median_ms": 36.92405,
+      "p95_ms": 134.943995,
+      "p99_ms": 199.464593,
+      "rps": 1339.9251382732095,
+      "seconds": 30.096457517,
+      "successes": 40327
+    },
+    "sockets": {
+      "bot_replies": 0,
+      "browser_channels": true,
+      "closed_early": 0,
+      "elapsed_ms": 37305,
+      "expected": 21000,
+      "messages": 210,
+      "missed": 0,
+      "read_expected": 5050,
+      "read_received": 5050,
+      "received": 21000,
+      "reply_expected": 0,
+      "reply_ids_match": true,
+      "reply_missed": 0,
+      "reply_received": 0,
+      "reply_sampled": false,
+      "sampled": false,
+      "sockets": 100,
+      "unexpected": 0,
+      "unread_received": 21000
+    },
+    "writes": {
+      "count": 210,
+      "deadline_met": false,
+      "elapsed_s": 36.77608479373157,
+      "max_ms": 571.0563734173775,
+      "p95_ms": 371.797907166183
+    }
+  },
+  "campfire_workers": 22,
+  "clients": 64,
+  "image_bytes": 505420,
+  "parsed_page_tokens": 7202,
+  "rustfire": {
+    "reads": {
+      "clients": 64,
+      "errors": 0,
+      "median_ms": 25.528498,
+      "p95_ms": 38.735636,
+      "p99_ms": 44.104613,
+      "rps": 2445.7432404301894,
+      "seconds": 30.021139908,
+      "successes": 73424
+    },
+    "sockets": {
+      "bot_replies": 0,
+      "browser_channels": true,
+      "closed_early": 0,
+      "elapsed_ms": 29651,
+      "expected": 21000,
+      "messages": 210,
+      "missed": 0,
+      "read_expected": 5050,
+      "read_received": 5050,
+      "received": 21000,
+      "reply_expected": 0,
+      "reply_ids_match": true,
+      "reply_missed": 0,
+      "reply_received": 0,
+      "reply_sampled": false,
+      "sampled": false,
+      "sockets": 100,
+      "unexpected": 0,
+      "unread_received": 21000
+    },
+    "writes": {
+      "count": 210,
+      "deadline_met": true,
+      "elapsed_s": 29.43735088594258,
+      "max_ms": 99.9566474929452,
+      "p95_ms": 92.1722250059247
+    }
+  },
+  "rustfire_first": false,
+  "seconds": 30.0,
+  "sockets": 100,
+  "write_rate": 7.0,
+  "writes": 210
+}
