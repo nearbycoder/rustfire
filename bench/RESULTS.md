@@ -68,6 +68,14 @@ This is a deterministic, seeded history rather than a production account. It exe
 
 The [raw paired report](results/large-import-message-reads.json) retains both orders and exact counts. This is a short, single-room, same-host read workload. It shows faster checked message-page reads at this database size, not maximum sustained capacity, mixed traffic, or a whole-app advantage at full feature parity. The full 200 HTML bodies differ in serialization and raw size despite matching parsed content.
 
+## Imported multi-room account graph
+
+`python bench/paired_import_graph.py` seeded a disposable pinned Campfire account with four rooms: open, private, direct, and a private room inaccessible to the signed-in administrator. It added five rich-text messages, a boost, two equally timestamped recent searches, visible and unread memberships, and one push subscription so the imported account retains Campfire's VAPID key. After offline import, the source and Rustfire had identical saved room, membership, message, boost, and search rows. The search result included the three reachable messages and excluded the hidden room's message.
+
+The parsed heads and bodies matched for the open room (**148 / 463 tokens**), private room (**148 / 781**), direct room (**148 / 466**), private room centered on its first message (**148 / 781**), and search page (**146 / 682**). The `user_sidebar` Turbo frame matched at **334 tokens**. An inaccessible room redirected to each app's absolute root URL. This probe exposed three Rustfire differences, now fixed: relative instead of absolute room-show redirects, reversed order for recent searches with equal timestamps, and a relative clear-history form action when recent searches exist. The existing search-history and room-redirect probes still pass.
+
+This checks one imported graph and the rendered administrator view. It does not establish every membership transition, multiple signed-in perspectives, full migration of arbitrary production data, or performance for this account shape.
+
 `python bench/paired_sidebar_fanout.py --sockets 100 --rooms 10 --campfire-workers 22` passed in both server orders using the release build. Each app created ten open rooms with 51 memberships each and delivered all 1,000 expected, source-shaped sidebar events with no missed or unexpected events. The sampled payloads matched byte for byte. The measured ten-request interval was 50 ms for Rustfire versus 640 ms for Campfire with Rustfire first, and 56 ms versus 664 ms with Campfire first. This short same-host burst checks room creation and delivery at 100 sockets; it does not establish sustained or maximum capacity.
 
 ## Paired QR code response parity

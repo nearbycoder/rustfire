@@ -4737,7 +4737,7 @@ async fn room_show(
                 return Err(StatusCode::NOT_FOUND);
             }
             user(&s, &headers)?;
-            return Ok(found_redirect("/"));
+            return Ok(found_redirect(&public_url(&headers, "/")));
         }
     };
     if let Some(response) = reject_html_format(&headers, &uri) {
@@ -4823,7 +4823,7 @@ async fn room_show_with_target(
     };
     let room = match room_for(&s, u.id, rid) {
         Ok(room) => room,
-        Err(StatusCode::NOT_FOUND) => return Ok(found_redirect("/")),
+        Err(StatusCode::NOT_FOUND) => return Ok(found_redirect(&public_url(&headers, "/"))),
         Err(error) => return Err(error),
     };
     let db = pool(&s)?;
@@ -7576,7 +7576,7 @@ async fn search_get(
         }
     }
     let mut recent_query = db
-        .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 10")
+        .prepare("SELECT query FROM searches WHERE user_id=?1 ORDER BY updated_at DESC,id ASC LIMIT 10")
         .map_err(db_err)?;
     let recent = recent_query
         .query_map([u.id], |r| r.get::<_, String>(0))
@@ -7604,7 +7604,7 @@ async fn search_get(
     let clear_button = if recent.is_empty() {
         String::new()
     } else {
-        format!("<form class=\"button_to\" method=\"post\" action=\"/searches/clear\"><input type=\"hidden\" name=\"_method\" value=\"delete\"><button class=\"btn searches__btn\" data-turbo-confirm=\"Are you sure you want to clear your recent searches?\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/broom-13d30a95.svg\"><span class=\"for-screen-reader\">Clear recent searches</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"></form>", esc(token))
+        format!("<form class=\"button_to\" method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"_method\" value=\"delete\"><button class=\"btn searches__btn\" data-turbo-confirm=\"Are you sure you want to clear your recent searches?\" type=\"submit\"><img aria-hidden=\"true\" src=\"/assets/broom-13d30a95.svg\"><span class=\"for-screen-reader\">Clear recent searches</span></button><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"></form>", esc(&public_url(&headers, "/searches/clear")), esc(token))
     };
     let back_room = cookie(&headers, "last_room")
         .and_then(|value| value.parse::<i64>().ok())
@@ -7644,7 +7644,7 @@ async fn search_post(
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
     tx.execute("INSERT INTO searches(user_id,query,created_at,updated_at) VALUES(?1,?2,?3,?3) ON CONFLICT(user_id,query) DO UPDATE SET updated_at=excluded.updated_at",params![u.id,query,now()]).map_err(db_err)?;
-    tx.execute("DELETE FROM searches WHERE user_id=?1 AND id NOT IN (SELECT id FROM searches WHERE user_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 10)", [u.id]).map_err(db_err)?;
+    tx.execute("DELETE FROM searches WHERE user_id=?1 AND id NOT IN (SELECT id FROM searches WHERE user_id=?1 ORDER BY updated_at DESC,id ASC LIMIT 10)", [u.id]).map_err(db_err)?;
     tx.commit().map_err(db_err)?;
     let encoded = form_urlencoded::Serializer::new(String::new())
         .append_pair("q", &query)
