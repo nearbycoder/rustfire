@@ -139,6 +139,29 @@ def csrf_from_page(page):
     return match.group(1).decode()
 
 
+def change_involvement(port, cookie, csrf, expected_next):
+    path = "/rooms/2/involvement"
+    frame_id = "involvement_rooms_closed_2"
+    status, _, frame = request(port, "GET", path, cookie, csrf, extra_headers={"Turbo-Frame": frame_id})
+    assert status == 200 and f"?involvement={expected_next}".encode() in frame, (status, frame[:300])
+    body = urllib.parse.urlencode({"_method": "put", "authenticity_token": csrf}).encode()
+    status, location, response = request(port, "POST", f"{path}?involvement={expected_next}", cookie, csrf,
+        body=body, content_type="application/x-www-form-urlencoded")
+    assert status == 302 and urllib.parse.urlsplit(location).path == path, (status, location, response[:300])
+    return frame
+
+
+def involvement_state(database):
+    with sqlite3.connect(database) as db:
+        return db.execute("SELECT involvement FROM memberships WHERE room_id=2 AND user_id=1").fetchone()[0]
+
+
+def sidebar_has_private_room(page):
+    tokens = section(page, "user_sidebar", normalize_times=True)
+    return any(event[0] == "start" and any(key == "href" and value == "/rooms/2"
+        for key, value in event[2]) for event in tokens)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campfire-repo", type=Path, default=Path("/tmp/once-campfire-reference"))
@@ -214,6 +237,32 @@ def main():
                         target_post, _ = capture(rust_port, cookie, csrf, AFTER_POST_CASES)
                         member_source_post, _ = capture(camp_port, member_cookie, member_csrf, AFTER_POST_CASES)
                         member_target_post, _ = capture(rust_port, member_cookie, member_csrf, AFTER_POST_CASES)
+                        visibility_results = {}
+                        posted_id = str(post_state(source_db)[0][0]).encode()
+                        for next_level, visible in (("nothing", True), ("invisible", False), ("mentions", True)):
+                            source_frame = change_involvement(camp_port, cookie, csrf, next_level)
+                            target_frame = change_involvement(rust_port, cookie, csrf_from_page(target["private"]), next_level)
+                            assert involvement_state(source_db) == involvement_state(target_db) == next_level
+                            options = dict(ignore_csrf_inputs=True)
+                            assert_equal(f"imported involvement {next_level}",
+                                section(source_frame, "involvement_rooms_closed_2", **options),
+                                section(target_frame, "involvement_rooms_closed_2", **options))
+                            source_stage, _ = capture(camp_port, cookie, csrf, AFTER_POST_CASES)
+                            target_stage, _ = capture(rust_port, cookie, csrf, AFTER_POST_CASES)
+                            assert sidebar_has_private_room(source_stage["sidebar"]) == visible
+                            assert sidebar_has_private_room(target_stage["sidebar"]) == visible
+                            compare(source_stage, target_stage, f"administrator {next_level}",
+                                [b"1", b"2", b"3", posted_id])
+                            member_source_stage, _ = capture(camp_port, member_cookie, member_csrf,
+                                {"sidebar": CASES["sidebar"]})
+                            member_target_stage, _ = capture(rust_port, member_cookie, member_csrf,
+                                {"sidebar": CASES["sidebar"]})
+                            sidebar_options = dict(normalize_times=True, normalize_avatar_paths=True,
+                                normalize_blob_paths=True, normalize_text_origins=True, ignore_csrf_inputs=True)
+                            assert_equal(f"member sidebar after administrator {next_level}",
+                                section(member_source_stage["sidebar"], "user_sidebar", **sidebar_options),
+                                section(member_target_stage["sidebar"], "user_sidebar", **sidebar_options))
+                            visibility_results[next_level] = (source_stage, target_stage)
                     except Exception:
                         log.flush()
                         log.seek(0)
@@ -236,6 +285,10 @@ def main():
                     ("rustfire-member-after-post", member_target_post)):
                     for name, body in documents.items():
                         (args.sample_dir / f"{label}-{name}.html").write_bytes(body)
+                for level, (source_stage, target_stage) in visibility_results.items():
+                    for label, documents in (("campfire", source_stage), ("rustfire", target_stage)):
+                        for name, body in documents.items():
+                            (args.sample_dir / f"{label}-{level}-{name}.html").write_bytes(body)
             compare(source, target, "administrator", [b"1", b"2", b"3"])
             compare(member_source, member_target, "member", [b"1", b"2", b"3", b"4"])
             source_state = post_state(source_db)
@@ -247,7 +300,7 @@ def main():
             posted_id = str(source_state[0][0]).encode()
             compare(source_post, target_post, "administrator after post", [b"1", b"2", b"3", posted_id])
             compare(member_source_post, member_target_post, "member after post", [b"1", b"2", b"3", b"4", posted_id])
-            print("PASS imported administrator and member pages, search, access, and post-import message write")
+            print("PASS imported administrator and member pages, post-import write, and involvement visibility cycle")
         finally:
             redis.terminate()
             redis.wait(timeout=10)
