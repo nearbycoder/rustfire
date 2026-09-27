@@ -1268,7 +1268,12 @@ fn analyze_image_and_thumbnail(
                             .and_then(|value| value.trim().parse::<i64>().ok())
                             .filter(|value| *value > 0)
                     };
-                    (dimension("width:"), dimension("height:"))
+                    let (width, height) = (dimension("width:"), dimension("height:"));
+                    if matches!(dimension("orientation:"), Some(5..=8)) {
+                        (height, width)
+                    } else {
+                        (width, height)
+                    }
                 })
                 .unwrap_or((None, None))
         });

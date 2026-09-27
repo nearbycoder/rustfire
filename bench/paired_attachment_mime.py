@@ -17,7 +17,7 @@ from paired_bot_admin import PNG, cleanup_campfire_uploads
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_link_preview import Presentation
 
-PREVIEW_CASES = {"gif-as-text", "webp-as-text", "tiff-as-text", "animated-gif-as-text", "oriented-jpeg-as-text"}
+PREVIEW_CASES = {"gif-as-text", "webp-as-text", "tiff-as-text", "animated-gif-as-text", "oriented-jpeg-as-text", "oriented-webp-as-text", "oriented-png-as-text"}
 
 
 def cases(large_mib=None, extended_dir=None):
@@ -47,7 +47,17 @@ def cases(large_mib=None, extended_dir=None):
         tiff = b"II" + struct.pack("<HIH", 42, 8, 1) + struct.pack("<HHII", 0x112, 3, 1, 6) + struct.pack("<I", 0)
         exif = b"Exif\x00\x00" + tiff
         oriented = jpeg[:2] + b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif + jpeg[2:]
+        oriented_path = extended_dir / "oriented.jpg"
+        oriented_path.write_bytes(oriented)
         fixtures.append(("oriented-jpeg-as-text", "oriented.jpg", "text/plain", oriented))
+        oriented_webp = extended_dir / "oriented.webp"
+        subprocess.run(["magick", str(oriented_path), str(oriented_webp)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixtures.append(("oriented-webp-as-text", oriented_webp.name, "text/plain", oriented_webp.read_bytes()))
+        oriented_png = extended_dir / "oriented.png"
+        subprocess.run(["magick", str(oriented_path), str(oriented_png)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixtures.append(("oriented-png-as-text", oriented_png.name, "text/plain", oriented_png.read_bytes()))
     if large_mib is not None:
         fixtures.append(("large-file", "large.bin", "application/octet-stream",
                          b"R" * (large_mib * 1024 * 1024 + 1)))
@@ -154,7 +164,7 @@ def main():
     parser.add_argument("--large-mib", type=int,
                         help="also upload a binary message attachment of this many MiB plus one byte")
     parser.add_argument("--extended-images", action="store_true",
-                        help="also upload generated GIF, WebP, and TIFF images labeled text/plain")
+                        help="also upload generated GIF, WebP, TIFF, animated GIF, and EXIF-oriented images labeled text/plain")
     args = parser.parse_args()
     if args.large_mib is not None and args.large_mib < 1:
         parser.error("--large-mib must be positive")
@@ -215,7 +225,7 @@ def main():
                 camp = presentation(camp_payload, case[0])
                 assert rust == camp, (case[0], next(((i,left,right) for i,(left,right) in enumerate(zip(rust,camp)) if left!=right), (len(rust),len(camp))))
             large_note = f", {args.large_mib} MiB plus one byte file" if args.large_mib else ""
-            image_note = ", generated GIF/WebP/TIFF, animated GIF, and EXIF-rotated JPEG" if args.extended_images else ""
+            image_note = ", generated GIF/WebP/TIFF, animated GIF, and EXIF-rotated JPEG/WebP/PNG" if args.extended_images else ""
             print(f"PASS paired message attachment types, saved original bytes, Turbo responses, malformed image failure{image_note}{large_note}")
         finally:
             redis.terminate()
