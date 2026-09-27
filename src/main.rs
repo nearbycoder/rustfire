@@ -4841,7 +4841,7 @@ async fn room_refresh(
         && !accept.contains("text/vnd.turbo-stream.html")
         && !accept.contains("*/*")
     {
-        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else { accept }));
+        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else if uri.path().ends_with(".html") { "" } else { accept }));
     }
     let since = q.since.as_deref().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
     let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
@@ -7522,7 +7522,7 @@ async fn account_users_index(
         && !accept.contains("text/vnd.turbo-stream.html")
         && !accept.contains("*/*")
     {
-        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else { accept }));
+        return Ok(not_acceptable_format(if uri.path().ends_with(".json") { "application/json" } else if uri.path().ends_with(".html") { "" } else { accept }));
     }
     let page = query
         .get("page")
@@ -11211,7 +11211,29 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     let format_negotiated = matches!(path,
         "/autocompletable/users" | "/webmanifest" | "/webmanifest.json" |
         "/service-worker" | "/service-worker.js");
+    let original_path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or(path);
+    let explicit_format = original_path.rsplit('/').next().unwrap_or("").rsplit_once('.')
+        .is_some_and(|(_, suffix)| matches!(suffix, "html" | "json" | "turbo_stream"));
+    let requested = req.headers().get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let first_format = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
+    let rejected_format = if !explicit_format && matches!(req.method(), &Method::GET | &Method::HEAD) {
+        match first_format {
+            "application/json" | "application/*" => Some("application/json"),
+            "text/vnd.turbo-stream.html" => Some(""),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let mut response = next.run(req).await;
+    if let Some(format) = rejected_format {
+        if response.status().is_success()
+            && response.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
+                .is_some_and(|content_type| content_type.starts_with("text/html"))
+        {
+            response = not_acceptable_format(format);
+        }
+    }
     if !response.status().is_informational()
         && !matches!(response.status(), StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED | StatusCode::NOT_ACCEPTABLE)
         && !response.headers().contains_key(header::CONTENT_ENCODING)

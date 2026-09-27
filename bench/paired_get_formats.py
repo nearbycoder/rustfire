@@ -4,6 +4,7 @@ Run after cargo build --release. Both applications use disposable databases,
 and Campfire runs from the pinned source in an isolated checkout and Redis.
 """
 
+import argparse
 import http.client
 import pathlib
 import sqlite3
@@ -29,21 +30,28 @@ PATHS = (
     "/messages/1/boosts/new", "/searches",
 )
 SUFFIXES = ("", ".html", ".json", ".turbo_stream")
+ACCEPTS = ("text/html", "application/json", "text/vnd.turbo-stream.html", "*/*")
 
 
-def request(port, path, cookie):
+def request(port, path, cookie, accept, compare_406_bodies):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     try:
-        connection.request("GET", path, headers={"Cookie": cookie, "Accept": "text/html"})
+        connection.request("GET", path, headers={"Cookie": cookie, "Accept": accept})
         response = connection.getresponse()
-        response.read()
+        body = response.read()
         content_type = (response.getheader("Content-Type") or "").split(";", 1)[0]
+        if compare_406_bodies:
+            return response.status, content_type, body if response.status == 406 else None
         return response.status, content_type
     finally:
         connection.close()
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--all-accepts", action="store_true", help="compare HTML, JSON, Turbo, and wildcard Accept headers")
+    parser.add_argument("--compare-406-bodies", action="store_true", help="also compare Not Acceptable response bodies")
+    args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-get-formats-") as scratch:
         temp = pathlib.Path(scratch)
@@ -58,10 +66,12 @@ def main():
         # Pinned Campfire routes /rooms/:id/settings to a missing controller and
         # returns 500 for all four formats, so it is not a usable parity case.
         paths = [path + suffix for path in PATHS for suffix in (SUFFIXES if path != "/" else ("",))]
+        accepts = ACCEPTS if args.all_accepts else ("text/html",)
+        cases = [(path, accept) for path in paths for accept in accepts]
         try:
             rust = start_server(rust_db, rust_port)
             try:
-                rust_responses = {path: request(rust_port, path, "session_token=benchmark-session") for path in paths}
+                rust_responses = {case: request(rust_port, case[0], "session_token=benchmark-session", case[1], args.compare_406_bodies) for case in cases}
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -69,17 +79,17 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, _ = login_campfire(camp_port)
-                    camp_responses = {path: request(camp_port, path, cookie) for path in paths}
+                    camp_responses = {case: request(camp_port, case[0], cookie, case[1], args.compare_406_bodies) for case in cases}
                 finally:
                     stop_server(camp)
         finally:
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    mismatches = [(path, rust_responses[path], camp_responses[path]) for path in paths if rust_responses[path] != camp_responses[path]]
-    for path, rust_response, camp_response in mismatches:
-        print(f"{path}: Rustfire {rust_response}, Campfire {camp_response}")
-    print(f"Matched {len(paths) - len(mismatches)}/{len(paths)} authenticated GET status/media-type cases")
+    mismatches = [(case, rust_responses[case], camp_responses[case]) for case in cases if rust_responses[case] != camp_responses[case]]
+    for (path, accept), rust_response, camp_response in mismatches:
+        print(f"{path} Accept={accept}: Rustfire {rust_response}, Campfire {camp_response}")
+    print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} authenticated GET status/media-type cases")
     if mismatches:
         raise AssertionError(f"{len(mismatches)} GET format cases differ")
 
