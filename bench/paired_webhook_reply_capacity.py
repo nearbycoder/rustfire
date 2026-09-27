@@ -10,6 +10,7 @@ import math
 import os
 import pathlib
 import queue
+import re
 import select
 import signal
 import sqlite3
@@ -24,6 +25,9 @@ from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_c
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_message_cache import resource_snapshot
 from paired_mention_webhook import bot_sgid, seed_bot
+from paired_message_mix import StreamWithoutCsrfInputs
+from paired_message_multi import stable_multi_stream_values
+from paired_turbo_fanout import check_message_times
 from paired_webhook_sustained import wait_for_queue
 
 
@@ -190,7 +194,7 @@ def sampled_trial(process_pids, *args):
     return report, signatures
 
 
-def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, sockets, redis_port=None):
+def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, sockets, reply_sample=None, redis_port=None):
     if not sockets:
         return sampled_trial(process_pids, app, port, database, cookie, csrf, posts, rate, timeout, redis_port)
     command = [
@@ -200,6 +204,8 @@ def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate,
         "--bot-replies", str(posts), "--timeout", str(round((timeout + posts / rate + 30) * 1000)),
         "--await-start", "1",
     ]
+    if reply_sample:
+        command.extend(("--reply-sample-file", str(reply_sample)))
     capture = subprocess.Popen(command, cwd=ROOT, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         ready, _, _ = select.select([capture.stdout], [], [], 60)
@@ -220,6 +226,31 @@ def captured_trial(process_pids, app, port, database, cookie, csrf, posts, rate,
         if capture.poll() is None:
             capture.kill()
             capture.communicate(timeout=5)
+
+
+def check_reply_samples(camp_file, rust_file):
+    parsed = []
+    for path in (camp_file, rust_file):
+        source = path.read_text()
+        matched = re.search(r"\bdata-message-id=['\"](\d+)['\"]", source)
+        assert matched, f"Missing reply message ID in {path}"
+        message_id = int(matched.group(1))
+        tags = StreamWithoutCsrfInputs()
+        tags.feed(source)
+        check_message_times(tags.attributes, path)
+        parsed.append((tags, message_id))
+    (camp, camp_id), (rust, rust_id) = parsed
+    assert camp.tags == rust.tags, "Bot reply append tags differ"
+    assert camp.attribute_keys == rust.attribute_keys, "Bot reply append attribute keys differ"
+
+    def stable_reply_values(attributes, message_id):
+        values = stable_multi_stream_values(attributes, message_id, 1)
+        return [(tag, tuple((key, re.sub(r"(?<=message_)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<client-id>", value) if value else value) for key, value in attrs)) for tag, attrs in values]
+
+    camp_values = stable_reply_values(camp.attributes, camp_id)
+    rust_values = stable_reply_values(rust.attributes, rust_id)
+    assert camp_values == rust_values, next(((index, left, right) for index, (left, right) in enumerate(zip(camp_values, rust_values)) if left != right), "Bot reply append attribute lengths differ")
+    assert camp.text == rust.text, "Bot reply append text differs"
 
 
 def main():
@@ -266,7 +297,7 @@ def main():
                 def rust_trial():
                     server = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"], "RUSTFIRE_DISABLE_WEBHOOKS": "0"})
                     try:
-                        return captured_trial((server.pid,) if args.resources else (), "rustfire", rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", args.posts, args.rate, args.timeout, args.sockets)
+                        return captured_trial((server.pid,) if args.resources else (), "rustfire", rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", args.posts, args.rate, args.timeout, args.sockets, temp / "rust-reply-append.html" if args.sockets else None)
                     finally:
                         stop_server(server)
 
@@ -281,7 +312,7 @@ def main():
                                 wait_for_worker(redis_port, worker)
                             cookie, csrf = login_campfire(camp_port)
                             process_pids = (camp.pid, redis.pid, *(worker.pid for worker in workers)) if args.resources else ()
-                            return captured_trial(process_pids, "campfire", camp_port, camp_db, cookie, csrf, args.posts, args.rate, args.timeout, args.sockets, redis_port)
+                            return captured_trial(process_pids, "campfire", camp_port, camp_db, cookie, csrf, args.posts, args.rate, args.timeout, args.sockets, temp / "camp-reply-append.html" if args.sockets else None, redis_port)
                         finally:
                             stop_server(camp)
                             for worker in workers:
@@ -293,6 +324,8 @@ def main():
                     (camp_report, camp_signatures), (rust_report, rust_signatures) = camp_trial(), rust_trial()
                 else:
                     (rust_report, rust_signatures), (camp_report, camp_signatures) = rust_trial(), camp_trial()
+                if args.sockets:
+                    check_reply_samples(temp / "camp-reply-append.html", temp / "rust-reply-append.html")
             finally:
                 redis.terminate()
                 redis.wait(timeout=10)
@@ -303,6 +336,8 @@ def main():
         thread.join(timeout=5)
     assert rust_signatures == camp_signatures, next(((left, right) for left, right in zip(rust_signatures, camp_signatures) if left != right), None)
     report = {"source_revision": REVISION, "posts": args.posts, "rate": args.rate, "reply_delay_ms": args.delay_ms, "campfire_resque_workers": args.campfire_workers, "campfire_first": args.campfire_first, "sockets": args.sockets, "payloads_match": True, "rustfire": rust_report, "campfire": camp_report}
+    if args.sockets:
+        report["reply_append_sample_matches"] = True
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

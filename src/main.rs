@@ -266,6 +266,8 @@ struct ChatMessage {
     mention_ids: Vec<i64>,
     creator_id: i64,
     creator_name: String,
+    #[serde(skip_serializing)]
+    creator_bio: Option<String>,
     creator_role: i64,
     #[serde(skip_serializing)]
     creator_updated_at: String,
@@ -4101,7 +4103,7 @@ fn message_list_with_room_name(
         })
         .transpose()?;
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height,u.bio FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT ?3"
     );
     let mut q = db.prepare(&sql).map_err(db_err)?;
     let rows = q
@@ -4119,7 +4121,7 @@ fn message_list_with_room_name(
 fn message_by_id(s: &AppState, rid: i64, mid: i64) -> Result<ChatMessage, StatusCode> {
     let db = pool(s)?;
     let mut message = db.query_row(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height,u.bio FROM messages m JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND m.id=?2",
         params![rid, mid],
         chat_message_from_row,
     )
@@ -4148,7 +4150,7 @@ fn messages_after_position(
     } else {
         i64::MIN
     };
-    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
+    let mut query = db.prepare("SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height,u.bio FROM messages m INDEXED BY idx_messages_room_created_ns JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND (m.created_at_ns,m.id)>(?2,?3) ORDER BY m.created_at_ns,m.id LIMIT ?4").map_err(db_err)?;
     let mut messages = query
         .query_map(
             params![rid, cursor_time, after, limit],
@@ -4169,6 +4171,7 @@ fn chat_message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
         mention_ids: Vec::new(),
         creator_id: r.get(2)?,
         creator_name: r.get(3)?,
+        creator_bio: r.get(17)?,
         creator_role: r.get(11)?,
         creator_updated_at: r.get(13)?,
         body: r.get(4)?,
@@ -4209,7 +4212,7 @@ fn messages_since(
         ("m.created_at_ns>?2", "ASC", "idx_messages_room_created_ns")
     };
     let sql = format!(
-        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
+        "SELECT m.id,m.room_id,m.creator_id,u.name,m.body,m.created_at,m.client_message_id,a.id,a.filename,a.content_type,(SELECT json_group_array(json_object('id',id,'booster_id',booster_id,'booster_name',booster_name,'booster_updated_at',booster_updated_at,'content',content)) FROM (SELECT b.id,b.booster_id,bu.name AS booster_name,bu.updated_at AS booster_updated_at,b.content FROM boosts b JOIN users bu ON bu.id=b.booster_id WHERE b.message_id=m.id ORDER BY b.id)),u.role,m.body_html,u.updated_at,m.updated_at,a.width,a.height,u.bio FROM messages m INDEXED BY {index} JOIN users u ON u.id=m.creator_id LEFT JOIN attachments a ON a.message_id=m.id WHERE m.room_id=?1 AND {predicate} ORDER BY m.created_at_ns {order},m.id {order} LIMIT 40"
     );
     let mut query = db.prepare(&sql).map_err(db_err)?;
     let rows = query
@@ -4544,6 +4547,12 @@ fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMa
         room_id = m.room_id
     );
     let creator_name = esc(&m.creator_name);
+    let creator_title = m
+        .creator_bio
+        .as_deref()
+        .filter(|bio| !bio.trim().is_empty())
+        .map(|bio| format!("{creator_name} – {}", esc(bio)))
+        .unwrap_or_else(|| creator_name.clone());
     let datetime = esc(&datetime);
     let message_classes = if all_emoji(&m.body) {
         "message message--emoji"
@@ -4552,13 +4561,13 @@ fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMa
     };
     let boost_area = boost_area_html(s, m);
     let metadata = format!(
-        "<div class='message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_name}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-time-target='time'></time></a><span class='message__room'><a href='/rooms/{room_id}/@{message_id}' target='_top' data-reply-target='link'>{room_name}</a></span></h3><div class='message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
+        "<div class='message__meta'><h3 class='message__heading'><span class='message__author' title='{creator_title}'><strong data-reply-target='author'>{creator_name}</strong></span><a class='message__permalink' target='_top' href='/rooms/{room_id}/@{message_id}'><time class='message__timestamp' datetime='{datetime}' data-local-time-target='time'></time></a><span class='message__room'><a href='/rooms/{room_id}/@{message_id}' target='_top' data-reply-target='link'>{room_name}</a></span></h3><div class='message__actions' data-controller='soft-keyboard'>{actions}</div></div>",
         room_id = m.room_id,
         message_id = m.id,
         room_name = esc(&m.room_name),
     );
     format!(
-        "<div id='message_{client_id}' class='{message_classes}' data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-time-target='date'></time></h2><figure class='avatar message__avatar'><a title='{creator_name}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message__body'><div class='message__body-content'>{metadata}{presentation}{boost_area}</div></div></turbo-frame></div>",
+        "<div id='message_{client_id}' class='{message_classes}' data-controller='reply' data-message-id='{message_id}' data-user-id='{creator_id}' data-message-timestamp='{created_ms}' data-message-updated-at='{updated_ms}' data-sort-value='{created_ms}' data-messages-target='message' data-search-results-target='message' data-refresh-room-target='message' data-reply-composer-outlet='#composer'><h2 class='message__day-separator'><time datetime='{datetime}' data-local-time-target='date'></time></h2><figure class='avatar message__avatar'><a title='{creator_title}' class='btn avatar' data-turbo-frame='_top' href='/users/{creator_id}'><img aria-hidden='true' src='{creator_avatar}' width='48' height='48'></a></figure><turbo-frame id='edit_message_{client_id}'><div class='message__body'><div class='message__body-content'>{metadata}{presentation}{boost_area}</div></div></turbo-frame></div>",
         message_id = m.id,
         creator_id = m.creator_id,
     )
@@ -5894,6 +5903,9 @@ fn insert_message(
         mention_ids: valid_mentions,
         creator_id: u.id,
         creator_name: u.name.clone(),
+        creator_bio: db
+            .query_row("SELECT bio FROM users WHERE id=?1", params![u.id], |r| r.get(0))
+            .map_err(db_err)?,
         creator_role: u.role,
         creator_updated_at: u.updated_at.clone(),
         body: plain,
@@ -12623,6 +12635,7 @@ mod tests {
             mention_ids: Vec::new(),
             creator_id: 1,
             creator_name: "Alex".into(),
+            creator_bio: None,
             creator_role: 0,
             creator_updated_at: String::new(),
             body: String::new(),

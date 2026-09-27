@@ -60,6 +60,7 @@ let replyReceived = 0;
 let unexpected = 0;
 let closedEarly = 0;
 let sampled = false;
+let replySampled = false;
 let unreadReceived = 0;
 let readReceived = 0;
 
@@ -154,6 +155,10 @@ function connect(index) {
           } else if (botReplyCount && stream && /\bdata-user-id=["']52["']/.test(html) && html.includes('Acknowledged') && Number.isSafeInteger(Number(messageId)) && Number(messageId) > 0 && !repliesSeen[index].has(messageId)) {
             repliesSeen[index].add(messageId);
             replyReceived++;
+            if (index === 0 && args['reply-sample-file'] && !replySampled) {
+              fs.writeFileSync(args['reply-sample-file'], html);
+              replySampled = true;
+            }
           } else {
             unexpected++;
           }
@@ -182,8 +187,8 @@ try {
   while ((received < expected || replyReceived < expectedReplies || browserChannels && unreadReceived < expected) && Date.now() - started < timeoutMs) await new Promise(resolve => setTimeout(resolve, 20));
   if (received === expected && replyReceived === expectedReplies && (!browserChannels || unreadReceived === expected)) await new Promise(resolve => setTimeout(resolve, 100));
   if (events) fs.writeFileSync(args['events-file'], JSON.stringify(events));
-  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, bot_replies: botReplyCount, reply_expected: expectedReplies, reply_received: replyReceived, reply_missed: expectedReplies - replyReceived, unexpected, closed_early: closedEarly, sampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
-  if (received !== expected || replyReceived !== expectedReplies || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (events && events.some(event => event === null))) process.exitCode = 1;
+  console.log(JSON.stringify({ sockets: socketCount, messages: messageCount, expected, received, missed: expected - received, bot_replies: botReplyCount, reply_expected: expectedReplies, reply_received: replyReceived, reply_missed: expectedReplies - replyReceived, unexpected, closed_early: closedEarly, sampled, reply_sampled: replySampled, browser_channels: browserChannels, unread_received: unreadReceived, read_expected: expectedRead, read_received: readReceived, elapsed_ms: Date.now() - started }));
+  if (received !== expected || replyReceived !== expectedReplies || browserChannels && (unreadReceived !== expected || readReceived !== expectedRead || readSeen.some(count => count < 1)) || unexpected || closedEarly || (args['sample-file'] && !sampled) || (args['reply-sample-file'] && !replySampled) || (events && events.some(event => event === null))) process.exitCode = 1;
 } finally {
   for (const socket of sockets) socket.destroy();
 }
