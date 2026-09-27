@@ -1212,3 +1212,18 @@ The same paired Chromium probe now installs a mock existing subscription before 
 ## Device-transfer route methods
 
 `python bench/paired_profile.py --requests 32` passed against pinned Campfire `91d294f` after extending the transfer probe. With each app's signed link opened in a fresh client, both accepted the source-shaped POST form with a PUT override, direct PATCH, and direct PUT; each redirected to the root and established a session that could open `/rooms/1`. The direct requests used the page's global CSRF token because Campfire's hidden form token is scoped to the form method. Rustfire previously returned 405 to direct PATCH. The profile, avatar, and mutation checks in the same run also passed. The 32-request read timings are a short regression sample with different HTML body sizes, not a feature-equivalent capacity claim.
+
+## Paired concurrent generic-file composer uploads
+
+`python bench/paired_upload_capacity.py` compared the pinned Campfire and current Rustfire release builds in both server orders at 4, 16, and 64 concurrent clients. Each client first posted one untimed 8 MiB binary message on its own persistent connection. The timed phase then posted three more files per client at 4 and 16 clients, or two at 64. Every POST returned 200 with a Turbo response containing its client ID. Both databases contained the expected messages, and every saved attachment had the same `application/octet-stream` type, declared byte size where available, and SHA-256 as the submitted file. Campfire used 22 Puma workers and isolated Redis; Rustfire used one process. The servers ran serially on the same 32-logical-CPU host as the Python load generator.
+
+| Clients | Server order | Rustfire uploads/s, p95 | Campfire uploads/s, p95 |
+| ---: | --- | ---: | ---: |
+| 4 | Campfire first | 481.40, 11.10 ms | 25.03, 174.66 ms |
+| 4 | Rustfire first | 516.43, 7.54 ms | 19.87, 284.42 ms |
+| 16 | Campfire first | 654.25, 32.43 ms | 42.55, 527.39 ms |
+| 16 | Rustfire first | 690.16, 32.89 ms | 39.79, 802.65 ms |
+| 64 | Campfire first | 642.21, 124.06 ms | 46.27, 1,696.75 ms |
+| 64 | Rustfire first | 618.07, 149.89 ms | 55.02, 1,660.24 ms |
+
+Rustfire completed **11.23–25.99×** as many checked generic-file uploads per second in these short trials. The six [raw reports](results/composer-upload-capacity-camp-first.json) ([4 reverse](results/composer-upload-capacity-rust-first.json), [16 first](results/composer-upload-capacity-16-camp-first.json), [16 reverse](results/composer-upload-capacity-16-rust-first.json), [64 first](results/composer-upload-capacity-64-camp-first.json), [64 reverse](results/composer-upload-capacity-64-rust-first.json)) retain elapsed times, sampled process-tree PSS, CPU seconds, and sample counts. The PSS sampler waits 50 ms between process-tree reads, which also take time; it produced only two or three readings for each Rustfire timed phase, so those samples cannot establish its actual peak memory. These are bursts lasting 0.02–0.21 seconds on Rustfire and 0.48–2.77 seconds on Campfire, not sustained-capacity tests. The load generator shared the host and assembled each multipart body in memory. No sockets subscribed during these trials; Campfire and Rustfire may perform different unobserved broadcast and background work. The comparison covers generic files and checked HTTP/storage outcomes, not image previews, push delivery, full response equality, or whole-application performance at complete parity.

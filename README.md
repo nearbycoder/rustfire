@@ -126,6 +126,8 @@ At 12,000 sockets, paired runs in both server orders delivered all 1.08 million 
 
 A separate 30-second JPEG upload/read trial with 100 signed room sockets, 64 checked readers, and 60 real multipart image uploads per app passed in both orders. Rustfire served 1.96–2.00× as many checked reads per second, had lower upload p95 in those socket runs, and both apps delivered all 6,000 expected image appends. The paired probe checked the final parsed page and original stored bytes; this remains a sampled workload rather than a full-app speed or capacity claim.
 
+A paired generic-file composer benchmark warmed each client connection, then checked every response and stored file in 8 MiB upload bursts at 4, 16, and 64 clients in both server orders. Rustfire completed 11.23–25.99× as many uploads per second in these short trials. No sockets subscribed, and the bursts do not establish sustained upload capacity or full side-effect parity; see `bench/RESULTS.md` for the measurements and limits.
+
 ## Checks
 
 ```sh

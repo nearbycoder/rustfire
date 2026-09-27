@@ -1,0 +1,35 @@
+{
+  "campfire": {
+    "baseline_pss_mib": 3150.67,
+    "cpu_seconds": 13.88,
+    "elapsed_s": 2.327,
+    "median_ms": 761.94,
+    "memory_samples": 18,
+    "p95_ms": 1660.24,
+    "payload_mib_per_s": 440.14,
+    "sampled_peak_pss_mib": 4572.97,
+    "sampled_pss_growth_mib": 1422.3,
+    "uploads": 128,
+    "uploads_per_s": 55.02,
+    "warmup_uploads": 64
+  },
+  "campfire_workers": 22,
+  "clients": 64,
+  "file_bytes": 8388608,
+  "rustfire": {
+    "baseline_pss_mib": 57.28,
+    "cpu_seconds": 0.74,
+    "elapsed_s": 0.207,
+    "median_ms": 43.48,
+    "memory_samples": 3,
+    "p95_ms": 149.89,
+    "payload_mib_per_s": 4944.56,
+    "sampled_peak_pss_mib": 84.75,
+    "sampled_pss_growth_mib": 27.48,
+    "uploads": 128,
+    "uploads_per_s": 618.07,
+    "warmup_uploads": 64
+  },
+  "rustfire_first": true,
+  "uploads_per_client": 2
+}
