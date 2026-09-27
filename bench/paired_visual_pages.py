@@ -25,12 +25,15 @@ PAGES = (
     ("member", "/users/2", "body"),
     ("bots", "/account/bots", "body"),
     ("room-edit", "/rooms/opens/1/edit", "body"),
+    ("room-new-open", "/rooms/opens/new", "body"),
+    ("room-new-private", "/rooms/closeds/new", "body"),
+    ("ping-new", "/rooms/directs/new", "body"),
     ("push-subscriptions", "/users/me/push_subscriptions", "body"),
 )
 
 
-def capture(session, port, directory, name):
-    browser(session, "set", "viewport", "1280", "800")
+def capture(session, port, directory, name, width, height):
+    browser(session, "set", "viewport", str(width), str(height))
     browser(session, "open", f"http://127.0.0.1:{port}/session/new")
     browser(session, "fill", 'input[name="email_address"]', "benchmark@example.invalid")
     browser(session, "fill", 'input[name="password"]', "benchmark-password")
@@ -49,7 +52,11 @@ def capture(session, port, directory, name):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=800)
+    parser.add_argument("--max-difference", type=float, default=0.002)
     args = parser.parse_args()
+    assert args.width > 0 and args.height > 0 and 0 <= args.max_difference <= 1
     assert shutil.which("agent-browser"), "agent-browser CLI is required"
     assert shutil.which("magick"), "ImageMagick is required"
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
@@ -80,8 +87,8 @@ def main():
                                             cwd=REPOSITORY, env=environment, stdout=log, stderr=log)
                     try:
                         wait_for_server(camp_port, camp)
-                        capture(sessions[0], rust_port, args.output_dir, "rustfire")
-                        capture(sessions[1], camp_port, args.output_dir, "campfire")
+                        capture(sessions[0], rust_port, args.output_dir, "rustfire", args.width, args.height)
+                        capture(sessions[1], camp_port, args.output_dir, "campfire", args.width, args.height)
                     finally:
                         stop_server(camp)
             finally:
@@ -103,8 +110,8 @@ def main():
         matched = re.search(r"\(([\d.]+)\)", compared.stderr)
         assert matched, compared.stderr
         differences[label] = float(matched.group(1))
-        assert differences[label] < 0.002, (label, differences[label])
-    print(f"PASS {len(PAGES)} paired Chromium pages at 1280x800: {differences}")
+    print(f"{len(PAGES)} paired Chromium pages at {args.width}x{args.height}: {differences}")
+    assert all(difference < args.max_difference for difference in differences.values()), differences
 
 
 if __name__ == "__main__":

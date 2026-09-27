@@ -2261,7 +2261,10 @@ fn csrf_forms(html: &str, token: &str) -> String {
         let tag = &rest[..=end];
         out.push_str(tag);
         rest = &rest[end + 1..];
-        if tag.contains("method='post'") || tag.contains("method=\"post\"") {
+        let form_body = rest.split_once("</form>").map_or(rest, |(body, _)| body);
+        let has_token = form_body.contains("name='authenticity_token'")
+            || form_body.contains("name=\"authenticity_token\"");
+        if (tag.contains("method='post'") || tag.contains("method=\"post\"")) && !has_token {
             if rest.starts_with("<input type='hidden' name='_method'") {
                 if let Some(method_end) = tag_end(rest) {
                     out.push_str(&rest[..=method_end]);
@@ -12878,6 +12881,16 @@ mod tests {
         let input = "<form class=\"center\" enctype=\"multipart/form-data\" action=\"/first_run\" method=\"post\"><input name=\"user[name]\"></form>";
         let output = super::csrf_forms(input, "signup-token");
         assert!(output.contains("method=\"post\"><input type='hidden' name='authenticity_token' value='signup-token'>"));
+    }
+
+    #[test]
+    fn csrf_forms_preserves_an_existing_token() {
+        let input = "<form method=\"post\"><input type=\"hidden\" name=\"authenticity_token\" value=\"existing\"></form><form method='post'><input name='message'></form>";
+        let output = super::csrf_forms(input, "new-token");
+        assert_eq!(output.matches("name=\"authenticity_token\"").count(), 1);
+        assert_eq!(output.matches("name='authenticity_token'").count(), 1);
+        assert!(output.contains("value=\"existing\""));
+        assert!(output.contains("<form method='post'><input type='hidden' name='authenticity_token' value='new-token'>"));
     }
 
     #[test]
