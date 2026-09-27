@@ -1361,6 +1361,8 @@ The expanded `python bench/paired_route_methods.py` passed 43 route and method c
 
 ## GET format negotiation and QR suffixes
 
+`python bench/paired_turbo_native_routes.py` now passes 150 paired GET/HEAD responses for the three Hotwire Native navigation routes. The pinned source returns the same short HTML body even for JSON, Turbo, XML, unknown suffixes, and `?format=json`; Rustfire now does too. The probe compares body SHA-256, media type, Vary, cache, security, and version headers for signed-in and anonymous clients. This checks the HTTP routes, not a native mobile client's navigation behavior.
+
 `python bench/paired_format_routes.py` passed 19 GET cases against pinned Campfire `91d294f`. The probe checks status and response media type for message, room, user, account, and search pages requested as `.json`, `.turbo_stream`, `.html`, or with an `Accept: application/json` header. The sampled HTML-only pages return 406 for unsupported formats in both apps. Format-suffixed QR URLs return SVG with byte-identical bodies, and the manifest and service worker retain their media types. Rustfire previously exposed JSON on HTML-only message reads, returned 200 or 404 on selected unsupported formats, and rejected QR URLs with suffixes. This covers the listed GETs and one seeded message, not the full Rails route-format matrix or all `Accept` combinations.
 
 ## Message-create format negotiation

@@ -4921,6 +4921,10 @@ fn requested_format(uri: &Uri) -> Option<std::borrow::Cow<'_, str>> {
             .map(|(_, value)| value)
     })
 }
+fn native_navigation_path(path: &str) -> bool {
+    let base = path.split_once('.').map_or(path, |(base, _)| base);
+    matches!(base, "/recede_historical_location" | "/resume_historical_location" | "/refresh_historical_location")
+}
 fn reject_html_format(headers: &HeaderMap, uri: &Uri) -> Option<Response> {
     if let Some(format) = requested_format(uri) {
         return (format != "html").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
@@ -11317,18 +11321,20 @@ fn generate_join_code() -> Result<String, StatusCode> {
 }
 async fn campfire_response_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path();
+    let native_navigation = native_navigation_path(path);
     let asset = path.starts_with("/assets/") || path.starts_with("/static/");
     let active_storage = path.starts_with("/rails/active_storage/");
     let application_controller = !asset && path != "/up" && path != "/cable"
-        && !active_storage;
-    let format_negotiated = matches!(path,
-        "/autocompletable/users" | "/webmanifest" | "/webmanifest.json" |
-        "/service-worker" | "/service-worker.js");
+        && !active_storage && !native_navigation;
     let original_uri = req.extensions().get::<OriginalUri>().map(|uri| &uri.0).unwrap_or_else(|| req.uri());
     let explicit_format = requested_format(original_uri);
+    let format_negotiated = matches!(path,
+        "/autocompletable/users" | "/webmanifest" | "/webmanifest.json" |
+        "/service-worker" | "/service-worker.js")
+        || (native_navigation && explicit_format.is_none());
     let requested = req.headers().get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let first_format = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
-    let rejected_format = if matches!(req.method(), &Method::GET | &Method::HEAD) {
+    let rejected_format = if !native_navigation && matches!(req.method(), &Method::GET | &Method::HEAD) {
         match explicit_format.as_deref() {
             Some("html") => None,
             Some("json") => Some("application/json"),
@@ -11345,6 +11351,9 @@ async fn campfire_response_headers(req: Request, next: Next) -> Response {
     };
     let forbidden_page = application_controller && matches!(req.method(), &Method::GET | &Method::HEAD);
     let mut response = next.run(req).await;
+    if native_navigation && response.status().is_success() {
+        response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=0, private, must-revalidate"));
+    }
     if let Some(format) = rejected_format {
         if response.status().is_success()
             && response.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
@@ -11981,6 +11990,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let core_router = Router::new()
         .route("/", get(root))
         .route("/up", any(|| async { StatusCode::NOT_FOUND }).get(health))
+        .route("/recede_historical_location", get(|| async { Html("Going back…") }))
+        .route("/resume_historical_location", get(|| async { Html("Staying put…") }))
+        .route("/refresh_historical_location", get(|| async { Html("Refreshing…") }))
         .route("/webmanifest", get(webmanifest))
         .route("/webmanifest.json", get(webmanifest))
         .route("/service-worker", get(service_worker))
@@ -12289,7 +12301,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some((base, suffix)) = path.rsplit_once('.') else {
                 return Ok::<Response, std::convert::Infallible>(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
             };
-            if !matches!(suffix, "html" | "json" | "turbo_stream")
+            let native_navigation = native_navigation_path(base);
+            if (!native_navigation && !matches!(suffix, "html" | "json" | "turbo_stream"))
                 || !matches!(request.method(), &Method::GET | &Method::HEAD)
             {
                 return Ok(format_router.oneshot(request).await.unwrap_or_else(|never| match never {}));
@@ -12308,11 +12321,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(response);
             }
             let binary = base == "/account/logo" || base.ends_with("/avatar");
-            let rejected = match suffix {
-                "html" => base == "/account/users" || base.ends_with("/refresh") || base == "/autocompletable/users",
-                "json" => !binary && base != "/autocompletable/users",
-                "turbo_stream" => !binary && !base.ends_with("/refresh"),
-                _ => false,
+            let rejected = if native_navigation {
+                false
+            } else {
+                match suffix {
+                    "html" => base == "/account/users" || base.ends_with("/refresh") || base == "/autocompletable/users",
+                    "json" => !binary && base != "/autocompletable/users",
+                    "turbo_stream" => !binary && !base.ends_with("/refresh"),
+                    _ => false,
+                }
             };
             if rejected {
                 return Ok(not_acceptable_format(if suffix == "json" { "application/json" } else { "" }));
