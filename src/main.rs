@@ -3528,13 +3528,14 @@ async fn room_namespace_index(State(s): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 struct SignupSubmission {
-    name: String,
-    email: String,
-    password: String,
+    name: Option<String>,
+    email: Option<String>,
+    password: Option<String>,
     avatar: Option<(Vec<u8>, String)>,
 }
 async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request) -> Result<SignupSubmission, StatusCode> {
     let mut avatar = None;
+    let mut saw_user = false;
     let values = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -3551,6 +3552,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
             .map_err(|_| StatusCode::BAD_REQUEST)?
         {
             let name = field.name().unwrap_or("").to_string();
+            saw_user |= name.starts_with("user[");
             if name == "user[avatar]" {
                 let content_type = field
                     .content_type()
@@ -3569,11 +3571,16 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
         let RawForm(raw) = RawForm::from_request(req, s)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        fields(&raw).0
+        let values = fields(&raw).0;
+        saw_user = values.keys().any(|name| name.starts_with("user["));
+        values
     };
-    let name = values.get("user[name]").ok_or(StatusCode::BAD_REQUEST)?.to_string();
-    let email = values.get("user[email_address]").ok_or(StatusCode::BAD_REQUEST)?.to_string();
-    let password = values.get("user[password]").ok_or(StatusCode::BAD_REQUEST)?.to_string();
+    if !saw_user {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let name = values.get("user[name]").cloned();
+    let email = values.get("user[email_address]").cloned();
+    let password = values.get("user[password]").cloned();
     Ok(SignupSubmission { name, email, password, avatar })
 }
 async fn first_run_get(State(s): State<Arc<AppState>>) -> AppResult {
@@ -3617,8 +3624,23 @@ async fn first_run_post(
     if !first_run_needed(&s)? {
         return Ok(found_redirect("/"));
     }
+    let uri = req.uri().clone();
     let SignupSubmission { name, email, password, avatar } = signup_submission(&s, &headers, req).await?;
-    let pw = hash(&password, DEFAULT_COST).map_err(db_err)?;
+    let Some(name) = name else {
+        let mut db = pool(&s)?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts)", [], |row| row.get(0)).map_err(db_err)?;
+        if existing {
+            return Ok(found_redirect("/"));
+        }
+        let t = now();
+        tx.execute("INSERT INTO accounts(id,name,join_code,created_at,updated_at) VALUES(1,'Campfire',?1,?2,?2)",
+            params![generate_join_code()?, t]).map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    };
+    let pw = password.as_deref().filter(|value| !value.is_empty())
+        .map(|value| hash(value, DEFAULT_COST).map_err(db_err)).transpose()?;
     let staged_avatar = if let Some((bytes, content_type)) = avatar {
         let dir = std::path::PathBuf::from(
             env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into()),
@@ -8601,31 +8623,38 @@ async fn join_post(
         return Err(StatusCode::NOT_FOUND);
     }
     drop(db);
+    let uri = req.uri().clone();
     let SignupSubmission { name, email, password, avatar } = signup_submission(&s, &headers, req).await?;
+    let Some(name) = name else {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    };
     let mut db = pool(&s)?;
-    let existing: bool = db
-        .query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [&email], |row| row.get(0))
-        .map_err(db_err)?;
+    let existing: bool = if let Some(email) = &email {
+        db.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [email], |row| row.get(0))
+            .map_err(db_err)?
+    } else { false };
     if existing {
         let encoded = form_urlencoded::Serializer::new(String::new())
-            .append_pair("email_address", &email)
+            .append_pair("email_address", email.as_deref().unwrap_or(""))
             .finish();
         return Ok(found_redirect(&format!("/session/new?{encoded}")));
     }
     let t = now();
-    let pw = hash(&password, DEFAULT_COST).map_err(db_err)?;
+    let pw = password.as_deref().filter(|value| !value.is_empty())
+        .map(|value| hash(value, DEFAULT_COST).map_err(db_err)).transpose()?;
     let tx = db.transaction().map_err(db_err)?;
     if let Err(error) = tx.execute(
         "INSERT INTO users(id,name,email_address,password_digest,role,status,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,?2,?3,0,0,?4,?4)",
         params![name, email, pw, t],
     ) {
         drop(tx);
-        let duplicate: bool = db
-            .query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [&email], |row| row.get(0))
-            .map_err(db_err)?;
+        let duplicate: bool = if let Some(email) = &email {
+            db.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE email_address=?1)", [email], |row| row.get(0))
+                .map_err(db_err)?
+        } else { false };
         if duplicate {
             let encoded = form_urlencoded::Serializer::new(String::new())
-                .append_pair("email_address", &email)
+                .append_pair("email_address", email.as_deref().unwrap_or(""))
                 .finish();
             return Ok(found_redirect(&format!("/session/new?{encoded}")));
         }
