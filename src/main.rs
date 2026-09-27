@@ -12,6 +12,7 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 mod notification_help;
+mod vips;
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
@@ -1240,22 +1241,30 @@ fn analyze_image_and_thumbnail(
         let nonce = Uuid::new_v4();
         let stage = cache.join(format!("{stored}-{kind}-{nonce}.v"));
         let temporary = cache.join(format!("{stored}-{kind}-{nonce}.{format}"));
-        let resized = std::process::Command::new("vips")
-            .arg("thumbnail")
-            .arg(input)
-            .arg(&stage)
-            .args(["1200", "--height", "800", "--size", "down"])
-            .output()
-            .is_ok_and(|result| result.status.success());
-        let sharpened = resized
-            && std::process::Command::new("vips")
-                .arg("conv")
+        let sharpened = if vips::thumbnail_and_sharpen(
+            input,
+            &temporary,
+            std::path::Path::new("static/vips-sharpen-mask.txt"),
+        ) {
+            true
+        } else {
+            let resized = std::process::Command::new("vips")
+                .arg("thumbnail")
+                .arg(input)
                 .arg(&stage)
-                .arg(&temporary)
-                .arg("static/vips-sharpen-mask.txt")
-                .args(["--precision", "integer"])
+                .args(["1200", "--height", "800", "--size", "down"])
                 .output()
                 .is_ok_and(|result| result.status.success());
+            resized
+                && std::process::Command::new("vips")
+                    .arg("conv")
+                    .arg(&stage)
+                    .arg(&temporary)
+                    .arg("static/vips-sharpen-mask.txt")
+                    .args(["--precision", "integer"])
+                    .output()
+                    .is_ok_and(|result| result.status.success())
+        };
         let _ = std::fs::remove_file(&stage);
         if sharpened {
             if std::fs::rename(&temporary, &output).is_err() {

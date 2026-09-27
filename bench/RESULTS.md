@@ -1119,6 +1119,26 @@ A further **100 JPEG uploads in 20 seconds** (`--write-rate 5`) exposed another 
 
 Every trial saved all 100 byte-matching JPEGs, matched the final parsed page and 100 sampled append structures, delivered **10,000/10,000** socket events per app, and had zero checked read errors. The [before Campfire-first](results/image-mix-5ups-camp-first.json), [before Rustfire-first](results/image-mix-5ups-rust-first.json), [after Campfire-first](results/image-mix-5ups-camp-first-after-jpeg-header.json), and [after Rustfire-first](results/image-mix-5ups-rust-first-after-jpeg-header.json) reports retain the measurements. The optimization did not establish a reliable 5-upload/s capacity point; image processing under concurrent reads remains a bottleneck.
 
+Rustfire then moved thumbnailing and sharpening into one in-process libvips pipeline, retaining the two-process path as a failure fallback. A direct comparison matched the former CLI output byte for byte for JPEG, PNG, and WebP fixtures; the paired room-shell and MIME probes passed. With the same 64 readers, 100 sockets, and JPEG fixture, the 5-upload/s workload passed in both server orders. At 6 uploads/s, Rustfire met the 20-second writer deadline in both orders while Campfire missed it in both. The strict paired harness reports failure at 6/s because of Campfire's writer deadline, after checking every original file and event:
+
+| Rate / order | Rustfire writer finish / p95 | Campfire writer finish / p95 | Rustfire reads/s | Campfire reads/s |
+| --- | ---: | ---: | ---: | ---: |
+| 5/s, Campfire first | 19.39 s / 94.76 ms | 19.45 s / 232.97 ms | 2,559 | 1,403 |
+| 5/s, Rustfire first | 19.38 s / 90.70 ms | 19.51 s / 306.42 ms | 2,681 | 1,404 |
+| 6/s, Campfire first | 19.42 s / 97.30 ms | 22.19 s / 328.47 ms | 2,521 | 1,478 |
+| 6/s, Rustfire first | 19.42 s / 91.35 ms | 20.26 s / 244.02 ms | 2,715 | 1,388 |
+
+Every run had zero checked read errors, saved all 100 or 120 byte-matching JPEGs, matched the final 7,202 parsed page tokens and every first-socket sampled append, and delivered all 10,000 or 12,000 expected socket events per app without misses, duplicates, or early closes. The [5/s Campfire-first](results/image-mix-5ups-camp-first-inprocess.json), [5/s Rustfire-first](results/image-mix-5ups-rust-first-inprocess.json), [6/s Campfire-first](results/image-mix-6ups-camp-first-inprocess.json), and [6/s Rustfire-first](results/image-mix-6ups-rust-first-inprocess.json) reports retain the exact measurements. Socket setup was outside the measured interval. The two apps and clients shared one host and ran serially. These short trials establish a capacity advantage only for this sampled JPEG upload/read/socket workload; they do not measure hours-long stability, maximum capacity, other image formats under load, or whole-app parity.
+
+The same fixture ran for **60 seconds** at 6 and 7 JPEG uploads/s. At 6/s, both apps completed all 360 writes within 60 seconds; Rustfire's upload p95 was 92.05 ms versus Campfire's 183.00 ms, and its 2,559 checked reads/s exceeded Campfire's 1,412. Raising the rate to 7/s produced a repeatable deadline separation:
+
+| Server order at 7/s | Rustfire writer finish / p95 | Campfire writer finish / p95 | Rustfire reads/s | Campfire reads/s |
+| --- | ---: | ---: | ---: | ---: |
+| Campfire first | 59.46 s / 125.98 ms | 63.34 s / 200.61 ms | 2,371 | 1,385 |
+| Rustfire first | 59.43 s / 94.00 ms | 69.22 s / 325.76 ms | 2,505 | 1,441 |
+
+All three 60-second trials saved every original byte, matched the final parsed page and every captured first-socket append, delivered **36,000/36,000** or **42,000/42,000** expected socket events per app, and had zero checked read errors. The 7/s paired commands reported failure only because Campfire's writer exceeded the 60-second interval. The [6/s Campfire-first](results/image-mix-6ups-60s-camp-first-inprocess.json), [7/s Campfire-first](results/image-mix-7ups-60s-camp-first-inprocess.json), and [7/s Rustfire-first](results/image-mix-7ups-60s-rust-first-inprocess.json) reports retain the measurements. This demonstrates higher sampled capacity for the 60-second JPEG upload/read/socket workload, while connection setup, memory, other media, longer steady-state operation, and full-app feature parity remain outside this measurement.
+
 ## Four-room rich-text mix with browser-channel sockets
 
 `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 3 --sockets-per-room 100 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources` passed in both server orders. The four authenticated writers each posted 90 messages, cycling bold links, safe classes and rejected URLs, lists, time tags, and rejected images. Each app saved all 360 posts, delivered all **36,000/36,000** expected message appends and unread events, and delivered all **5,200/5,200** presence read events during socket setup. The probe compared 1,440 paired captured append structures and their text, initial parsed message pages, saved authors and bodies, final latest-40 IDs, and every timed page read's status, content type, and message count. There were no checked read errors, missing or unexpected events, or early socket closes; every writer met the 30-second deadline.

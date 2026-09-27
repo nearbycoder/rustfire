@@ -1,0 +1,79 @@
+{
+  "campfire": {
+    "reads": {
+      "clients": 64,
+      "errors": 0,
+      "median_ms": 38.691963,
+      "p95_ms": 96.49681,
+      "p99_ms": 124.946851,
+      "rps": 1385.1260252579889,
+      "seconds": 60.034248497,
+      "successes": 83155
+    },
+    "sockets": {
+      "browser_channels": false,
+      "closed_early": 0,
+      "elapsed_ms": 63797,
+      "expected": 42000,
+      "messages": 420,
+      "missed": 0,
+      "read_expected": 0,
+      "read_received": 0,
+      "received": 42000,
+      "sampled": false,
+      "sockets": 100,
+      "unexpected": 0,
+      "unread_received": 0
+    },
+    "writes": {
+      "count": 420,
+      "deadline_met": false,
+      "elapsed_s": 63.336509014479816,
+      "max_ms": 560.0241934880614,
+      "p95_ms": 200.61175618320704
+    }
+  },
+  "campfire_workers": 22,
+  "clients": 64,
+  "image_bytes": 505420,
+  "parsed_page_tokens": 7202,
+  "rustfire": {
+    "reads": {
+      "clients": 64,
+      "errors": 0,
+      "median_ms": 26.072187,
+      "p95_ms": 41.095235,
+      "p99_ms": 49.962836,
+      "rps": 2370.9345770608597,
+      "seconds": 60.021057256,
+      "successes": 142306
+    },
+    "sockets": {
+      "browser_channels": false,
+      "closed_early": 0,
+      "elapsed_ms": 59670,
+      "expected": 42000,
+      "messages": 420,
+      "missed": 0,
+      "read_expected": 0,
+      "read_received": 0,
+      "received": 42000,
+      "sampled": false,
+      "sockets": 100,
+      "unexpected": 0,
+      "unread_received": 0
+    },
+    "writes": {
+      "count": 420,
+      "deadline_met": true,
+      "elapsed_s": 59.45573878195137,
+      "max_ms": 170.16360815614462,
+      "p95_ms": 125.98131876438856
+    }
+  },
+  "rustfire_first": false,
+  "seconds": 60.0,
+  "sockets": 100,
+  "write_rate": 7.0,
+  "writes": 420
+}

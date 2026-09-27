@@ -1,5 +1,5 @@
 FROM rust:1.97-slim-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends cmake make pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends cmake make pkg-config libssl-dev libvips-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
