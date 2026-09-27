@@ -1078,8 +1078,8 @@ def main():
             assert code == 200
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT body FROM messages WHERE id=?",(edit_id,)).fetchone() == ("Edited by form",)
             assert "<strong>Edited by form</strong>" in sqlite3.connect(f"{tmp}/test.db").execute("SELECT body_html FROM messages WHERE id=?",(edit_id,)).fetchone()[0]
-            code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"delete"}, method="POST")
-            assert code in (200, 204)
+            code, _, _ = request(admin, base, f"/rooms/1/messages/{edit_id}", {"_method":"delete"}, method="POST", headers={"Accept":"text/vnd.turbo-stream.html"})
+            assert code == 200
             assert sqlite3.connect(f"{tmp}/test.db").execute("SELECT count(*) FROM messages WHERE id=?",(edit_id,)).fetchone() == (0,)
             print("PASS setup, messages, attachments, boosts, search, private rooms, pings, account administration, bots, transfer, bans, direct-room index migration")
         finally:

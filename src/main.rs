@@ -6523,16 +6523,19 @@ async fn message_post_override(
         Some("patch" | "put") => {
             message_update(State(s), headers, OriginalUri(uri), Path((room_id, message_id)), Form(form)).await
         }
-        Some("delete") => message_delete(State(s), headers, Path((path_record_id(&room_id)?, path_record_id(&message_id)?))).await,
+        Some("delete") => message_delete(State(s), headers, OriginalUri(uri), Path((room_id, message_id))).await,
         _ => Err(StatusCode::METHOD_NOT_ALLOWED),
     }
 }
 async fn message_delete(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, mid)): Path<(i64, i64)>,
+    OriginalUri(uri): OriginalUri,
+    Path((room_id, message_id)): Path<(String, String)>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
+    let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
     let target: Option<(i64, String)> = db
@@ -6567,19 +6570,15 @@ async fn message_delete(
         room_id: rid,
         payload: json!({"type":"message_deleted","room_id":rid,"id":mid,"client_message_id":client_message_id}).to_string(),
     });
-    if headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .contains("turbo-stream")
-    {
-        Ok(Html(format!(
-            "<turbo-stream action='remove' target='message_{}'></turbo-stream>",
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let suffix = uri.path().rsplit('/').next().unwrap_or("").rsplit_once('.').map(|(_, format)| format);
+    if suffix == Some("turbo_stream") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html")) {
+        Ok((StatusCode::OK, [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html; charset=utf-8")], format!(
+            "<turbo-stream action=\"remove\" target=\"message_{}\"></turbo-stream>\n",
             esc(&client_message_id)
-        ))
-        .into_response())
+        )).into_response())
     } else {
-        Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+        Ok(not_acceptable_format(if suffix == Some("json") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("application/json")) { "application/json" } else { "" }))
     }
 }
 fn new_room_translation_button() -> String {

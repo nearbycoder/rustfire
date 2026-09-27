@@ -847,7 +847,7 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     const deleteForm=e.target.closest('form[id^="delete_form_message_"]');
     if(deleteForm){
       e.preventDefault();
-      const response=await fetch(deleteForm.action,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken}});
+      const response=await fetch(deleteForm.action,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken,Accept:'text/vnd.turbo-stream.html'}});
       if(response.ok){deleteForm.closest('.message').remove();formatMessageGroups()}
       else alert('Could not delete message');
       return;
