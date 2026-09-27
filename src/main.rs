@@ -9189,8 +9189,33 @@ fn save_avatar(
     )
     .map_err(db_err)?;
     if let Some(old) = old {
+        db.execute("DELETE FROM direct_upload_blobs WHERE storage_key=?1", [format!("avatars/{old}")]).map_err(db_err)?;
         remove_avatar_files(&old);
     }
+    Ok(())
+}
+fn register_bot_avatar_blob(s: &AppState, uid: i64, filename: &str) -> Result<(), StatusCode> {
+    let mut db = pool(s)?;
+    let (stored, content_type): (String, String) = db.query_row(
+        "SELECT stored_name,content_type FROM avatars WHERE user_id=?1",
+        [uid],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(db_err)?;
+    let storage_key = format!("avatars/{stored}");
+    let upload_root = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+    let bytes = std::fs::read(std::path::Path::new(&upload_root).join(&storage_key)).map_err(db_err)?;
+    let checksum = STANDARD.encode(openssl::hash::hash(MessageDigest::md5(), &bytes).map_err(db_err)?.as_ref());
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let id: i64 = tx.query_row(
+        "SELECT MAX(1000000000000,COALESCE((SELECT last_id+1 FROM id_sequences WHERE name='direct_upload_blobs'),1000000000000),COALESCE((SELECT MAX(id)+1 FROM direct_upload_blobs),1000000000000),COALESCE((SELECT MAX(id)+1 FROM attachments),1000000000000),COALESCE((SELECT MAX(id)+1 FROM inline_blobs),1000000000000))",
+        [],
+        |row| row.get(0),
+    ).map_err(db_err)?;
+    tx.execute(
+        "INSERT INTO direct_upload_blobs(id,storage_key,filename,content_type,content_type_is_null,byte_size,checksum,created_at,uploaded) VALUES(?1,?2,?3,?4,0,?5,?6,?7,1)",
+        params![id, storage_key, filename, content_type, bytes.len() as i64, checksum, now()],
+    ).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
     Ok(())
 }
 fn remove_avatar_files(stored: &str) {
@@ -9800,26 +9825,37 @@ async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResu
     for (id, name, token, updated_at) in rows {
         let key = format!("{id}-{token}");
         let avatar = avatar_path(avatar_key, id, &updated_at)?;
-        list.push_str(&format!("<li class='bot-row flex flex-column gap flush fill-shade border-radius pad-block pad-inline-double'><div class='flex align-center gap'><figure class='avatar flex-item--no-shrink' style='--avatar-size: 2.65em;'><a href='/users/{id}' title='{}' class='btn avatar' data-turbo-frame='_top'><img src='{}' aria-hidden='true' alt='' width='48' height='48' loading='lazy'></a></figure><div class='min-width'><div class='overflow-ellipsis txt-large'><strong>{}</strong></div></div><a href='/account/bots/{id}/edit' class='btn flex-item-justify-end' style='view-transition-name: chat-bot-{id}'><img src='/static/icons/pencil.svg' aria-hidden='true' alt='' width='20' height='20'><span class='for-screen-reader'>Edit {}</span></a></div>",esc(&name),esc(&avatar),esc(&name),esc(&name)));
+        list.push_str(&format!("<li class='flex flex-column gap flush fill-shade border-radius pad-block pad-inline-double'><div class='flex align-center gap'><figure class='avatar flex-item--no-shrink' style='--avatar-size: 2.65em;'><a title='{}' class='btn avatar' data-turbo-frame='_top' href='/users/{id}'><img aria-hidden='true' loading='lazy' src='{}' width='48' height='48'></a></figure><div class='min-width'><div class='overflow-ellipsis txt-large'><strong>{}</strong></div></div><a class='btn flex-item-justify-end' style='view-transition-name: chat-bot-{id}' href='/account/bots/{id}/edit'><img aria-hidden='true' src='/assets/pencil-cf9d28aa.svg' width='20' height='20'><span class='for-screen-reader'>Edit {}</span></a></div>",esc(&name),esc(&avatar),esc(&name),esc(&name)));
         for (room_id, room_name) in bot_rooms.remove(&id).unwrap_or_default() {
             let endpoint = public_url(&headers, &format!("/rooms/{room_id}/{key}/messages"));
             let text_line = format!("curl -d 'Hello!' {endpoint}");
             let upload_line = format!("curl -F \"attachment=@/path/to/file\" {endpoint}");
-            list.push_str(&format!("<fieldset class='gap max-width pad border border-radius'><legend class='min-width txt-align-start pad-inline'><strong class='overflow-ellipsis'>{}</strong></legend>{}{}</fieldset>",esc(&room_name),bot_command_html(&text_line,"messages-outlined.svg","curl command for posting messages","Copy message command"),bot_command_html(&upload_line,"attachment.svg","curl command for posting attachments","Copy attachment command")));
+            list.push_str(&format!("<fieldset class='gap max-width pad border border-radius'><legend class='min-width txt-align-start pad-inline'><strong class='overflow-ellipsis'>{}</strong></legend>{}{}</fieldset>",esc(&room_name),bot_command_html(&text_line,"messages-outlined-87ff0331.svg","curl command for posting messages","Copy message command"),bot_command_html(&upload_line,"attachment-8bcccab0.svg","curl command for posting attachments","Copy attachment command")));
         }
         list.push_str("</li>");
     }
-    Ok(render(
+    let nav = "<div class='flex-item-justify-start'><a class='btn' href='/account/edit'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></div>";
+    let translation = profile_translation_button("Chat bots. With Chat bots, other sites and services can post updates directly to Campfire.", [
+        "Bots de chat. Con los bots de chat, otros sitios y servicios pueden publicar actualizaciones directamente en Campfire.",
+        "Bots de discussion. Avec les bots de discussion, d'autres sites et services peuvent publier des mises à jour directement sur Campfire.",
+        "चैट बॉट। चैट बॉट के साथ, अन्य साइटों और सेवाएं सीधे कैम्पफायर में अपडेट पोस्ट कर सकती हैं।",
+        "Chat-Bots. Mit Chat-Bots können andere Websites und Dienste Updates direkt in Campfire veröffentlichen.",
+        "Chat bots. Com Chat bots, outros sites e serviços podem postar atualizações diretamente no Campfire.",
+        "チャットボット。チャットボットを使用すると、他のサイトやサービスがCampfireに直接更新情報を投稿できます。",
+    ]);
+    Ok(render_source_page(
         "Chat bots",
         &format!(
-            "<p class='bot-back'><a href='/account/edit' aria-label='Back to account'>Back</a></p><section class='form-card bot-index panel panel--wide txt-align-center flex flex-column position-relative' style='view-transition-name: chat-bots'><div class='flex align-center gap'><div class='pad-inline-double center'><h1 class='margin-none'>Chat bots</h1><p class='margin-none-block-start'>With Chat bots, other sites and services can post updates directly to Campfire.</p><a href='/account/bots/new' class='btn btn--reversed txt-large' aria-label='Add a chat bot'><img src='/static/icons/bot.svg' aria-hidden='true' alt='' width='20' height='20'><img src='/static/icons/add.svg' aria-hidden='true' alt='' width='20' height='20'></a></div></div><div class='pad-inline pad-block-start'><menu class='flex flex-column gap margin-none pad'>{list}</menu></div></section>"
+            "<section class='panel panel--wide txt-align-center flex flex-column position-relative' style='view-transition-name: chat-bots'><div class='flex align-center gap'><div class='panel__button'>{translation}</div><div class='pad-inline-double center'><h1 class='margin-none'>Chat bots</h1><p class='margin-none-block-start'>With Chat bots, other sites and services can post updates directly to Campfire.</p><a class='btn btn--reversed txt-large' aria-label='Add a chat bot' href='/account/bots/new'><img aria-hidden='true' src='/assets/bot-8a69692e.svg' width='20' height='20'><img aria-hidden='true' src='/assets/add-f232d8a6.svg' width='20' height='20'></a></div></div><div class='pad-inline pad-block-start '><menu class='flex flex-column gap margin-none pad'>{list}</menu></div></section>"
         ),
+        nav,
         Some(&u),
+        u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
 fn bot_command_html(command: &str, icon: &str, input_label: &str, copy_label: &str) -> String {
     format!(
-        "<div class='flex align-center gap bot-command'><img src='/static/icons/{icon}' aria-hidden='true' alt='' width='24' height='24' class='colorize--black'><div class='flex-item-grow'><input type='text' class='input full-width fill-white' value='{}' aria-label='{input_label}' readonly></div><div class='txt-small'><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{}'><img src='/static/icons/copy-paste.svg' aria-hidden='true' alt='' width='20' height='20'><span class='for-screen-reader'>{copy_label}</span></button></div></div>",
+        "<div class='flex align-center gap'><img aria-hidden='true' class='colorize--black' src='/assets/{icon}' width='24' height='24'><div class='flex-item-grow'><input type='text' class='input full-width fill-white' value='{}' aria-label='{input_label}' readonly></div><div class='txt-small'><button class='btn' data-controller='copy-to-clipboard' data-action='copy-to-clipboard#copy' data-copy-to-clipboard-success-class='btn--success' data-copy-to-clipboard-content-value='{}'><img aria-hidden='true' src='/assets/copy-paste-4c379063.svg' width='20' height='20'><span class='for-screen-reader'>{copy_label}</span></button></div></div>",
         esc(command),
         esc(command)
     )
@@ -9832,40 +9868,53 @@ async fn bot_new(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri
     if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
-    Ok(render(
+    let nav = "<div class='flex-item-justify-start'><a class='btn' href='/account/bots'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></div>";
+    Ok(render_source_page(
         "New chat bot",
         &format!(
-            "<p><a href='/account/bots' aria-label='Back to chat bots'>Back</a></p><section class='panel form-card'>{}</section>",
+            "<section class='panel'>{}</section>",
             bot_form_html(
                 "/account/bots",
                 "",
                 "",
-                "/static/icons/default-bot-avatar.svg",
-                false
+                "/assets/default-bot-avatar-de1d12f7.svg",
+                false,
+                u.csrf_token.as_deref().unwrap_or("")
             )
         ),
+        nav,
         Some(&u),
+        u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
-fn bot_form_html(action: &str, name: &str, webhook_url: &str, avatar: &str, edit: bool) -> String {
-    let method = if edit {
-        "<input type='hidden' name='_method' value='patch'>"
-    } else {
-        ""
-    };
-    format!(
-        "<form action='{}' method='post' enctype='multipart/form-data' class='bot-form flex flex-column gap'>{method}<h1 class='for-screen-reader'>Chat Bot Setup</h1><label class='align-center center avatar__form gap' data-controller='upload-preview'><span class='btn input--file'><img src='/static/icons/camera.svg' alt='' aria-hidden='true' width='20' height='20'><input type='file' name='user[avatar]' class='input' accept='image/*' data-upload-preview-target='input' data-action='upload-preview#previewImage'><span class='for-screen-reader'>Upload bot avatar</span></span><span class='avatar input--file txt-xx-large' style='--avatar-size: var(--btn-size);'><img src='{}' alt='Bot avatar' width='48' height='48' data-upload-preview-target='image'></span></label><div class='flex align-center gap'><label class='flex align-center gap flex-item-grow txt-large input input--actor'><input type='text' name='user[name]' class='input' autocomplete='name' placeholder='Name the bot' autofocus required data-1p-ignore='true' value='{}'><img src='/static/icons/bot.svg' alt='' aria-hidden='true' width='24' height='24'></label></div><div class='flex align-center gap'><label class='flex align-center gap flex-item-grow txt-large input input--actor'><input type='url' name='user[webhook_url]' class='input' placeholder='Webhook URL' value='{}'><img src='/static/icons/web.svg' alt='' aria-hidden='true' width='24' height='24'></label></div><button class='btn btn--reversed center txt-large' type='submit' aria-label='Save changes'><img src='/static/icons/check.svg' alt='' aria-hidden='true' width='20' height='20'><span class='for-screen-reader'>Save changes</span></button></form>",
-        esc(action),
-        esc(avatar),
-        esc(name),
-        esc(webhook_url)
+fn bot_form_html(action: &str, name: &str, webhook_url: &str, avatar: &str, edit: bool, csrf: &str) -> String {
+    let method = if edit { "<input type='hidden' name='_method' value='patch'>" } else { "" };
+    let name_value = if name.is_empty() { String::new() } else { format!(" value='{}'", esc(name)) };
+    let webhook_value = if webhook_url.is_empty() && !edit { String::new() } else { format!(" value='{}'", esc(webhook_url)) };
+    let name_translation = profile_translation_button("Name the bot", [
+        "Nombrar al bot", "Nommer le bot", "बॉट का नाम दें", "Benenne den Bot",
+        "Dê um nome ao bot", "ボットに名前を付ける",
+    ]);
+    let webhook_translation = profile_translation_button("Webhook URL", [
+        "URL del Webhook", "URL du webhook", "वेबहुक URL", "Webhook-URL",
+        "URL do Webhook", "Webhook URL",
+    ]);
+    format!(r#"<form class="flex flex-column gap" enctype="multipart/form-data" action="{action}" accept-charset="UTF-8" method="post">{method}<input type="hidden" name="authenticity_token" value="{csrf}">
+<h1 class="for-screen-reader">Chat Bot Setup</h1>
+<label class="align-center center avatar__form gap" data-controller="upload-preview">
+<div class="btn input--file"><img aria-hidden="true" src="/assets/camera-927323b8.svg" width="20" height="20"><input class="input" accept="image/*" data-upload-preview-target="input" data-action="upload-preview#previewImage" type="file" name="user[avatar]" id="user_avatar"><span class="for-screen-reader">Upload bot avatar</span></div>
+<div class="avatar input--file txt-xx-large" style="--avatar-size: var(--btn-size);"><img alt="Bot avatar" data-upload-preview-target="image" src="{avatar}" width="48" height="48"></div></label>
+<div class="flex align-center gap">{name_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" autocomplete="name" placeholder="Name the bot" autofocus="autofocus" required="required" data-1p-ignore="true" type="text"{name_value} name="user[name]" id="user_name"><img aria-hidden="true" class="colorize--black" src="/assets/bot-8a69692e.svg" width="24" height="24"></label></div>
+<div class="flex align-center gap">{webhook_translation}<label class="flex align-center gap flex-item-grow txt-large input input--actor"><input class="input" placeholder="Webhook URL" type="url"{webhook_value} name="user[webhook_url]" id="user_webhook_url"><img aria-hidden="true" class="colorize--black" src="/assets/web-e179f247.svg" width="24" height="24"></label></div>
+<button class="btn btn--reversed center txt-large" type="submit"><img aria-hidden="true" src="/assets/check-7897ff7e.svg" width="20" height="20"><span class="for-screen-reader">Save changes</span></button></form>"#,
+        action = esc(action), csrf = esc(csrf), avatar = esc(avatar)
     )
 }
 async fn bot_fields(
     s: &Arc<AppState>,
     headers: &HeaderMap,
     req: Request,
-) -> Result<(HashMap<String, String>, Option<(Vec<u8>, String)>), StatusCode> {
+) -> Result<(HashMap<String, String>, Option<(Vec<u8>, String, String)>), StatusCode> {
     let mut avatar = None;
     let f = if headers
         .get(header::CONTENT_TYPE)
@@ -9888,9 +9937,10 @@ async fn bot_fields(
                     .content_type()
                     .unwrap_or("application/octet-stream")
                     .to_string();
+                let filename = field.file_name().unwrap_or("avatar").to_string();
                 let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
                 if !bytes.is_empty() {
-                    avatar = Some((bytes.to_vec(), content_type));
+                    avatar = Some((bytes.to_vec(), content_type, filename));
                 }
             } else if field_name == "name"
                 || field_name == "user[name]"
@@ -9946,12 +9996,13 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, req: Req
         .map_err(db_err)?;
     }
     db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) SELECT id,?1,'mentions',?2 FROM rooms WHERE type='Rooms::Open'",params![id,t]).map_err(db_err)?;
-    if let Some((bytes, content_type)) = avatar {
+    if let Some((bytes, content_type, filename)) = avatar {
         if let Err(error) = save_avatar(&s, id, bytes, content_type) {
             db.execute("DELETE FROM users WHERE id=?1", [id])
                 .map_err(db_err)?;
             return Err(error);
         }
+        register_bot_avatar_blob(&s, id, &filename)?;
     }
     Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
@@ -9972,20 +10023,41 @@ async fn bot_edit(
     ).optional().map_err(db_err)?;
     let (name, _token, webhook_url, updated_at) = bot.ok_or(StatusCode::NOT_FOUND)?;
     let avatar_key = s.imported_avatar_signing_key.as_deref().unwrap_or(&s.avatar_signing_key);
-    let avatar = avatar_path(avatar_key, id, &updated_at)?;
-    Ok(render(
+    let avatar_blob: Option<(i64, String)> = db.query_row(
+        "SELECT b.id,b.filename FROM avatars a JOIN direct_upload_blobs b ON b.storage_key='avatars/' || a.stored_name WHERE a.user_id=?1 AND b.uploaded=1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(db_err)?;
+    let has_avatar: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM avatars WHERE user_id=?1)",
+        [id],
+        |row| row.get(0),
+    ).map_err(db_err)?;
+    let avatar = if let Some((blob_id, filename)) = avatar_blob {
+        public_url(&headers, &blob_path(&s.blob_signing_key, blob_id, &rails_sanitized_filename(&filename))?)
+    } else if !has_avatar {
+        "/assets/default-bot-avatar-de1d12f7.svg".to_string()
+    } else {
+        avatar_path(avatar_key, id, &updated_at)?
+    };
+    let nav = "<div class='flex-item-justify-start'><a class='btn' href='/account/bots'><img aria-hidden='true' src='/assets/arrow-left-abe40556.svg' width='20' height='20'><span class='for-screen-reader'>Go Back</span></a></div>";
+    let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
+    Ok(render_source_page(
         "Edit bot",
         &format!(
-            "<p><a href='/account/bots' aria-label='Back to chat bots'>Back</a></p><section class='panel form-card' style='view-transition-name: chat-bot-{id}'>{}<hr class='separator full-width margin-block-double'><div class='flex align-center gap justify-space-between'><form method='post' action='/account/bots/{id}'><input type='hidden' name='_method' value='delete'><button class='btn txt--small btn--negative' aria-label='Delete this chat bot'>Delete this chat bot</button></form><form method='post' action='/account/bots/{id}/key'><input type='hidden' name='_method' value='put'><button class='btn full-width txt--small btn--negative' aria-label='Generate a new key'>Generate a new key</button></form></div></section>",
+            "<section class='panel' style='view-transition-name: chat-bot-{id}'>{}<hr class='separator full-width margin-block-double'><div class='flex align-center gap justify-space-between'><form class='button_to' method='post' action='/account/bots/{id}'><input type='hidden' name='_method' value='delete'><button class='btn txt--small btn--negative' aria-label='Delete this chat bot' data-turbo-confirm='Are you sure you want to permanently remove this bot from the account? This can’t be undone.' type='submit'><img aria-hidden='true' src='/assets/trash-708c7eb2.svg' width='20' height='20'><img aria-hidden='true' src='/assets/bot-8a69692e.svg' width='20' height='20'></button><input type='hidden' name='authenticity_token' value='{csrf}'></form><form class='button_to' method='post' action='/account/bots/{id}/key'><input type='hidden' name='_method' value='put'><button class='btn full-width txt--small btn--negative' aria-label='Generate a new key' data-turbo-confirm='Are you sure you want to change the bot key? All usage of this bot must be updated.' type='submit'><img aria-hidden='true' src='/assets/refresh-249f0509.svg' width='20' height='20'><img aria-hidden='true' src='/assets/key-82330955.svg' width='20' height='20'></button><input type='hidden' name='authenticity_token' value='{csrf}'></form></div></section>",
             bot_form_html(
                 &format!("/account/bots/{id}"),
                 &name,
                 &webhook_url,
                 &avatar,
-                true
+                true,
+                u.csrf_token.as_deref().unwrap_or("")
             ),
         ),
+        nav,
         Some(&u),
+        u.csrf_token.as_deref().unwrap_or(""),
     ))
 }
 async fn bot_update(
@@ -10024,8 +10096,9 @@ async fn bot_update(
             db.execute("INSERT INTO webhooks(user_id,url) VALUES(?1,?2) ON CONFLICT(user_id) DO UPDATE SET url=excluded.url",params![id,url]).map_err(db_err)?;
         }
     }
-    if let Some((bytes, content_type)) = avatar {
+    if let Some((bytes, content_type, filename)) = avatar {
         save_avatar(&s, id, bytes, content_type)?;
+        register_bot_avatar_blob(&s, id, &filename)?;
     }
     Ok(found_redirect(&public_url(&headers, "/account/bots")))
 }
@@ -10732,7 +10805,7 @@ async fn direct_upload_create(
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let mut db = pool(&s)?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
-    let id: i64 = tx.query_row("SELECT MAX(1000000000000,COALESCE((SELECT MAX(id)+1 FROM direct_upload_blobs),1000000000000),COALESCE((SELECT MAX(id)+1 FROM attachments),1000000000000),COALESCE((SELECT MAX(id)+1 FROM inline_blobs),1000000000000))", [], |r| r.get(0)).map_err(db_err)?;
+    let id: i64 = tx.query_row("SELECT MAX(1000000000000,COALESCE((SELECT last_id+1 FROM id_sequences WHERE name='direct_upload_blobs'),1000000000000),COALESCE((SELECT MAX(id)+1 FROM direct_upload_blobs),1000000000000),COALESCE((SELECT MAX(id)+1 FROM attachments),1000000000000),COALESCE((SELECT MAX(id)+1 FROM inline_blobs),1000000000000))", [], |r| r.get(0)).map_err(db_err)?;
     tx.execute("INSERT INTO direct_upload_blobs(id,storage_key,filename,content_type,content_type_is_null,byte_size,checksum,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,storage_key,filename,stored_content_type,content_type.is_none(),byte_size,checksum,created_at]).map_err(db_err)?;
     tx.commit().map_err(db_err)?;
     let upload_token = disk_token(&s.blob_signing_key, "blob_token", json!({"key":storage_key,"content_type":content_type,"content_length":byte_size,"checksum":checksum,"service_name":"local"})).map_err(db_err)?;
@@ -11814,6 +11887,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
         CREATE TABLE IF NOT EXISTS direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,content_type_is_null INTEGER NOT NULL DEFAULT 0,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO id_sequences(name,last_id) VALUES('direct_upload_blobs',MAX(999999999999,COALESCE((SELECT MAX(id) FROM direct_upload_blobs),0))) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS direct_upload_blob_id_track AFTER INSERT ON direct_upload_blobs BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='direct_upload_blobs'; END;
         CREATE TABLE IF NOT EXISTS inline_embeds(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,blob_id INTEGER NOT NULL REFERENCES inline_blobs(id) ON DELETE CASCADE,PRIMARY KEY(message_id,blob_id));
         CREATE INDEX IF NOT EXISTS idx_inline_embeds_blob ON inline_embeds(blob_id);
         CREATE TABLE IF NOT EXISTS avatars(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,stored_name TEXT NOT NULL,content_type TEXT NOT NULL);

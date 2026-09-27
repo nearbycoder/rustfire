@@ -33,12 +33,14 @@ AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) 
 
 
 class Section(HTMLParser):
-    def __init__(self, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False):
+    def __init__(self, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False, normalize_avatar_paths=False, normalize_bot_keys=False):
         super().__init__(convert_charrefs=True)
         self.target = target
         self.normalize_times = normalize_times
         self.ignore_csrf_inputs = ignore_csrf_inputs
         self.normalize_blob_paths = normalize_blob_paths
+        self.normalize_avatar_paths = normalize_avatar_paths
+        self.normalize_bot_keys = normalize_bot_keys
         self.depth = 0
         self.tokens = []
 
@@ -62,6 +64,10 @@ class Section(HTMLParser):
                     value = "<generated-time>"
                 elif value:
                     value = re.sub(r"http://127\.0\.0\.1(?::\d+)?", "<origin>", value)
+                    if self.normalize_bot_keys:
+                        value = re.sub(r"(/rooms/\d+/\d+-)[A-Za-z0-9]{12}(?=/messages)", r"\1<bot-token>", value)
+                    if self.normalize_avatar_paths and key == "src" and "/avatar" in value:
+                        value = "<signed-avatar>"
                     if self.normalize_blob_paths:
                         value = re.sub(r"(/rails/active_storage/(?:blobs|representations)/redirect/)[A-Za-z0-9_-]+=*--[a-f0-9]{40}(?=/)", r"\1<signed-blob>", value)
                     if key in {"href", "data-lightbox-url-value"} and value.startswith("/qr_code/"):
@@ -92,8 +98,8 @@ class Section(HTMLParser):
             self.tokens.append(("text", text))
 
 
-def section(page, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False):
-    parser = Section(target, normalize_times, ignore_csrf_inputs, normalize_blob_paths)
+def section(page, target, normalize_times=False, ignore_csrf_inputs=False, normalize_blob_paths=False, normalize_avatar_paths=False, normalize_bot_keys=False):
+    parser = Section(target, normalize_times, ignore_csrf_inputs, normalize_blob_paths, normalize_avatar_paths, normalize_bot_keys)
     parser.feed(page.decode())
     assert parser.tokens, f"Missing {target}"
     return parser.tokens

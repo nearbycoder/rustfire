@@ -6,6 +6,7 @@ This is a behavior probe, not a performance claim.
 
 import argparse
 import base64
+import hashlib
 import html
 import http.client
 from html.parser import HTMLParser
@@ -33,6 +34,17 @@ class InputValues(HTMLParser):
             attributes = dict(attrs)
             if label := attributes.get("aria-label"):
                 self.values[label] = attributes.get("value", "")
+
+
+class AvatarPreview(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.src = None
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "img" and values.get("data-upload-preview-target") == "image":
+            self.src = values.get("src")
 
 
 def request(port, method, path, cookie, csrf, body=b"", content_type=None, extra_headers=None):
@@ -66,8 +78,14 @@ def multipart(name, webhook, avatar=True, method=None):
 
 def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     statuses = {}
+    documents = {}
+    for asset in ("default-bot-avatar-de1d12f7.svg", "key-82330955.svg", "web-e179f247.svg"):
+        status, _, body = request(port, "GET", f"/assets/{asset}", cookie, csrf)
+        assert status == 200, (asset, status)
+        statuses[f"asset_{asset}"] = hashlib.sha256(body).hexdigest()
     status, _, page = request(port, "GET", "/account/bots/new", cookie, csrf)
     assert status == 200, (status, page[:200])
+    documents["new"] = page
     form_fields = sorted(set(re.findall(rb'name=["\'](user\[[^"\']+\])["\']', page)))
     statuses["new_fields"] = [field.decode() for field in form_fields]
 
@@ -96,6 +114,7 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     assert re.fullmatch(r"[A-Za-z0-9]{12}", token), token
     status, _, page = request(port, "GET", "/account/bots", cookie, csrf)
     assert status == 200, (status, page[:300])
+    documents["index"] = page
     input_values = InputValues()
     input_values.feed(page.decode())
     statuses["index_examples"] = tuple(
@@ -109,6 +128,13 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
 
     status, _, page = request(port, "GET", f"/account/bots/{bot_id}/edit", cookie, csrf)
     assert status == 200, (status, page[:300])
+    documents["edit"] = page
+    preview = AvatarPreview()
+    preview.feed(page.decode())
+    assert preview.src, "Bot editor has no uploaded avatar preview"
+    preview_status, preview_location, _ = request(port, "GET", urllib.parse.urlsplit(preview.src).path, cookie, csrf)
+    disk_status, _, preview_bytes = request(port, "GET", urllib.parse.urlsplit(preview_location).path, cookie, csrf)
+    statuses["edit_avatar_preview"] = (preview_status, disk_status, preview_bytes == PNG, len(preview_bytes))
     decoded_page = html.unescape(page.decode())
     statuses["edit_form"] = ("user[avatar]" in decoded_page, "Paired Bot" in decoded_page, "https://example.com/first" in decoded_page)
 
@@ -120,6 +146,15 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
         name = db.execute("SELECT name FROM users WHERE id=?", [bot_id]).fetchone()[0]
         webhook = db.execute("SELECT url FROM webhooks WHERE user_id=?", [bot_id]).fetchone()[0]
     statuses["updated_record"] = (name, webhook)
+    status, _, updated_edit = request(port, "GET", f"/account/bots/{bot_id}/edit", cookie, csrf)
+    assert status == 200, status
+    documents["edit_after_update"] = updated_edit
+    updated_preview = AvatarPreview()
+    updated_preview.feed(updated_edit.decode())
+    assert updated_preview.src, "Updated bot editor has no avatar preview"
+    updated_status, updated_location, _ = request(port, "GET", urllib.parse.urlsplit(updated_preview.src).path, cookie, csrf)
+    updated_disk_status, _, updated_bytes = request(port, "GET", urllib.parse.urlsplit(updated_location).path, cookie, csrf)
+    statuses["updated_avatar_preview"] = (updated_preview.src != preview.src, updated_status, updated_disk_status, updated_bytes == PNG, len(updated_bytes))
 
     status, location, _ = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf)
     with sqlite3.connect(database) as db:
@@ -182,7 +217,19 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
         state, old_token = db.execute("SELECT status,bot_token FROM users WHERE id=?", [bot_id]).fetchone()
         memberships = db.execute("SELECT COUNT(*) FROM memberships WHERE user_id=?", [bot_id]).fetchone()[0]
         statuses["deactivated"] = (state, old_token == active_token, memberships)
-    return statuses
+    body, content_type = multipart("Avatarless Bot", "", avatar=False)
+    status, location, _ = request(port, "POST", "/account/bots", cookie, csrf, body, content_type)
+    assert status == 302, status
+    statuses["avatarless_create"] = status, urllib.parse.urlsplit(location).path
+    with sqlite3.connect(database) as db:
+        avatarless_id = db.execute("SELECT id FROM users WHERE name='Avatarless Bot'").fetchone()[0]
+    status, _, page = request(port, "GET", f"/account/bots/{avatarless_id}/edit", cookie, csrf)
+    assert status == 200, status
+    documents["edit_without_avatar"] = page
+    preview = AvatarPreview()
+    preview.feed(page.decode())
+    statuses["avatarless_preview"] = preview.src
+    return statuses, documents
 
 
 def verify_legacy_migration(database, port, uploads):
@@ -220,10 +267,12 @@ def cleanup_campfire_uploads(source_database, database, repository):
 
 
 def main():
+    from paired_room_shell import assert_equal, section
     parser = argparse.ArgumentParser()
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
     parser.add_argument("--bundle-path", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/bundle"))
+    parser.add_argument("--sample-dir", type=pathlib.Path)
     args = parser.parse_args()
     repository, ruby, bundle_path = args.campfire_repo.resolve(), args.ruby.resolve(), args.bundle_path.resolve()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
@@ -235,10 +284,20 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         source_database = repository / "storage/db/production.sqlite3"
         env = seed_campfire(repository, ruby, bundle_path, source_database, camp_db, [], camp_port, temp)
+        with sqlite3.connect(camp_db) as source:
+            owner_name = source.execute("SELECT name FROM users WHERE id=1").fetchone()[0]
+            room_name = source.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]
+        with sqlite3.connect(rust_db) as target:
+            target.execute("UPDATE users SET name=? WHERE id=1", [owner_name])
+            target.execute("UPDATE rooms SET name=? WHERE id=1", [room_name])
+        vapid_code = 'require "openssl"; require "base64"; key=OpenSSL::PKey::EC.new(File.binread(ARGV[0])); puts Base64.urlsafe_encode64(key.public_key.to_bn.to_s(2), padding: false); puts Base64.urlsafe_encode64(key.private_key.to_s(2).rjust(32,"\\0"), padding: false)'
+        env["VAPID_PUBLIC_KEY"], env["VAPID_PRIVATE_KEY"] = subprocess.check_output(
+            [str(ruby), "-e", vapid_code, str(rust_db.with_suffix(".vapid.der"))], text=True,
+        ).splitlines()
 
         rust_process = start_server(rust_db, rust_port, {"RUSTFIRE_UPLOAD_DIR": str(temp / "uploads")})
         try:
-            rust = run_workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False, temp / "uploads/avatars")
+            rust, rust_documents = run_workflow(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False, temp / "uploads/avatars")
         finally:
             stop_server(rust_process)
 
@@ -247,7 +306,7 @@ def main():
         try:
             wait_for_server(camp_port, camp_process)
             cookie, csrf = login_campfire(camp_port)
-            camp = run_workflow(camp_port, cookie, csrf, camp_db, True, repository / "storage/files")
+            camp, camp_documents = run_workflow(camp_port, cookie, csrf, camp_db, True, repository / "storage/files")
         except Exception:
             log.flush()
             log.seek(0)
@@ -260,6 +319,18 @@ def main():
         for key in rust:
             assert rust[key] == camp[key], (key, rust[key], camp[key])
             print(f"{key}: {rust[key]!r}")
+        if args.sample_dir:
+            args.sample_dir.mkdir(parents=True, exist_ok=True)
+            for name, documents in (("rustfire", rust_documents), ("campfire", camp_documents)):
+                for page, body in documents.items():
+                    (args.sample_dir / f"{name}-bot-{page}.html").write_bytes(body)
+        for page in ("new", "index", "edit", "edit_after_update", "edit_without_avatar"):
+            for part in ("head", "body"):
+                assert_equal(
+                    f"bot {page} complete {part}",
+                    section(camp_documents[page], part, normalize_blob_paths=True, normalize_avatar_paths=True, normalize_bot_keys=True),
+                    section(rust_documents[page], part, normalize_blob_paths=True, normalize_avatar_paths=True, normalize_bot_keys=True),
+                )
         verify_legacy_migration(temp / "legacy.sqlite3", free_port(), temp / "legacy-uploads")
         print("legacy_migration: passed")
 
