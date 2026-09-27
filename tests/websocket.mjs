@@ -86,7 +86,7 @@ try{
   sendCommand({command:'unsubscribe',identifier:globalListIdentifier});
   sendCommand({command:'unsubscribe',identifier:userListIdentifier});
   const streamClientId='ws-stream-1';
-  const streamPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream test','message[client_message_id]':streamClientId})});
+  const streamPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/vnd.rustfire+json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream test','message[client_message_id]':streamClientId})});
   assert.equal(streamPost.status,201);
   const streamMessageId=(await streamPost.json()).id;
   const streamEvents=[await nextFrame(),await nextFrame()];
@@ -102,7 +102,7 @@ try{
   const streamEdit=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream edited'})});
   assert.equal(streamEdit.status,200);
   const editEvents=[await nextFrame(),await nextFrame()];
-  assert(editEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream action="replace" target="presentation_message_${streamClientId}">`)&&frame.message.includes('signed stream edited')));
+  assert(editEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream maintain_scroll="true" action="replace" target="presentation_message_${streamClientId}">`)&&frame.message.includes('signed stream edited')));
   const streamBoost=await fetch(base+`/messages/${streamMessageId}/boosts`,{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({'boost[content]':'🔥'}),redirect:'manual'});
   assert.equal(streamBoost.status,302);
   const boostEvents=[await nextFrame(),await nextFrame()];
@@ -165,7 +165,7 @@ try{
   assert.equal(joined.status,302);const otherCookie=joined.headers.get('set-cookie').split(';')[0];
   const otherPage=await fetch(base+'/rooms/1',{headers:{Cookie:otherCookie}});
   const otherCsrf=(await otherPage.text()).match(/<meta name='csrf-token' content='([^']+)'/)[1];
-  const otherPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:otherCookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':otherCsrf},body:new URLSearchParams({'message[body]':'from other','message[client_message_id]':'ws-other'})});assert.equal(otherPost.status,201);
+  const otherPost=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:otherCookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/vnd.rustfire+json','X-CSRF-Token':otherCsrf},body:new URLSearchParams({'message[body]':'from other','message[client_message_id]':'ws-other'})});assert.equal(otherPost.status,201);
   const updates=[await nextFrame(),await nextFrame()];
   assert(updates.some(frame=>frame.identifier===unreadIdentifier&&frame.message.roomId===1));
   assert(updates.some(frame=>frame.identifier===identifier&&frame.message.message.body.plain_text==='from other'));
@@ -182,7 +182,7 @@ try{
   for(let i=0;i<30&&membershipSql('select connected_at from memberships where room_id=1 and user_id=1')===connectedBeforeRefresh;i++)await new Promise(r=>setTimeout(r,20));
   assert.notEqual(membershipSql('select connected_at from memberships where room_id=1 and user_id=1'),connectedBeforeRefresh,'presence refresh updates the connection timestamp');
   assert.equal(membershipSql('select unread_at from memberships where room_id=1 and user_id=1'),'2025-01-01T00:00:00Z','presence refresh preserves the unread marker');
-  const post=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'live test','message[client_message_id]':'ws-1'})});assert.equal(post.status,201);
+  const post=await fetch(base+'/rooms/1/messages',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/vnd.rustfire+json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'live test','message[client_message_id]':'ws-1'})});assert.equal(post.status,201);
   let delivered;
   for(let i=0;i<5;i++){const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no room event')),3000))]);if(frame.identifier===identifier&&frame.message?.message?.body?.plain_text==='live test'){delivered=frame;break;}}
   assert(delivered,'live message delivered');
@@ -200,7 +200,7 @@ try{
   sendCommand({command:'subscribe',identifier:roomListIdentifier});
   assert.equal((await nextFrame()).type,'confirm_subscription');
   for(const involvement of ['invisible','mentions']){
-    const changed=await fetch(base+'/rooms/1/involvement',{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({involvement}),redirect:'manual'});
+    const changed=await fetch(base+'/rooms/1/involvement',{method:'PUT',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':csrf},body:new URLSearchParams({involvement}),redirect:'manual'});
     assert.equal(changed.status,302);
     assert.equal(new URL(changed.headers.get('location'),base).pathname,'/rooms/1/involvement');
     const frame=await Promise.race([nextFrame(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('no visibility event')),3000))]);

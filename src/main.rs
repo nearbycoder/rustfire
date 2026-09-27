@@ -6178,6 +6178,7 @@ fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
 async fn message_create(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(rid): Path<i64>,
     req: Request,
 ) -> AppResult {
@@ -6257,13 +6258,14 @@ async fn message_create(
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if accept.contains("json") {
+    let suffix = uri.path().rsplit('/').next().unwrap_or("").rsplit_once('.').map(|(_, format)| format);
+    if suffix.is_none() && accept.starts_with("application/vnd.rustfire+json") {
         Ok((
             StatusCode::CREATED,
             Json(message_json(&s, &m, Some(&headers))?),
         )
             .into_response())
-    } else if accept.contains("turbo-stream") {
+    } else if suffix == Some("turbo_stream") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html")) {
         Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/vnd.turbo-stream.html; charset=utf-8")],
@@ -6276,7 +6278,7 @@ async fn message_create(
         )
             .into_response())
     } else {
-        Ok(Redirect::to(&format!("/rooms/{rid}")).into_response())
+        Ok(not_acceptable_format(if suffix == Some("json") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("application/json")) { "application/json" } else { "" }))
     }
 }
 async fn message_show(
@@ -11834,8 +11836,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .post(message_create)
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
-        .route("/rooms/{id}/messages.html", get(messages_index))
-        .route("/rooms/{id}/messages.json", get(messages_index))
+        .route("/rooms/{id}/messages.html", get(messages_index).post(message_create))
+        .route("/rooms/{id}/messages.json", get(messages_index).post(message_create))
+        .route("/rooms/{id}/messages.turbo_stream", get(messages_index).post(message_create))
         .route("/rooms/{id}/messages/new", any(|| async { StatusCode::NOT_FOUND }))
         .route(
             "/rooms/{id}/messages/{mid}",

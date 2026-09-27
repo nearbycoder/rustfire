@@ -40,6 +40,9 @@ def request(opener, base, path, data=None, method=None, headers=None):
     if isinstance(data, dict):
         data = urllib.parse.urlencode(data, doseq=True).encode()
     headers = dict(headers or {})
+    if data is not None and re.fullmatch(r"/rooms/\d+/messages", path) and headers.get("Accept") == "application/json":
+        # Keep the smoke test's private ID lookup separate from Campfire's public format negotiation.
+        headers["Accept"] = "application/vnd.rustfire+json"
     if (data is not None or method in ("POST", "PATCH", "PUT", "DELETE")) and opener in CSRF:
         headers.setdefault("X-CSRF-Token", CSRF[opener])
     req = urllib.request.Request(base + path, data=data, method=method, headers=headers)

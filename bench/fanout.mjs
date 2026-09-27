@@ -141,7 +141,7 @@ try {
     const response = await fetch(new URL(operation === 'boosts' ? `/messages/${messageId}/boosts` : `/rooms/${room}/messages`, base), {
       method: 'POST',
       redirect: 'manual',
-      headers: { Cookie: cookie, Accept: app === 'rustfire' ? 'application/json' : 'text/vnd.turbo-stream.html, text/html', ...(['attachments','images','videos'].includes(operation) ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }) },
+      headers: { Cookie: cookie, Accept: 'text/vnd.turbo-stream.html, text/html', ...(['attachments','images','videos'].includes(operation) ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }) },
       body: ['attachments','images','videos'].includes(operation) ? attachmentForm : new URLSearchParams({ ...(operation === 'boosts' ? { 'boost[content]': id } : { 'message[body]': `fanout ${id}`, 'message[client_message_id]': id }), ...(csrf ? { authenticity_token: csrf } : {}) }),
     });
     if (!(operation === 'boosts' ? [302,303].includes(response.status) : response.ok)) throw new Error(`POST ${i} returned ${response.status}`);
