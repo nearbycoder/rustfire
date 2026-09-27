@@ -1401,3 +1401,20 @@ With four `Accept` headers, the route-inventory suffix sweep now passes **1,124/
 ## Large webhook attachment replies
 
 `python bench/paired_webhook_replies.py` passed ten reply shapes against pinned Campfire `91d294f`, including a response just over 26 MiB labeled `application/zip`, a text response streamed in three pieces over eight seconds, and stalled text and partially received ZIP responses. The probe matched webhook request payloads, reply IDs and metadata, the complete stored attachment bytes, and bot message-list JSON; it also checked that Rustfire removed the incomplete ZIP temporary file. Rustfire streams registered attachment replies into a temporary file and moves the file into attachment storage when saving the message. It previously rejected replies above 25 MiB and buffered all attachment replies in memory. Successful text replies no longer have a Rustfire-only 1 MiB cap. The webhook client now has separate seven-second connect and per-read timeouts, matching the source's `Net::HTTP` settings; a read timeout creates the same bot reply even after response headers or partial file bytes arrive. This verifies these local response shapes, not webhook throughput, peak memory, retries, redirects, or all registered MIME types.
+
+## Paired text webhook reply load
+
+`python bench/paired_webhook_reply_capacity.py` offered 120 rich user posts at a scheduled 24 per second to each disposable app, in both server orders. One bot was mentioned in an open room on every post. The local webhook endpoint waited 25 ms, returned the same plain-text reply, and recorded every request. Each app saved all 120 triggers and 120 bot replies, sent exactly 120 webhooks, drained its webhook queue without a failed job, and matched the outbound user, room, and message-body payloads after excluding generated message IDs. The probe checked every payload's ID and URL path against its own saved trigger. There were no room socket subscribers. Campfire ran one Puma worker, isolated Redis, and either four or 16 Resque workers; Rustfire ran one release process. Only one app received load at a time on the same host.
+
+| Campfire workers | Server order | App | Webhook p95 | Reply drain after posting | Total trial | Sampled peak server PSS |
+|---:|---|---|---:|---:|---:|---:|
+| 4 | Rustfire first | Rustfire | 126.66 ms | 0.087 s | 5.049 s | 29.41 MiB |
+| 4 | Rustfire first | Campfire | 15,858.75 ms | 16.746 s | 21.749 s | 872.67 MiB |
+| 4 | Campfire first | Campfire | 19,026.55 ms | 20.067 s | 25.073 s | 881.19 MiB |
+| 4 | Campfire first | Rustfire | 125.59 ms | 0.029 s | 4.989 s | 29.66 MiB |
+| 16 | Rustfire first | Rustfire | 124.66 ms | 0.107 s | 5.069 s | 29.64 MiB |
+| 16 | Rustfire first | Campfire | 3,793.52 ms | 3.959 s | 9.120 s | 2,496.34 MiB |
+| 16 | Campfire first | Campfire | 4,069.05 ms | 4.279 s | 9.376 s | 2,476.70 MiB |
+| 16 | Campfire first | Rustfire | 125.49 ms | 0.045 s | 5.005 s | 29.34 MiB |
+
+At this offered rate, Rustfire saved every reply within roughly 0.03–0.11 seconds after posting ended. Campfire cleared its reply backlog 3.96–4.28 seconds later with 16 workers, and 16.75–20.07 seconds later with four. The 16-worker Campfire trials used 2,477–2,496 MiB sampled peak server PSS versus about 29 MiB for Rustfire; those figures include Campfire's workers and Redis, exclude the local receiver and load client, and are periodic samples rather than true peaks. Increasing Campfire workers reduced its reply backlog substantially. The four full reports are [four workers, Rustfire first](results/webhook-replies-rust-first.json), [four workers, Campfire first](results/webhook-replies-camp-first.json), [16 workers, Rustfire first](results/webhook-replies-16-rust-first.json), and [16 workers, Campfire first](results/webhook-replies-16-camp-first.json). These short same-host runs support a speed and sampled-memory advantage for this one-bot text-reply workload; they do not measure sockets, push delivery, attachment replies under load, longer stability, a capacity limit, or full-app equivalence.

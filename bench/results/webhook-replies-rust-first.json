@@ -1,0 +1,39 @@
+{
+  "campfire": {
+    "app": "campfire",
+    "offered_posts_per_second": 23.98,
+    "post_p95_ms": 50.04,
+    "posts": 120,
+    "replies": 120,
+    "reply_drain_seconds": 16.746,
+    "resource_samples": 111,
+    "sampled_peak_server_processes": 11,
+    "sampled_peak_server_pss_mib": 872.67,
+    "schedule_lag_p95_ms": 50.67,
+    "total_seconds": 21.749,
+    "webhook_p95_ms": 15858.75,
+    "webhooks": 120
+  },
+  "campfire_first": false,
+  "campfire_resque_workers": 4,
+  "payloads_match": true,
+  "posts": 120,
+  "rate": 24.0,
+  "reply_delay_ms": 25,
+  "rustfire": {
+    "app": "rustfire",
+    "offered_posts_per_second": 24.19,
+    "post_p95_ms": 3.49,
+    "posts": 120,
+    "replies": 120,
+    "reply_drain_seconds": 0.087,
+    "resource_samples": 27,
+    "sampled_peak_server_processes": 1,
+    "sampled_peak_server_pss_mib": 29.41,
+    "schedule_lag_p95_ms": 0.43,
+    "total_seconds": 5.049,
+    "webhook_p95_ms": 126.66,
+    "webhooks": 120
+  },
+  "source_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb"
+}
