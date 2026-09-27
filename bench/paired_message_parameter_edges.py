@@ -12,7 +12,11 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 
+from paired_attachment_mime import image_preview, video_poster
+from paired_link_preview import Presentation
 from direct_lookup import free_port
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis
 from paired_direct_lookup import seed_campfire, seed_rustfire
@@ -70,6 +74,7 @@ EDIT_MULTIPART_FORMS = (
     ("edit multipart query suppresses file", (("message[body]", "Body"), ("message[attachment]", "new file", "new.txt")), "message%5Bbody%5D=Query"),
     ("edit multipart image", (("message[attachment]", IMAGE.read_bytes(), "moon.jpg", "image/jpeg"),), ""),
     ("edit multipart video", (("message[attachment]", VIDEO.read_bytes(), "alpha-centuri.mov", "video/quicktime"),), ""),
+    ("edit multipart malformed JPEG", (("message[attachment]", b"A plain text attachment.\n", "notes.txt", "image/jpeg"),), ""),
 )
 EDIT_POST_FORMS = (
     ("POST patch override", b"_method=patch&message%5Bbody%5D=Edited", ""),
@@ -81,6 +86,7 @@ EDIT_MULTIPART_POST_FORMS = (
     ("POST multipart put file only", (("_method", "put"), ("message[attachment]", "new file", "new.txt")), ""),
     ("POST multipart query suppresses file", (("_method", "patch"), ("message[body]", "Body"), ("message[attachment]", "new file", "new.txt")), "message%5Bbody%5D=Query"),
     ("POST multipart image", (("_method", "patch"), ("message[attachment]", IMAGE.read_bytes(), "moon.jpg", "image/jpeg")), ""),
+    ("POST multipart malformed JPEG", (("_method", "put"), ("message[attachment]", b"A plain text attachment.\n", "notes.txt", "image/jpeg")), ""),
 )
 OLD_FILE = b"old attachment bytes"
 OLD_RUST_STORED = "11111111-1111-4111-8111-111111111111"
@@ -167,6 +173,37 @@ def seed_existing_attachment(rust_database, camp_database):
         )
 
 
+def replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, kind):
+    def preview(port, cookie):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/rooms/1/messages/1", headers={"Cookie": cookie},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            assert response.status == 200, (kind, response.status)
+            page = response.read()
+        if kind == "malformed":
+            parsed = Presentation("boost-fixture")
+            parsed.feed(page.decode())
+            images = [dict(item[1])["src"] for item in parsed.structure
+                      if isinstance(item, tuple) and item[0] == "img" and
+                      "message__attachment" in dict(item[1]).get("class", "").split()]
+            assert len(images) == 1, images
+            variant_request = urllib.request.Request(
+                f"http://127.0.0.1:{port}{images[0]}", headers={"Cookie": cookie},
+            )
+            try:
+                response = urllib.request.urlopen(variant_request, timeout=30)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                body = response.read()
+                return response.status, response.headers.get_content_type(), hashlib.sha256(body).hexdigest()
+        check = image_preview if kind == "image" else video_poster
+        return check(port, cookie, page, "boost-fixture")
+
+    return preview(rust_port, rust_cookie), preview(camp_port, camp_cookie)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     selected = parser.add_mutually_exclusive_group()
@@ -176,6 +213,7 @@ def main():
     selected.add_argument("--edit-multipart-only", action="store_true", help="check only message edit multipart cases")
     selected.add_argument("--edit-post-only", action="store_true", help="check only URL-encoded POST method-override edits")
     selected.add_argument("--edit-multipart-post-only", action="store_true", help="check only multipart POST method-override edits")
+    parser.add_argument("--label", help="run only a named case from the selected group")
     args = parser.parse_args()
     ordinary = tuple((label, body, accept, "", "application/x-www-form-urlencoded") for label, body, accept in FORMS)
     query = tuple((label, body, accept, query, "application/x-www-form-urlencoded") for label, body, accept, query in QUERY_FORMS)
@@ -188,6 +226,9 @@ def main():
     edit_multipart_post = tuple((label, *multipart_body(parts), query) for label, parts, query in EDIT_MULTIPART_POST_FORMS)
     edit_multipart_post = tuple((label, body, "text/html", query, content_type) for label, body, content_type, query in edit_multipart_post)
     forms = edit_multipart_post if args.edit_multipart_post_only else edit_post if args.edit_post_only else edit_multipart if args.edit_multipart_only else edit if args.edit_query_only else multipart if args.multipart_query_only else query if args.query_only else ordinary + query + multipart
+    if args.label:
+        forms = tuple(form for form in forms if form[0] == args.label)
+        assert forms, args.label
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-message-parameter-edges-") as scratch:
         temp = pathlib.Path(scratch)
@@ -215,17 +256,20 @@ def main():
                     camp_old.parent.mkdir(parents=True, exist_ok=True)
                     camp_old.write_bytes(OLD_FILE)
                 method, path = ("POST" if args.edit_post_only or args.edit_multipart_post_only else "PATCH", "/rooms/1/messages/1") if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only else ("POST", "/rooms/1/messages")
+                preview_kind = "image" if label in ("edit multipart image", "POST multipart image") else "video" if label == "edit multipart video" else "malformed" if label in ("edit multipart malformed JPEG", "POST multipart malformed JPEG") else None
                 rust_result, camp_result = run_case(
                     (method, path, accept), index, temp,
                     rust_base, camp_base, checkout, base_env, redis_port, body=body, query=query,
                     content_type=content_type,
+                    after_request=(lambda rust_port, rust_cookie, camp_port, camp_cookie:
+                                   replaced_preview(rust_port, rust_cookie, camp_port, camp_cookie, preview_kind)) if preview_kind else None,
                 )
                 rust_files = temp / f"rust-uploads-{index}" if args.edit_multipart_only or args.edit_multipart_post_only else None
                 camp_files = checkout / "storage/files" if args.edit_multipart_only or args.edit_multipart_post_only else None
                 rust_saved = saved_message(temp / f"rust-{index}.sqlite3", False, rust_files)
                 camp_saved = saved_message(temp / f"camp-{index}.sqlite3", True, camp_files)
                 if args.edit_multipart_only or args.edit_multipart_post_only:
-                    replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "POST multipart patch file", "POST multipart put file only", "POST multipart image")
+                    replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "edit multipart malformed JPEG", "POST multipart patch file", "POST multipart put file only", "POST multipart image", "POST multipart malformed JPEG")
                     assert rust_old.exists() != replaced, (label, "old Rustfire attachment cleanup")
                 if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only:
                     rust_saved = (rust_saved, message_updated_at(temp / f"rust-{index}.sqlite3") != message_updated_at(rust_base))

@@ -5942,18 +5942,13 @@ fn replace_message_attachment(db: &rusqlite::Connection, mid: i64, mut file: Upl
     } else {
         std::fs::write(&input, &file.bytes).map_err(db_err)?;
     }
-    let (width, height, processing_failed) = if let Some(format) = image_format(&file.content_type) {
+    let (width, height) = if let Some(format) = image_format(&file.content_type) {
         let (width, height) = analyze_image_and_thumbnail(&input, &stored, "thumb", format);
-        let failed = width.is_none() || height.is_none() || !std::path::Path::new(&dir)
-            .join("variants").join(format!("{stored}-thumb.{format}")).is_file();
-        (width.map(|value| value as f64), height.map(|value| value as f64), failed)
+        (width.map(|value| value as f64), height.map(|value| value as f64))
     } else if safe_inline_video(&file.content_type) {
-        let (width, height) = analyze_video_and_poster(&input, &stored);
-        let failed = width.is_none() || height.is_none() || !std::path::Path::new(&dir)
-            .join("variants").join(format!("{stored}-poster.webp")).is_file();
-        (width, height, failed)
+        analyze_video_and_poster(&input, &stored)
     } else {
-        (None, None, false)
+        (None, None)
     };
     let previous: Option<String> = db.query_row(
         "SELECT stored_name FROM attachments WHERE message_id=?1", [mid], |row| row.get(0)
@@ -5975,9 +5970,6 @@ fn replace_message_attachment(db: &rusqlite::Connection, mid: i64, mut file: Upl
     let plain: String = db.query_row("SELECT body FROM messages WHERE id=?1", [mid], |row| row.get(0)).map_err(db_err)?;
     if plain.is_empty() {
         refresh_file_only_search_entry(db, mid)?;
-    }
-    if processing_failed {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     Ok(())
 }
@@ -11520,7 +11512,7 @@ async fn signed_representation_get(
         }
     }
     if tokio::fs::metadata(&output).await.is_err() {
-        return Err(StatusCode::NOT_FOUND);
+        return Ok(rails_exception_500_response(&headers, &uri));
     }
     let response_type = if content_type == "image/tiff" {
         "image/png"
