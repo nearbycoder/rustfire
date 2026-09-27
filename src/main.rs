@@ -2178,11 +2178,20 @@ fn error_media_type(headers: &HeaderMap, uri: &Uri) -> HeaderValue {
         Some("json") => true,
         Some(_) => false,
         None if uri.path() == "/account.1" => false,
+        None if bot_api_path(uri.path()) => true,
         None => headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
             .is_some_and(|accept| accept.split(',').next().unwrap_or("").trim().split(';').next() == Some("application/json")),
     };
     if json { HeaderValue::from_static("application/json; charset=utf-8") }
     else { HeaderValue::from_static("text/html; charset=utf-8") }
+}
+fn bot_api_path(path: &str) -> bool {
+    let segments: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
+    segments.len() >= 4
+        && segments[0] == "rooms"
+        && segments[1].parse::<i64>().is_ok()
+        && segments[2] != "messages"
+        && segments[3] == "messages"
 }
 fn invalid_authenticity_response(headers: &HeaderMap, uri: &Uri) -> Response {
     rails_error_response(StatusCode::UNPROCESSABLE_ENTITY, headers, uri)
@@ -3191,6 +3200,18 @@ fn source_read_only_route(route: &str) -> bool {
         | "/attachments/{id}/{kind}"
     )
 }
+fn source_missing_write_action(route: &str, method: &Method) -> bool {
+    match route {
+        "/first_run" => method == Method::PATCH || method == Method::PUT || method == Method::DELETE,
+        "/account" | "/account.1" => method == Method::DELETE,
+        "/session" => method == Method::PATCH || method == Method::PUT,
+        "/rooms/{id}" | "/rooms/directs/{id}" => method == Method::PATCH || method == Method::PUT,
+        "/messages/{id}/boosts/{bid}" => method == Method::PATCH || method == Method::PUT,
+        "/users/me/profile" | "/users/{user_id}/profile" => method == Method::DELETE,
+        "/users/me/push_subscriptions/{id}" | "/users/{user_id}/push_subscriptions/{id}" => method == Method::PATCH || method == Method::PUT,
+        _ => false,
+    }
+}
 
 async fn reject_banned_ip(
     State(s): State<Arc<AppState>>,
@@ -3213,6 +3234,10 @@ async fn reject_banned_ip(
             _ => {}
         }
         let path = request.uri().path().to_string();
+        if request.extensions().get::<MatchedPath>()
+            .is_some_and(|route| source_missing_write_action(route.as_str(), request.method())) {
+            return rails_error_response(StatusCode::NOT_FOUND, request.headers(), request.uri());
+        }
         if request.extensions().get::<MatchedPath>()
             .is_none_or(|route| source_read_only_route(route.as_str())
                 || (route.as_str() == "/messages/{id}" && request.method() == Method::POST)) {
@@ -3264,6 +3289,23 @@ async fn reject_banned_ip(
             }
             request = Request::from_parts(parts, Body::from(bytes));
         }
+        if path.starts_with("/users/") && path.ends_with("/profile") && request.method() == Method::POST
+            && request.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded"))
+        {
+            let (parts, body) = request.into_parts();
+            let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
+                Ok(bytes) => bytes,
+                Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            };
+            let tunneled = form_urlencoded::parse(&bytes).any(|(key, value)| {
+                key == "_method" && matches!(value.as_ref(), "patch" | "put")
+            });
+            if !tunneled {
+                return rails_error_response(StatusCode::NOT_FOUND, &parts.headers, &parts.uri);
+            }
+            request = Request::from_parts(parts, Body::from(bytes));
+        }
         let anonymous_direct_upload = path == "/rails/active_storage/direct_uploads"
             && request.method() == Method::POST
             && session_token(&s, request.headers()).is_none();
@@ -3276,10 +3318,11 @@ async fn reject_banned_ip(
         } else {
             false
         };
-        let preauth_route = path == "/first_run"
+        let preauth_route = (path == "/first_run"
             || session_post_preauth
             || path.starts_with("/join/")
-            || path.starts_with("/session/transfers/");
+            || path.starts_with("/session/transfers/"))
+            && !matches!(user(&s, request.headers()), Ok(_));
         let csrf = if path.starts_with("/rails/active_storage/disk/") && request.method() == Method::PUT {
             None
         } else if anonymous_direct_upload {
@@ -3290,7 +3333,7 @@ async fn reject_banned_ip(
         } else if preauth_route {
             match cookie(request.headers(), "preauth_csrf") {
                 Some(token) => Some(token),
-                None => return StatusCode::FORBIDDEN.into_response(),
+                None => return invalid_authenticity_response(request.headers(), request.uri()),
             }
         } else if let Some(session_token) = session_token(&s, request.headers()) {
             match pool(&s).and_then(|db|db.query_row("SELECT s.csrf_token FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1 AND u.status=0",[session_token],|r|r.get(0)).optional().map_err(db_err)) {
@@ -3355,14 +3398,7 @@ async fn reject_banned_ip(
     let anonymous_search_post = request.uri().path() == "/searches"
         && request.method() == Method::POST
         && matches!(user(&s, request.headers()), Err(StatusCode::UNAUTHORIZED));
-    let bot_api_request = {
-        let segments: Vec<_> = request.uri().path().split('/').filter(|part| !part.is_empty()).collect();
-        segments.len() >= 4
-            && segments[0] == "rooms"
-            && segments[1].parse::<i64>().is_ok()
-            && segments[2] != "messages"
-            && segments[3] == "messages"
-    };
+    let bot_api_request = bot_api_path(request.uri().path());
     let authenticated_bot_on_other_route = !bot_api_request
         && request.uri().query()
             .and_then(|query| form_urlencoded::parse(query.as_bytes())
@@ -3888,6 +3924,11 @@ async fn session_post(
     .await
 }
 async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> AppResult {
+    match user(&s, &headers) {
+        Ok(_) => {}
+        Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
+        Err(error) => return Err(error),
+    }
     if let Some(t) = session_token(&s, &headers) {
         let db = pool(&s)?;
         let uid: Option<i64> = db
@@ -12796,12 +12837,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/messages/{id}/boosts/new.html", get(boost_new))
         .route("/messages/{id}/boosts/new.json", get(boost_new))
         .route("/messages/{id}/boosts/new.turbo_stream", get(boost_new))
-        .route("/messages", get(missing_messages_get))
+        .route("/messages", get(missing_messages_get).post(missing_messages_get))
         .route("/messages/new", get(|| async { StatusCode::NOT_FOUND }))
         .route("/messages/new.html", get(|| async { StatusCode::NOT_FOUND }))
         .route("/messages/new.json", get(|| async { StatusCode::NOT_FOUND }))
         .route("/messages/new.turbo_stream", get(|| async { StatusCode::NOT_FOUND }))
-        .route("/messages/{id}", get(missing_messages_get))
+        .route("/messages/{id}", get(missing_messages_get)
+            .patch(missing_messages_get).put(missing_messages_get).delete(missing_messages_get))
         .route("/messages/{id}/edit", get(missing_messages_get))
         .route(
             "/messages/{id}/boosts/{bid}",
