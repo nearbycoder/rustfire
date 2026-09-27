@@ -6466,6 +6466,9 @@ fn campfire_webhook_attachment_extension(kind: &str) -> Option<&'static str> {
         "application/zip" => "zip",
         "application/gzip" => "gzip",
         "text/vnd.turbo-stream.html" => "turbo_stream",
+        // Rails' Mime::Type.lookup creates an unregistered type whose symbol is nil.
+        // Webhook#extract_attachment_from still saves it as `attachment.`.
+        _ if !kind.is_empty() => "",
         _ => return None,
     })
 }
@@ -13007,7 +13010,9 @@ mod tests {
         assert_eq!(super::campfire_webhook_attachment_extension("audio/mpeg"), Some("mp3"));
         assert_eq!(super::campfire_webhook_attachment_extension("text/plain"), Some("text"));
         assert_eq!(super::campfire_webhook_attachment_extension("text/html"), Some("html"));
-        assert_eq!(super::campfire_webhook_attachment_extension("application/octet-stream"), None);
+        assert_eq!(super::campfire_webhook_attachment_extension("application/octet-stream"), Some(""));
+        assert_eq!(super::campfire_webhook_attachment_extension("application/x-rustfire-test"), Some(""));
+        assert_eq!(super::campfire_webhook_attachment_extension(""), None);
     }
 
     #[test]

@@ -33,6 +33,8 @@ REPLIES = {
     "error_text": (500, "text/plain", b"Error body"),
     "image": (200, "image/png", PNG),
     "large_zip": (200, "application/zip", LARGE_REPLY),
+    "octet_stream": (200, "application/octet-stream", b"generic binary reply"),
+    "unknown_type": (200, "application/x-rustfire-test", b"unregistered mime reply"),
     "error_no_type": (500, None, b"Error body"),
 }
 
@@ -188,8 +190,8 @@ def main():
     assert [(row[0], row[1], row[2]) for row in rust_rows] == [(row[0], row[1], row[2]) for row in camp_rows], (rust_rows, camp_rows)
     assert rust_files == camp_files, (rust_files, camp_files)
     assert rust_messages == camp_messages, next(((left, right) for left, right in zip(rust_messages, camp_messages) if left != right), None)
-    assert len(rust_rows) == 9 and len(rust_messages) == 19
-    print("PASS paired webhook replies: text, HTML, eight-second streamed text, stalled text and file timeouts, blank text, non-200 text attachment, PNG bytes, 26 MiB ZIP bytes, and no-content-type error match pinned Campfire")
+    assert len(rust_rows) == 11 and len(rust_messages) == 23
+    print("PASS paired webhook replies: text, HTML, eight-second streamed text, stalled text and file timeouts, blank text, non-200 text attachment, PNG bytes, 26 MiB ZIP bytes, generic and unregistered MIME attachments, and no-content-type error match pinned Campfire")
 
 
 if __name__ == "__main__":
