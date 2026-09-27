@@ -68,7 +68,11 @@ def check_browser(session, port, database, campfire):
     open_editor()
     browser(session, "fill", '#message_form-actions form[data-action*="form#cancel"] trix-editor', "Discard this change")
     browser(session, "press", "Escape")
-    browser(session, "wait", '#message_form-actions .message__body-content .trix-content')
+    try:
+        browser(session, "wait", '#message_form-actions .message__body-content .trix-content')
+    except RuntimeError as error:
+        state = browser(session, "eval", "({focused:document.activeElement?.outerHTML.slice(0,300),editing:!!document.querySelector('#message_form-actions .message__body-content--editing'),cancel:document.querySelector('#message_form-actions [data-form-target=cancel]')?.outerHTML})")
+        raise AssertionError(("Escape did not close the message editor", "campfire" if campfire else "rustfire", state, browser(session, "errors"))) from error
     with sqlite3.connect(database) as db:
         body = db.execute("SELECT body FROM action_text_rich_texts WHERE record_type='Message' AND record_id=1" if campfire else "SELECT body FROM messages WHERE id=1").fetchone()[0]
     assert "Original form message" in body and "Discard this change" not in body, body
@@ -85,7 +89,11 @@ def check_browser(session, port, database, campfire):
             break
         time.sleep(0.1)
     assert "Saved by keyboard" in body, body
-    browser(session, "wait", '#message_form-actions .message__body-content .trix-content')
+    try:
+        browser(session, "wait", '#message_form-actions .message__body-content .trix-content')
+    except RuntimeError as error:
+        state = browser(session, "eval", "({editing:!!document.querySelector('#message_form-actions .message__body-content--editing'),body:document.querySelector('#message_form-actions')?.outerHTML.slice(0,600)})")
+        raise AssertionError(("saved message did not close the editor", "campfire" if campfire else "rustfire", state, browser(session, "errors"))) from error
 
     open_editor()
     browser(session, "eval", "window.__confirmationTexts=[];window.confirm=message=>{window.__confirmationTexts.push(message);return false}")

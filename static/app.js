@@ -1,4 +1,11 @@
 document.addEventListener('trix-file-accept',event=>event.preventDefault());
+let submitMessageEdit;
+document.addEventListener('submit',event=>{
+  const form=event.target instanceof Element?event.target.closest('form[id^="form_message_"]'):null;
+  if(!form||!submitMessageEdit)return;
+  event.preventDefault();event.stopImmediatePropagation();
+  submitMessageEdit(form);
+},true);
 document.addEventListener('trix-before-initialize',()=>{Trix.config.blockAttributes.cite={tagName:'cite',inheritable:false};});
 document.addEventListener('toggle',event=>{
   const popup=event.target.closest?.('details[data-controller~="popup"]');
@@ -33,6 +40,13 @@ const centerLoadedForm=root=>{
   if(element)requestAnimationFrame(()=>element.scrollIntoView({behavior:'smooth',block:'center'}));
 };
 document.querySelectorAll('form[data-controller~="auto-submit"]').forEach(form=>form.requestSubmit());
+document.addEventListener('keydown',event=>{
+  if(event.key!=='Escape'||event.isComposing)return;
+  const form=event.target instanceof Element?event.target.closest('form[data-controller~="form"]'):null;
+  if(!form?.dataset.action?.includes('keydown.esc->form#cancel'))return;
+  event.preventDefault();
+  form.querySelector('[data-form-target="cancel"]')?.click();
+},true);
 document.addEventListener('keydown',event=>{
   const form=event.target instanceof Element?event.target.closest('form[data-controller~="form"]'):null;
   if(!form||event.defaultPrevented||event.isComposing)return;
@@ -567,6 +581,16 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
     article.outerHTML=await response.text();
     formatLocalTimes(messages);decorateOwn();formatMessageGroups();
   }
+  submitMessageEdit=async editForm=>{
+    const article=editForm.closest('.message');
+    const body=new URLSearchParams(new FormData(editForm));body.set('message[format]','html');
+    try{
+      // Campfire redirects HTML edits; reload the message instead of following that navigation.
+      const response=await fetch(editForm.action,{method:'PATCH',body,redirect:'manual',headers:{Accept:'text/html','X-CSRF-Token':csrfToken}});
+      if(response.status!==302&&response.type!=='opaqueredirect')throw Error('Could not save message');
+      await restoreMessage(document.getElementById(article.id)||article);
+    }catch{alert('Could not save or reload message')}
+  };
   const typingInput=composer.querySelector('trix-editor');
   const bodyInput=composer.querySelector('[name="message[body]"]');
   const mentionBox=document.createElement('div');
@@ -826,15 +850,6 @@ if (chat && document.querySelector('meta[name="current-room-id"]')) {
       const response=await fetch(deleteForm.action,{method:'DELETE',headers:{'X-CSRF-Token':csrfToken}});
       if(response.ok){deleteForm.closest('.message').remove();formatMessageGroups()}
       else alert('Could not delete message');
-      return;
-    }
-    const editForm=e.target.closest('form[id^="form_message_"]');
-    if(editForm){
-      e.preventDefault();const article=editForm.closest('.message');
-      const body=new URLSearchParams(new FormData(editForm));body.set('message[format]','html');
-      const response=await fetch(editForm.action,{method:'PATCH',body,headers:{Accept:'application/json','X-CSRF-Token':csrfToken}});
-      if(response.ok){try{await restoreMessage(article)}catch{alert('Message saved, but could not reload it')}}
-      else alert('Could not save message');
       return;
     }
     const quickBoost=e.target.closest('.quick-boosts form');

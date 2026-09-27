@@ -6372,10 +6372,13 @@ async fn message_edit(
 async fn message_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, mid)): Path<(i64, i64)>,
+    OriginalUri(uri): OriginalUri,
+    Path((room_id, message_id)): Path<(String, String)>,
     Form(f): Form<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let rid = path_record_id(&room_id)?;
+    let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
     let creator: Option<i64> = db
@@ -6497,28 +6500,30 @@ async fn message_update(
             json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":updated_message.client_message_id,"body":plain,"html":body_html,"presentation_html":presentation_html})
                 .to_string(),
     });
-    if headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .contains("json")
-    {
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let suffix = uri.path().rsplit('/').next().unwrap_or("").rsplit_once('.').map(|(_, format)| format);
+    if suffix.is_none() && accept.starts_with("application/vnd.rustfire+json") {
         Ok(Json(message_json(&s, &updated_message, Some(&headers))?).into_response())
+    } else if suffix == Some("json") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("application/json")) {
+        Ok((StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "application/json; charset=UTF-8")], r#"{"status":500,"error":"Internal Server Error"}"#).into_response())
     } else {
-        Ok(found_redirect(&format!("/rooms/{rid}/messages/{mid}")))
+        let mut response = found_redirect(&format!("/rooms/{rid}/messages/{mid}"));
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+        Ok(response)
     }
 }
 async fn message_post_override(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((rid, mid)): Path<(i64, i64)>,
+    OriginalUri(uri): OriginalUri,
+    Path((room_id, message_id)): Path<(String, String)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> AppResult {
     match form.get("_method").map(String::as_str) {
         Some("patch" | "put") => {
-            message_update(State(s), headers, Path((rid, mid)), Form(form)).await
+            message_update(State(s), headers, OriginalUri(uri), Path((room_id, message_id)), Form(form)).await
         }
-        Some("delete") => message_delete(State(s), headers, Path((rid, mid))).await,
+        Some("delete") => message_delete(State(s), headers, Path((path_record_id(&room_id)?, path_record_id(&message_id)?))).await,
         _ => Err(StatusCode::METHOD_NOT_ALLOWED),
     }
 }

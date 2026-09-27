@@ -99,7 +99,7 @@ try{
   assert(!messageStream.includes('data-stream-message'));
   assert(!messageStream.includes('data-creator-id'));
   assert(!messageStream.includes('data-local-datetime'));
-  const streamEdit=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream edited'})});
+  const streamEdit=await fetch(base+`/rooms/1/messages/${streamMessageId}`,{method:'PATCH',headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded',Accept:'application/vnd.rustfire+json','X-CSRF-Token':csrf},body:new URLSearchParams({'message[body]':'signed stream edited'})});
   assert.equal(streamEdit.status,200);
   const editEvents=[await nextFrame(),await nextFrame()];
   assert(editEvents.some(frame=>frame.identifier===signedIdentifier&&typeof frame.message==='string'&&frame.message.includes(`<turbo-stream maintain_scroll="true" action="replace" target="presentation_message_${streamClientId}">`)&&frame.message.includes('signed stream edited')));
