@@ -1319,6 +1319,8 @@ The same paired Chromium probe now installs a mock existing subscription before 
 
 ## Test-push payload
 
+The separate `python bench/paired_push_invalid_keys.py` probe passed against pinned Campfire `91d294f`. Campfire's delivery pool and Rustfire's test-notification route both removed a subscription whose 65-byte P-256 key represented a point outside the curve, and both retained a subscription with malformed base64. The bad point failed during local encryption before any push HTTP request. This checks saved-row cleanup for two invalid-key cases, not real push-service delivery or expiration responses.
+
 `python bench/paired_push_test_payload.py` passed against pinned Campfire `91d294f`. The source's `WebPush::Notification` encoder produced a fixed JSON payload, which Rustfire's production test-push payload helper matched as parsed JSON: title, body, icon, unread badge count, and the absolute click URL. Rustfire previously used a relative click path in test notifications. This check isolates payload construction; it does not test encryption, an outbound HTTP request, expiration handling, or a real browser notification.
 
 ## Device-transfer route methods

@@ -6104,8 +6104,17 @@ async fn deliver_push(
     builder.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
     builder.set_vapid_signature(signature);
     builder.set_urgency(Urgency::High);
-    let request =
-        request_builder::build_request::<PushBody>(builder.build().map_err(|e| e.to_string())?);
+    let message = builder.build().map_err(|error| {
+        if matches!(error, web_push::WebPushError::InvalidCryptoKeys) {
+            // Campfire's WebPush::Pool discards subscriptions whose encryption
+            // raises OpenSSL::OpenSSLError, including an invalid P-256 point.
+            if let Err(invalidation_error) = invalidate_push_subscription(&s, subscription.id) {
+                return invalidation_error;
+            }
+        }
+        error.to_string()
+    })?;
+    let request = request_builder::build_request::<PushBody>(message);
     let client = reqwest::Client::builder()
         .no_proxy()
         .resolve(host, address)
@@ -6123,22 +6132,21 @@ async fn deliver_push(
         .await
         .map_err(|e| e.to_string())?;
     if matches!(response.status().as_u16(), 404 | 410) {
-        let db = pool(&s).map_err(|e| e.to_string())?;
-        db.execute(
-            "DELETE FROM push_subscriptions WHERE id=?1",
-            [subscription.id],
-        )
-        .map_err(|e| e.to_string())?;
-        let any: bool = db
-            .query_row("SELECT EXISTS(SELECT 1 FROM push_subscriptions)", [], |r| {
-                r.get(0)
-            })
-            .map_err(|e| e.to_string())?;
-        s.has_push_subscriptions.store(any, Ordering::Relaxed);
+        invalidate_push_subscription(&s, subscription.id)?;
     }
     if !response.status().is_success() {
         return Err(format!("push service returned {}", response.status()));
     }
+    Ok(())
+}
+fn invalidate_push_subscription(s: &AppState, id: i64) -> Result<(), String> {
+    let db = pool(s).map_err(|e| e.to_string())?;
+    db.execute("DELETE FROM push_subscriptions WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    let any: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM push_subscriptions)", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    s.has_push_subscriptions.store(any, Ordering::Relaxed);
     Ok(())
 }
 fn enqueue_webhooks(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCode> {

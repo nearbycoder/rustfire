@@ -118,6 +118,8 @@ The importer preserves unknown inline image subtypes as file attachments and pre
 
 ## Remaining parity work
 
+The paired invalid-key push probe now confirms both apps discard a saved subscription with an invalid P-256 point while retaining a malformed-base64 subscription. This checks local encryption failure handling; real push-service responses and browser delivery remain open.
+
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior, including remaining generated document-head metadata and HTML serialization differences
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
