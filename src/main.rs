@@ -3445,6 +3445,7 @@ async fn transfer_update(
     State(s): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(token): Path<String>,
 ) -> AppResult {
     let signed_uid = transfer_id_from_token(&s.avatar_signing_key, &token).or_else(|| {
@@ -3465,7 +3466,16 @@ async fn transfer_update(
             params![token, now()], |r| r.get(0),
         ).optional().map_err(db_err)?
     };
-    let uid = uid.ok_or(StatusCode::BAD_REQUEST)?;
+    let Some(uid) = uid else {
+        let media = if headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+            .is_some_and(|accept| accept.split(',').next().unwrap_or("").trim().starts_with("text/vnd.turbo-stream.html"))
+        {
+            HeaderValue::from_static("text/vnd.turbo-stream.html; charset=utf-8")
+        } else {
+            error_media_type(&headers, &uri)
+        };
+        return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, media)], "").into_response());
+    };
     drop(db);
     let mut response = create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))?;
     *response.status_mut() = StatusCode::FOUND;

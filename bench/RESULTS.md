@@ -1465,6 +1465,8 @@ The revised `python bench/paired_push_invalid_keys.py` probe passed against pinn
 
 ## Device-transfer route methods
 
+`python bench/paired_transfer_edges.py` passed ten source-signed link cases on disposable accounts. Both apps render an invalid-link transfer page, reject malformed, altered, expired, banned-user, and deactivated-user links with an empty HTTP 400, and create no session for those failures. Rejected HTML, JSON, Turbo Stream, and wildcard requests have matching media types. A valid link and its replay each establish a fresh session and redirect to `/`. Rustfire previously omitted the HTML media type and mislabeled the Turbo Stream error. The existing cross-app POST-form, PATCH, and PUT transfer workflow in `paired_profile.py --requests 32` also passed after the change. This tests local token and account-state behavior, not external QR scanning or device-specific browsers.
+
 `python bench/paired_profile.py --requests 32` passed against pinned Campfire `91d294f` after extending the transfer probe. With each app's signed link opened in a fresh client, both accepted the source-shaped POST form with a PUT override, direct PATCH, and direct PUT; each redirected to the root and established a session that could open `/rooms/1`. The direct requests used the page's global CSRF token because Campfire's hidden form token is scoped to the form method. Rustfire previously returned 405 to direct PATCH. The profile, avatar, and mutation checks in the same run also passed. The 32-request read timings are a short regression sample with different HTML body sizes, not a feature-equivalent capacity claim.
 
 ## Paired concurrent generic-file composer uploads
