@@ -2841,15 +2841,18 @@ fn campfire_qr_code(url: &str) -> Result<QrCode, StatusCode> {
     }
     Ok(best.unwrap().1)
 }
-async fn qr_code_show(Path(id): Path<String>, headers: HeaderMap) -> AppResult {
+async fn qr_code_show(Path(id): Path<String>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
     if id.len() > 4096 {
         return Err(StatusCode::URI_TOO_LONG);
     }
     let id = id.split_once('.').map_or(id.as_str(), |(encoded, _)| encoded);
-    let decoded = URL_SAFE_NO_PAD
+    let decoded = match URL_SAFE_NO_PAD
         .decode(id)
         .or_else(|_| URL_SAFE.decode(id))
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    {
+        Ok(decoded) => decoded,
+        Err(_) => return Ok(rails_exception_500_response(&headers, &uri)),
+    };
     let url = std::str::from_utf8(&decoded).map_err(|_| StatusCode::BAD_REQUEST)?;
     if url.len() > 2048 || url.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -7090,16 +7093,6 @@ async fn create_closed_room(
 ) -> AppResult {
     create_room(State(s), headers, Path("closeds".to_string()), RawForm(raw)).await
 }
-async fn room_edit(
-    State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(rid): Path<i64>,
-) -> AppResult {
-    let u = user(&s, &headers)?;
-    let r = room_for(&s, u.id, rid)?;
-    let kind = if r.kind == "Rooms::Closed" { "closeds" } else { "opens" };
-    render_room_edit(s, headers, rid, kind).await
-}
 async fn render_room_edit(s: Arc<AppState>, headers: HeaderMap, rid: i64, kind: &str) -> AppResult {
     let u = user(&s, &headers)?;
     let r = room_for(&s, u.id, rid)?;
@@ -7425,6 +7418,9 @@ async fn direct_show(
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
         Err(error) => return Err(error),
     }
+    Ok(rails_exception_500_response(&headers, &uri))
+}
+async fn missing_room_settings(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> AppResult {
     Ok(rails_exception_500_response(&headers, &uri))
 }
 async fn room_delete(
@@ -11826,6 +11822,7 @@ async fn rails_missing_route_type(req: Request, next: Next) -> Response {
         {
             let vary = response.headers().get(header::VARY).cloned();
             response = rails_error_response(StatusCode::NOT_FOUND, &headers, &uri);
+            response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(rails_not_found_type(&uri, accept)));
             if let Some(vary) = vary {
                 response.headers_mut().insert(header::VARY, vary);
             }
@@ -12485,7 +12482,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/{id}/refresh", get(room_refresh))
         .route("/rooms/{id}/refresh.turbo_stream", get(room_refresh))
         .route("/rooms/{id}/refresh_state", get(room_refresh_state))
-        .route("/rooms/{id}/settings", get(room_edit))
+        .route("/rooms/{id}/settings", get(missing_room_settings))
         .route(
             "/rooms/{id}/messages",
             get(messages_index)

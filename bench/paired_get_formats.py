@@ -5,6 +5,7 @@ and Campfire runs from the pinned source in an isolated checkout and Redis.
 """
 
 import argparse
+import hashlib
 import http.client
 import pathlib
 import re
@@ -73,8 +74,11 @@ def request(port, path, cookie, accept, compare_406_bodies, compare_error_bodies
         content_type = (response.getheader("Content-Type") or "").split(";", 1)[0]
         result = (response.status, content_type)
         if compare_406_bodies or compare_error_bodies:
-            statuses = (403, 406) if compare_error_bodies else (406,)
-            result += (body if response.status in statuses else None,)
+            if compare_error_bodies and response.status == 500:
+                result += ((len(body), hashlib.sha256(body).hexdigest()),)
+            else:
+                statuses = (403, 406) if compare_error_bodies else (406,)
+                result += (body if response.status in statuses else None,)
         if compare_redirects:
             location = response.getheader("Location")
             target = urllib.parse.urlsplit(location) if location else None
@@ -92,7 +96,7 @@ def main():
     parser.add_argument("--route-inventory", action="store_true", help="check every application GET route from the pinned Rails route table")
     parser.add_argument("--exclude-source-500s", action="store_true", help="report but exclude routes that fail inside pinned Campfire")
     parser.add_argument("--compare-406-bodies", action="store_true", help="also compare Not Acceptable response bodies")
-    parser.add_argument("--compare-error-bodies", action="store_true", help="also compare forbidden and Not Acceptable response bodies")
+    parser.add_argument("--compare-error-bodies", action="store_true", help="also compare forbidden, Not Acceptable, and server-error response bodies")
     parser.add_argument("--compare-redirects", action="store_true", help="also compare redirect path and query")
     parser.add_argument("--role", choices=("admin", "member", "anonymous"), default="admin", help="request as an admin, member, or signed-out visitor")
     args = parser.parse_args()
