@@ -122,6 +122,17 @@ Rustfire's completion time grew less from 80 to 320 bots under these worker sett
 
 `bench/paired_webhook_failures.py` separately checked two failure paths. A receiver that waited beyond seven seconds produced the same timeout bot reply and normalized message list in both apps. A refused local connection produced no bot reply in either app; Campfire retained one failed Resque job and Rustfire retained one failed SQLite job. Manually requeuing those failed jobs delivered the same outgoing JSON in both apps, preserved each historical failure, and set `retried_at`. This behavioral check was not timed and does not cover other network errors or repeated retries under load.
 
+## Thirty-second paired webhook load
+
+`bench/paired_webhook_sustained.py` offered 360 sequential message posts over 30 seconds at 12 posts/s, each in the same direct room with eight bots. Every post produced eight outgoing webhooks, and a local receiver held each request for 100 ms before returning 204. Both apps used the same bot IDs, tokens, membership, and message bodies on fresh disposable SQLite databases. Campfire used one Puma process, 22 registered Resque workers, and isolated Redis with 250 ms polling; Rustfire used one release process and 64 webhook slots. The runs were serial on the same 32-logical-CPU host, with one warmup post before timing. Both app orders completed **2,880/2,880** matching JSON payloads, with no duplicates, queued jobs, or failed jobs. The p95 offered-post scheduling lag was under 0.5 ms in both apps.
+
+| Trial order | Campfire deliveries during posting | Rustfire deliveries during posting | Campfire delivery p95 | Rustfire delivery p95 | Campfire total | Rustfire total |
+|---|---:|---:|---:|---:|---:|---:|
+| Campfire first | 1,100 | 2,860 | 41,398.89 ms | 205.01 ms | 73.065 s | 30.381 s |
+| Rustfire first | 1,184 | 2,863 | 37,930.02 ms | 206.62 ms | 69.689 s | 30.915 s |
+
+The offered load required about 96 webhook deliveries/s. During posting, Campfire completed 36.73–39.55/s and drained its remaining 1,696–1,780 deliveries in another 39.75–43.12 seconds; Rustfire completed 95.59–95.70/s and drained its remaining 17–20 in under one second. End-to-end completion was 2.25–2.40× faster for Rustfire on this specific workload. Reproduce with the two commands in `bench/README.md`. This is one 30-second rate point on a shared client/server host, with 204 responses and no browser sockets, push subscriptions, or bot replies. It does not establish maximum throughput, hours-long stability, or whole-app scale at full parity.
+
 ## Turbo route format parity
 
 `python bench/paired_turbo_formats.py` passed on disposable instances of the pinned source and Rustfire. The room refresh and account user pagination routes now agree on HTTP status and media type for absent, HTML, JSON, wildcard, and Turbo Stream Accept headers, and for explicit `.turbo_stream` paths. Both return the same JSON 406 body when the refresh route is requested as JSON, and treat a nonnumeric `since` value as zero. Empty room refresh responses contain a newline as in the source. Rustfire's browser applies Turbo refresh responses for edits and uses a separate JSON `refresh_state` route for backlog pagination. This is a route behavior check, not a timing result.
