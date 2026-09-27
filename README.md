@@ -134,6 +134,8 @@ A separate one-bot text-reply load scheduled 120 rich posts at 24 per second in 
 
 The same 64-socket load with alternating indexed plain-text and rich HTML bot replies also saved and delivered every reply in both server orders. All captured post and reply appends matched parsed Campfire markup, and Rustfire finished in 5.05–5.07 seconds versus Campfire's 11.32–12.42 seconds under the tested setup. See the [mixed-reply reports](bench/RESULTS.md#paired-mixed-text-and-html-webhook-reply-load).
 
+In a 30-second mixed-reply run at 15 scheduled posts/s with 64 sockets, both apps saved all 450 posts and replies and delivered all 57,600 expected appends per order. Rustfire drained replies within 0.07 seconds of the final post; Campfire took another 7.73–13.20 seconds. All captured post and reply markup matched after generated-value normalization. See the [30-second reports](bench/RESULTS.md#thirty-second-mixed-webhook-reply-load).
+
 The 400-socket mixed trial was also repeated with four distinct socket users in each room. Both server orders passed all delivery and checked read/write assertions; Rustfire served 2.10–2.15× as many checked reads per second. The 30-second trial still does not establish maximum or sustained capacity.
 
 A later 30-second, four-room rich-text workload with 4,000 sockets subscribed to eight browser channels delivered all 360,000 expected message appends and unread events per app in both server orders. Rustfire served 3.76–4.77× as many checked page reads per second. Rustfire met every writer deadline; Campfire missed one order's 30-second deadline by 15 ms. This is a sampled load point, not a reliable maximum-capacity or whole-app parity result.

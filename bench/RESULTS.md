@@ -1435,3 +1435,16 @@ With `--reply-mode mixed`, the same 120 rich mentions at 24 scheduled posts/s pr
 | Campfire first | Rustfire | 2.83 ms | 123.41 ms | 0.106 s | 5.067 s | 49.35 MiB |
 
 Campfire ran one Puma worker and 16 Resque workers with isolated Redis; Rustfire ran one release process. Runs were serial on the same host, with PSS sampled every 200 ms and load clients excluded. Rustfire finished this checked workload 2.24–2.45× sooner in the two orders. See the [Rustfire-first](results/webhook-replies-mixed-64s-rust-first.json) and [Campfire-first](results/webhook-replies-mixed-64s-camp-first.json) reports. These short runs do not measure attachment replies under load, push delivery, other browser channels, longer stability, maximum capacity, or full-app equivalence.
+
+## Thirty-second mixed webhook reply load
+
+The same mixed text and HTML fixture scheduled 450 posts at 15/s over 30 seconds, with 64 room-message sockets and 16 Campfire Resque workers. Every webhook payload, saved reply body, and queue-drain condition passed in both server orders. Each app delivered all **28,800 post appends and 28,800 reply appends** per order, with no misses, unexpected events, or early socket closes. All 450 post and 450 reply appends captured on one socket matched parsed Campfire markup after generated-value normalization, and all sockets received the same saved reply IDs. The p95 post-start scheduling lag stayed below 0.7 ms.
+
+| Server order | App | HTTP post p95 | Webhook p95 | Reply drain after posting | Total trial | Sampled peak server PSS |
+|---|---|---:|---:|---:|---:|---:|
+| Rustfire first | Rustfire | 3.14 ms | 124.81 ms | 0.069 s | 30.006 s | 55.82 MiB |
+| Rustfire first | Campfire | 382.70 ms | 7,326.67 ms | 7.727 s | 37.761 s | 2,652.47 MiB |
+| Campfire first | Campfire | 1,186.73 ms | 12,882.78 ms | 13.204 s | 43.541 s | 2,747.85 MiB |
+| Campfire first | Rustfire | 3.00 ms | 124.81 ms | 0.059 s | 29.996 s | 54.26 MiB |
+
+Rustfire cleared all replies within 0.06–0.07 seconds of the final HTTP post; Campfire's last reply took another 7.73–13.20 seconds. The two total-trial ratios were 1.26× and 1.45×. Campfire's HTTP posts completed at an observed 14.83–14.98/s, close to the offered 15/s, but its webhook latency rose during this run. Both apps finished all work and delivered every checked event. The [Rustfire-first](results/webhook-replies-mixed-30s-rust-first.json) and [Campfire-first](results/webhook-replies-mixed-30s-camp-first.json) reports retain the raw measurements. This is a 30-second same-host workload, not a maximum-capacity or hours-long stability test; it excludes attachment replies, push, other browser channels, and full-app parity.
