@@ -1,5 +1,6 @@
-"""Compare message attachment type detection when multipart MIME types are misleading."""
+"""Compare multipart message attachment storage and MIME detection with Campfire."""
 
+import argparse
 import hashlib
 import http.client
 import pathlib
@@ -15,14 +16,18 @@ from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, w
 from paired_link_preview import Presentation
 
 
-def cases():
+def cases(large_mib=None):
     files = REPOSITORY / "test/fixtures/files"
-    return [
+    fixtures = [
         ("jpeg-as-text", "moon.jpg", "text/plain", (files / "moon.jpg").read_bytes()),
         ("png-as-text", "pixel.png", "text/plain", PNG),
         ("bmp-as-jpeg", "pixel.bmp", "image/jpeg", (files / "pixel.bmp").read_bytes()),
         ("mov-as-text", "alpha-centuri.mov", "text/plain", (files / "alpha-centuri.mov").read_bytes()),
     ]
+    if large_mib is not None:
+        fixtures.append(("large-file", "large.bin", "application/octet-stream",
+                         b"R" * (large_mib * 1024 * 1024 + 1)))
+    return fixtures
 
 
 def post(port, cookie, csrf, case, expected_status=200):
@@ -67,7 +72,8 @@ def saved(database, campfire, upload_dir, fixtures):
         if byte_size is not None:
             assert byte_size == len(data), row
         path = upload_dir / key[:2] / key[2:4] / key if campfire else upload_dir / key
-        assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(data).digest(), path
+        with path.open("rb") as stored_file:
+            assert hashlib.file_digest(stored_file, "sha256").digest() == hashlib.sha256(data).digest(), path
         types.append(content_type)
     return types
 
@@ -106,9 +112,15 @@ def malformed_state(database, campfire, upload_dir):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--large-mib", type=int,
+                        help="also upload a binary message attachment of this many MiB plus one byte")
+    args = parser.parse_args()
+    if args.large_mib is not None and args.large_mib < 1:
+        parser.error("--large-mib must be positive")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip()
     assert revision == REVISION, revision
-    fixtures = cases()
+    fixtures = cases(args.large_mib)
     with tempfile.TemporaryDirectory(prefix="paired-attachment-mime-") as scratch:
         temp = pathlib.Path(scratch)
         rust_db, camp_db = temp / "rust.sqlite3", temp / "camp.sqlite3"
@@ -129,6 +141,7 @@ def main():
                 rust_types = saved(rust_db, False, temp / "uploads", fixtures)
                 rust_bad = post(rust_port, "session_token=benchmark-session", "benchmark-csrf", ("text-as-jpeg", "notes.txt", "image/jpeg", b"A plain text attachment.\n"), None)[0]
                 rust_bad_row = malformed_state(rust_db, False, temp / "uploads")
+                assert not list((temp / "uploads").glob("message-upload-*")), "Rustfire left staged composer files"
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -154,7 +167,8 @@ def main():
                 rust = presentation(rust_payload, case[0])
                 camp = presentation(camp_payload, case[0])
                 assert rust == camp, (case[0], next(((i,left,right) for i,(left,right) in enumerate(zip(rust,camp)) if left!=right), (len(rust),len(camp))))
-            print("PASS paired message attachment types, saved original bytes, Turbo responses, and malformed image failure")
+            large_note = f", {args.large_mib} MiB plus one byte file" if args.large_mib else ""
+            print(f"PASS paired message attachment types, saved original bytes, Turbo responses, malformed image failure{large_note}")
         finally:
             redis.terminate()
             redis.wait(timeout=10)

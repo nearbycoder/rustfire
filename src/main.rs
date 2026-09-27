@@ -5315,6 +5315,13 @@ struct Upload {
     filename: String,
     content_type: String,
     bytes: Vec<u8>,
+    temporary: Option<UploadTemporaryFile>,
+}
+struct UploadTemporaryFile(std::path::PathBuf);
+impl Drop for UploadTemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 fn insert_message(
     s: &Arc<AppState>,
@@ -5328,7 +5335,16 @@ fn insert_message(
     allow_blank: bool,
 ) -> Result<ChatMessage, StatusCode> {
     if let Some(file) = upload.as_mut() {
-        file.content_type = sniff_upload_content_type(&file.bytes, &file.content_type).to_string();
+        let prefix = if let Some(temporary) = &file.temporary {
+            let mut source = std::fs::File::open(&temporary.0).map_err(db_err)?;
+            let mut prefix = vec![0; 16];
+            let size = std::io::Read::read(&mut source, &mut prefix).map_err(db_err)?;
+            prefix.truncate(size);
+            prefix
+        } else {
+            file.bytes.iter().copied().take(16).collect()
+        };
+        file.content_type = sniff_upload_content_type(&prefix, &file.content_type).to_string();
     }
     let request_host = request_headers
         .and_then(|headers| headers.get(header::HOST))
@@ -5407,7 +5423,11 @@ fn insert_message(
         std::fs::create_dir_all(&dir).map_err(db_err)?;
         let stored = Uuid::new_v4().to_string();
         let input = std::path::Path::new(&dir).join(&stored);
-        std::fs::write(&input, file.bytes).map_err(db_err)?;
+        if let Some(temporary) = &file.temporary {
+            std::fs::rename(&temporary.0, &input).map_err(db_err)?;
+        } else {
+            std::fs::write(&input, &file.bytes).map_err(db_err)?;
+        }
         let (width, height) = if let Some(format) = image_format(&file.content_type) {
             let (width, height) = analyze_image_and_thumbnail(&input, &stored, "thumb", format);
             attachment_processing_failed = width.is_none()
@@ -5833,6 +5853,7 @@ async fn deliver_webhook(
                 filename: format!("attachment.{ext}"),
                 content_type: kind,
                 bytes: data,
+                temporary: None,
             }),
             false,
             None,
@@ -5903,7 +5924,7 @@ async fn message_create(
         let mut client_id = None;
         let mut upload = None;
         let mut rich = true;
-        while let Some(field) = multipart
+        while let Some(mut field) = multipart
             .next_field()
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?
@@ -5915,16 +5936,24 @@ async fn message_create(
                     .content_type()
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|_| StatusCode::BAD_REQUEST)?
-                    .to_vec();
-                if !bytes.is_empty() {
+                let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+                tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
+                let temporary = std::path::Path::new(&dir).join(format!("message-upload-{}", Uuid::new_v4()));
+                let cleanup = UploadTemporaryFile(temporary.clone());
+                let mut staged = tokio::fs::File::create(&temporary).await.map_err(db_err)?;
+                let mut count = 0usize;
+                while let Some(chunk) = field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+                    count = count.checked_add(chunk.len()).ok_or(StatusCode::BAD_REQUEST)?;
+                    staged.write_all(&chunk).await.map_err(db_err)?;
+                }
+                staged.flush().await.map_err(db_err)?;
+                drop(staged);
+                if count > 0 {
                     upload = Some(Upload {
                         filename,
                         content_type,
-                        bytes,
+                        bytes: Vec::new(),
+                        temporary: Some(cleanup),
                     })
                 }
             } else if name == "message[body]" {
@@ -9534,6 +9563,7 @@ async fn bot_messages_post(
                             filename,
                             content_type,
                             bytes,
+                            temporary: None,
                         });
                     }
                 }
@@ -9972,12 +10002,6 @@ async fn direct_upload_create(
         "signed_id":blob_token(&s.blob_signing_key,id).map_err(db_err)?,
         "direct_upload":{"url":public_url(&headers,&format!("/rails/active_storage/disk/{upload_token}")),"headers":{"Content-Type":content_type}}
     })).into_response())
-}
-struct UploadTemporaryFile(std::path::PathBuf);
-impl Drop for UploadTemporaryFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
 }
 async fn direct_upload_put(
     State(s): State<Arc<AppState>>,
@@ -11409,7 +11433,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/{id}/settings", get(room_edit))
         .route(
             "/rooms/{id}/messages",
-            get(messages_index).post(message_create),
+            get(messages_index)
+                .post(message_create)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
             "/rooms/{id}/messages/{mid}",
