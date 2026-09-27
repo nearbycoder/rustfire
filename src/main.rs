@@ -2586,14 +2586,10 @@ async fn fetch_public_url(input: &str, head: bool) -> Option<reqwest::Response> 
     None
 }
 fn clean_og_text(input: &str) -> String {
-    // Rails strip_tags removes markup but retains text inside elements such as
-    // <script>. Ammonia drops their contents and changes the preview title.
-    ParsedHtml::parse_fragment(input)
-        .root_element()
-        .text()
-        .collect::<String>()
-        .trim()
-        .to_string()
+    // Campfire's HTML5 sanitize(strip_tags(...)) keeps text inside script and
+    // style tags, preserves outer spaces, and escapes text delimiters.
+    let text = ParsedHtml::parse_fragment(input).root_element().text().collect::<String>();
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\u{a0}', "&nbsp;")
 }
 fn og_attributes(document: &str) -> HashMap<String, String> {
     let html = ParsedHtml::parse_document(document);
@@ -2685,7 +2681,7 @@ async fn unfurl_url(input: &str) -> Option<Value> {
     let attributes = og_attributes(&String::from_utf8_lossy(&body));
     let title = clean_og_text(attributes.get("title")?);
     let description = clean_og_text(attributes.get("description")?);
-    if title.is_empty() || description.is_empty() {
+    if title.trim().is_empty() || description.trim().is_empty() {
         return None;
     }
     let canonical = if let Some(candidate) = attributes.get("url") {
@@ -13713,6 +13709,16 @@ mod tests {
         let tags = super::og_attributes(html);
         assert_eq!(tags.get("title").unwrap(), "First");
         assert_eq!(tags.get("description").unwrap(), "Second");
+    }
+    #[test]
+    fn opengraph_clean_text_preserves_outer_spaces() {
+        assert_eq!(super::clean_og_text(" Hello "), " Hello ");
+        assert_eq!(super::clean_og_text("Hi <b>there</b> "), "Hi there ");
+        assert_eq!(super::clean_og_text("&nbsp;Hi&nbsp;"), "&nbsp;Hi&nbsp;");
+        assert_eq!(super::clean_og_text("A &amp; B"), "A &amp; B");
+        assert_eq!(super::clean_og_text("A < B"), "A &lt; B");
+        assert_eq!(super::clean_og_text("A<style>x</style>B"), "AxB");
+        assert!(super::clean_og_text(" <img src='x'> ").trim().is_empty());
     }
     #[test]
     fn live_message_replace_requests_scroll_maintenance() {
