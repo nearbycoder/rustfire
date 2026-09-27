@@ -34,16 +34,17 @@ PAGES = (
     ("involvement", "/rooms/1/involvement", "body"),
     ("push-subscriptions", "/users/me/push_subscriptions", "body"),
 )
+EMPTY_PAGES = (("welcome", "/", ".message-area--empty"),)
 
 
-def capture(session, port, directory, name, width, height):
+def capture(session, port, directory, name, width, height, pages, login_path):
     browser(session, "set", "viewport", str(width), str(height))
     browser(session, "open", f"http://127.0.0.1:{port}/session/new")
     browser(session, "fill", 'input[name="email_address"]', "benchmark@example.invalid")
     browser(session, "fill", 'input[name="password"]', "benchmark-password")
     browser(session, "click", 'button[name="log_in"]')
-    browser(session, "wait", "--url", "**/rooms/1")
-    for label, path, selector in PAGES:
+    browser(session, "wait", "--url", f"**{login_path}")
+    for label, path, selector in pages:
         browser(session, "open", f"http://127.0.0.1:{port}{path}")
         browser(session, "wait", selector)
         browser(session, "wait", "--load", "networkidle")
@@ -59,8 +60,11 @@ def main():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=800)
     parser.add_argument("--max-difference", type=float, default=0.002)
+    parser.add_argument("--no-rooms", action="store_true", help="compare the signed-in welcome page for a user with no room memberships")
     args = parser.parse_args()
     assert args.width > 0 and args.height > 0 and 0 <= args.max_difference <= 1
+    pages = EMPTY_PAGES if args.no_rooms else PAGES
+    login_path = "/" if args.no_rooms else "/rooms/1"
     assert shutil.which("agent-browser"), "agent-browser CLI is required"
     assert shutil.which("magick"), "ImageMagick is required"
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
@@ -82,6 +86,9 @@ def main():
             camp.execute("UPDATE accounts SET join_code='benchmark' WHERE id=1")
             rust.execute("UPDATE messages SET updated_at=? WHERE id=1", (updated_at,))
             rust.execute("UPDATE users SET created_at=? WHERE id=2", (member_created_at,))
+            if args.no_rooms:
+                camp.execute("DELETE FROM memberships WHERE user_id=1")
+                rust.execute("DELETE FROM memberships WHERE user_id=1")
         redis, redis_log = start_redis(temp, redis_port)
         try:
             rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": environment["SECRET_KEY_BASE"]})
@@ -91,8 +98,8 @@ def main():
                                             cwd=REPOSITORY, env=environment, stdout=log, stderr=log)
                     try:
                         wait_for_server(camp_port, camp)
-                        capture(sessions[0], rust_port, args.output_dir, "rustfire", args.width, args.height)
-                        capture(sessions[1], camp_port, args.output_dir, "campfire", args.width, args.height)
+                        capture(sessions[0], rust_port, args.output_dir, "rustfire", args.width, args.height, pages, login_path)
+                        capture(sessions[1], camp_port, args.output_dir, "campfire", args.width, args.height, pages, login_path)
                     finally:
                         stop_server(camp)
             finally:
@@ -104,7 +111,7 @@ def main():
             redis.wait(timeout=10)
             redis_log.close()
     differences = {}
-    for label, _, _ in PAGES:
+    for label, _, _ in pages:
         compared = subprocess.run(
             ["magick", "compare", "-metric", "AE", str(args.output_dir / f"rustfire-{label}.png"),
              str(args.output_dir / f"campfire-{label}.png"), str(args.output_dir / f"diff-{label}.png")],
@@ -114,7 +121,7 @@ def main():
         matched = re.search(r"\(([\d.eE+-]+)\)", compared.stderr)
         assert matched, compared.stderr
         differences[label] = float(matched.group(1))
-    print(f"{len(PAGES)} paired Chromium pages at {args.width}x{args.height}: {differences}")
+    print(f"{len(pages)} paired Chromium pages at {args.width}x{args.height}: {differences}")
     assert all(difference < args.max_difference for difference in differences.values()), differences
 
 

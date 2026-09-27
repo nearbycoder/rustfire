@@ -2280,14 +2280,6 @@ fn csrf_forms(html: &str, token: &str) -> String {
     out.push_str(rest);
     out
 }
-fn render(title: &str, body: &str, current: Option<&User>) -> Response {
-    render_with_csrf(
-        title,
-        body,
-        current,
-        current.and_then(|u| u.csrf_token.as_deref()).unwrap_or(""),
-    )
-}
 fn render_unauth(title: &str, body: &str, logo_version: Option<&str>) -> Response {
     render_unauth_with_nav_and_flash(title, body, "", "", "", logo_version)
 }
@@ -2434,43 +2426,6 @@ fn incompatible_browser_page() -> Response {
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='light dark'><title>Unsupported browser</title><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/unsupported.css'>{}</head><body><a class='skip-navigation' href='#main-content'>Skip to main content</a><nav id='nav'></nav><main id='main-content'><div class='panel center'><header><h1 class='txt-x-large txt-tight-lines txt-align-center margin-none-block-start margin-block-end'>Upgrade to a supported web browser</h1><div class='description flex align-start gap'>{translation}<p class='margin-none-block-start'>Campfire requires a modern web browser. Please use one of the browsers listed below and make sure auto-updates are enabled.</p></div></header><div class='browser-list flex align-center flex-wrap gap justify-center margin-block'>{browsers}</div></div></main><a href='https://once.com' id='app-logo' target='_blank' aria-label='Once software from 37signals home page'><img src='/static/icons/campfire-icon.png' alt='Campfire logo' width='256' height='216'></a></body></html>",
         custom_styles_tag(),
     ))
-    .into_response()
-}
-fn render_with_csrf(title: &str, body: &str, current: Option<&User>, token: &str) -> Response {
-    let account_stylesheet = if body.contains("class='panel account-settings") || body.contains("custom-styles-panel") {
-        "<link rel='stylesheet' href='/static/account.css'>"
-    } else {
-        ""
-    };
-    let profile_stylesheet = if body.contains("profile-settings") {
-        "<link rel='stylesheet' href='/static/profile.css'>"
-    } else {
-        ""
-    };
-    let nav = if let Some(u) = current {
-        format!(
-            "<div class='top-user'><span>{}</span><a href='/users/me/profile'>Settings</a><form method='post' action='/session/logout'><button>Sign out</button></form></div>",
-            esc(&u.name)
-        )
-    } else {
-        String::new()
-    };
-    let user_id = current.map(|u| u.id.to_string()).unwrap_or_default();
-    let custom_styles = custom_styles_tag();
-    let html = format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='csrf-token' content='{}'><meta name='vapid-public-key' content='{}'><meta name='theme-color' content='#f2ede3'><title>{} · Rustfire</title><link rel='icon' href='/account/logo'><link rel='manifest' href='/webmanifest.json'><link rel='stylesheet' href='/static/app.css'><link rel='stylesheet' href='/static/chat.css'><link rel='stylesheet' href='/static/trix.css'>{account_stylesheet}{profile_stylesheet}{custom_styles}<script defer src='/static/trix.js'></script><script defer src='/static/app.js'></script></head><body data-user-id='{}'><a class='skip' href='#main'>Skip to main content</a><header><a class='brand' href='/'><img src='/account/logo' alt=''>Rustfire</a>{}</header><main id='main'>{}</main></body></html>",
-        esc(token),
-        VAPID_PUBLIC.get().map(String::as_str).unwrap_or(""),
-        esc(title),
-        user_id,
-        nav,
-        body
-    );
-    Html(if token.is_empty() {
-        html
-    } else {
-        csrf_forms(&html, token)
-    })
     .into_response()
 }
 fn public_url(headers: &HeaderMap, path: &str) -> String {
@@ -3494,11 +3449,12 @@ async fn root(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     };
     Ok(match rid {
         Some(id) => found_redirect(&format!("/rooms/{id}")),
-        None => render(
-            "Welcome",
-            "<div class='empty'><h1>Welcome to Rustfire</h1><p>Start a room or ping someone to begin.</p><a class='button' href='/rooms/opens/new'>Create a room</a></div>",
-            Some(&u),
-        ),
+        None => {
+            let body = format!("<div id=\"message-area\" class=\"message-area\"><div class=\"message-area--empty min-width center\"><figure class=\"center pad\"><img aria-hidden=\"true\" class=\"colorize--black translucent\" src=\"/assets/messages-empty-84c8fd41.svg\"><span class=\"for-screen-reader\">{}</span></figure></div></div>", esc(&u.name));
+            let sidebar = "<turbo-frame data-turbo-permanent=\"true\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-action=\"presence:present@window-&gt;rooms-list#read read-rooms:read-&gt;rooms-list#read turbo:frame-load-&gt;rooms-list#loaded refresh-room:visible@window-&gt;turbo-frame#reload\" id=\"user_sidebar\" src=\"/users/me/sidebar\" target=\"_top\"></turbo-frame>";
+            let has_logo: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)).map_err(db_err)?;
+            render_source_page_sections("No rooms yet", &body, "", "", sidebar, "sidebar", if has_logo { "account-has-logo" } else { "" }, "", Some(&u), u.csrf_token.as_deref().unwrap_or(""))
+        }
     })
 }
 async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
