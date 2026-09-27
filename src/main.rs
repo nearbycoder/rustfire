@@ -2795,9 +2795,10 @@ async fn qr_code_show(Path(id): Path<String>, headers: HeaderMap) -> AppResult {
     if id.len() > 4096 {
         return Err(StatusCode::URI_TOO_LONG);
     }
+    let id = id.split_once('.').map_or(id.as_str(), |(encoded, _)| encoded);
     let decoded = URL_SAFE_NO_PAD
-        .decode(&id)
-        .or_else(|_| URL_SAFE.decode(&id))
+        .decode(id)
+        .or_else(|_| URL_SAFE.decode(id))
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let url = std::str::from_utf8(&decoded).map_err(|_| StatusCode::BAD_REQUEST)?;
     if url.len() > 2048 || url.is_empty() {
@@ -4587,6 +4588,7 @@ fn safe_inline_video(content_type: &str) -> bool {
 async fn room_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(room_id): Path<String>,
 ) -> AppResult {
     let rid = match path_record_id(&room_id) {
@@ -4599,6 +4601,11 @@ async fn room_show(
             return Ok(found_redirect("/"));
         }
     };
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        let u = user(&s, &headers)?;
+        room_for(&s, u.id, rid)?;
+        return Ok(response);
+    }
     room_show_with_target(s, headers, rid, None).await
 }
 async fn room_show_at(
@@ -4793,6 +4800,14 @@ fn not_acceptable_format(accept: &str) -> Response {
         )
             .into_response()
     }
+}
+fn reject_html_format(headers: &HeaderMap, path: &str) -> Option<Response> {
+    if let Some((_, format)) = path.rsplit('/').next().unwrap_or("").rsplit_once('.') {
+        return (format != "html").then(|| not_acceptable_format(if format == "json" { "application/json" } else { "" }));
+    }
+    let requested = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let first = requested.split(',').next().unwrap_or("").trim().split(';').next().unwrap_or("");
+    matches!(first, "application/json" | "application/*").then(|| not_acceptable_format("application/json"))
 }
 #[derive(Deserialize)]
 struct RefreshQuery {
@@ -5350,6 +5365,7 @@ fn message_page_fresh(headers: &HeaderMap, etag: &str, modified_seconds: i64) ->
 async fn messages_index(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(room_id): Path<String>,
     Query(q): Query<Paging>,
 ) -> AppResult {
@@ -5368,11 +5384,6 @@ async fn messages_index(
             return Err(StatusCode::NOT_FOUND);
         }
     }
-    let wants_json = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .contains("application/json");
     // Matching validators need only the selected page's IDs and timestamps.
     if headers.contains_key(header::IF_NONE_MATCH)
         || headers.contains_key(header::IF_MODIFIED_SINCE)
@@ -5388,7 +5399,7 @@ async fn messages_index(
             rid,
             q.before,
             q.after,
-            wants_json,
+            false,
         )?;
         if message_page_fresh(&headers, &etag, modified_seconds) {
             let mut response = StatusCode::NOT_MODIFIED.into_response();
@@ -5396,9 +5407,12 @@ async fn messages_index(
             return Ok(response);
         }
     }
-    let messages = message_list_with_room_name(&s, rid, 40, q.before, q.after, !wants_json)?;
+    let messages = message_list_with_room_name(&s, rid, 40, q.before, q.after, true)?;
     if messages.is_empty() {
         return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
     }
     let (etag, modified, _) = message_page_validator(
         messages.iter().map(|message| {
@@ -5407,23 +5421,13 @@ async fn messages_index(
         rid,
         q.before,
         q.after,
-        wants_json,
+        false,
     )?;
-    let mut response = if wants_json {
-        Json(
-            messages
-                .iter()
-                .map(|m| message_json(&s, m, Some(&headers)))
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .into_response()
-    } else {
-        let html = messages
-            .iter()
-            .map(|m| message_html(&s, m, Some(&headers)))
-            .collect::<String>();
-        Html(csrf_forms(&html, u.csrf_token.as_deref().unwrap_or(""))).into_response()
-    };
+    let html = messages
+        .iter()
+        .map(|m| message_html(&s, m, Some(&headers)))
+        .collect::<String>();
+    let mut response = Html(csrf_forms(&html, u.csrf_token.as_deref().unwrap_or(""))).into_response();
     message_page_cache_headers(&mut response, &etag, &modified);
     Ok(response)
 }
@@ -6278,6 +6282,7 @@ async fn message_create(
 async fn message_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path((room_id, message_id)): Path<(String, String)>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -6285,15 +6290,11 @@ async fn message_show(
     let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let m = message_by_id(&s, rid, mid)?;
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
+    }
     Ok(if headers.get("x-rustfire-fragment").is_some() {
         Html(message_html(&s, &m, Some(&headers))).into_response()
-    } else if headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .contains("json")
-    {
-        Json(message_json(&s, &m, Some(&headers))?).into_response()
     } else {
         render_source_page_sections(
             "Rustfire",
@@ -6307,6 +6308,7 @@ async fn message_show(
 async fn message_edit(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path((room_id, message_id)): Path<(String, String)>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -6325,6 +6327,9 @@ async fn message_edit(
     let (creator, body, body_source, client_id) = row.ok_or(StatusCode::NOT_FOUND)?;
     if !is_admin(&u) && creator != u.id {
         return Err(StatusCode::FORBIDDEN);
+    }
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
     }
     let source = esc(&body_source.unwrap_or(body));
     let client_id = esc(&client_id);
@@ -7176,9 +7181,13 @@ async fn direct_create(
 async fn search_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
+    }
     let raw_query = q.get("q").cloned().unwrap_or_default();
     let query = search_query(&raw_query);
     let db = pool(&s)?;
@@ -7344,8 +7353,11 @@ fn account_next_page_container(page: i64) -> String {
         "<turbo-frame loading=\"lazy\" class=\"flex center\" id=\"next_page_container\" src=\"/account/users.turbo_stream?page={page}\"><div class=\"spinner center\"></div></turbo-frame>"
     )
 }
-async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+async fn account_get(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri) -> AppResult {
     let u = user(&s, &headers)?;
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
+    }
     let csrf = esc(u.csrf_token.as_deref().unwrap_or(""));
     let db = pool(&s)?;
     let (name, code, updated_at): (String, String, String) = db
@@ -8876,6 +8888,7 @@ async fn avatar_delete_post(
 async fn user_show(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Path(user_id): Path<String>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
@@ -8890,6 +8903,9 @@ async fn user_show(
         .optional()
         .map_err(db_err)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if let Some(response) = reject_html_format(&headers, uri.path()) {
+        return Ok(response);
+    }
     let has_logo: bool = db
         .query_row("SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0))
         .map_err(db_err)?;
@@ -11818,6 +11834,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .post(message_create)
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        .route("/rooms/{id}/messages.html", get(messages_index))
+        .route("/rooms/{id}/messages.json", get(messages_index))
         .route("/rooms/{id}/messages/new", any(|| async { StatusCode::NOT_FOUND }))
         .route(
             "/rooms/{id}/messages/{mid}",
@@ -11828,6 +11846,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .delete(message_delete),
         )
         .route("/rooms/{id}/messages/{mid}/edit", get(message_edit))
+        .route("/rooms/{id}/messages/{mid}/edit.html", get(message_edit))
+        .route("/rooms/{id}/messages/{mid}/edit.json", get(message_edit))
         .route("/rooms/{id}/messages/{mid}/update", post(message_update))
         .route("/rooms/{id}/messages/{mid}/delete", post(message_delete))
         .route("/rooms/{id}/@{mid}", get(room_show_at))
@@ -11872,6 +11892,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/rooms/directs/{id}/edit", get(direct_edit))
         .route("/rooms/directs/{id}/delete", post(direct_delete))
         .route("/searches", get(search_get).post(search_post))
+        .route("/searches.html", get(search_get))
+        .route("/searches.json", get(search_get))
         .route("/unfurl_link", post(unfurl_link))
         .route("/searches/clear", post(search_clear).delete(search_clear))
         .route(
@@ -11887,6 +11909,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .put(account_update),
         )
         .route("/account/edit", get(account_get))
+        .route("/account/edit.html", get(account_get))
+        .route("/account/edit.json", get(account_get))
         .route("/account/update", post(account_update))
         .route("/account/custom_styles/edit", any(|| async { StatusCode::NOT_FOUND }).get(custom_styles_get))
         .route(

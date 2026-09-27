@@ -204,8 +204,8 @@ def main():
             assert request(client(), base, blob_download.replace("--", "--x", 1))[0] == 404
             assert request(admin, base, f"/attachments/{attachment_id}", headers={"Range":"bytes=0-3"}) == (206, base+f"/attachments/{attachment_id}", "file")
             assert request(admin, base, f"/attachments/{attachment_id}", headers={"Range":"bytes=999-"})[0] == 416
-            code, _, payload = request(admin, base, "/rooms/1/messages", headers={"Accept": "application/json"})
-            assert code == 200 and len(json.loads(payload)) == 2
+            code, _, payload = request(admin, base, "/rooms/1/messages", headers={"Accept": "text/html"})
+            assert code == 200 and len(re.findall(r"data-message-id=['\"]\d+['\"]", payload)) == 2
             code, _, page = request(admin, base, "/searches?q=hello")
             assert code == 200 and "hello from smoke" in page
             assert 'id="search-results" class="messages searches__results"' in page
