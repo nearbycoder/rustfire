@@ -74,7 +74,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all-accepts", action="store_true")
     parser.add_argument("--compare-error-bodies", action="store_true")
-    parser.add_argument("--role", choices=("admin", "anonymous"), default="admin")
+    parser.add_argument("--role", choices=("admin", "member", "anonymous"), default="admin")
     args = parser.parse_args()
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-unsafe-route-inventory-") as scratch:
@@ -83,6 +83,12 @@ def main():
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         camp_env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
+        if args.role == "member":
+            with sqlite3.connect(rust_db) as db:
+                db.execute("DELETE FROM sessions")
+                db.execute("INSERT INTO sessions(user_id,token,csrf_token,created_at,last_active_at) VALUES(2,'benchmark-member-session','benchmark-member-csrf','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+            with sqlite3.connect(camp_db) as db:
+                db.execute("UPDATE users SET email_address='member@example.invalid',password_digest=(SELECT password_digest FROM users WHERE id=1) WHERE id=2")
         checkout = isolated_campfire(temp, redis_port)
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         routes = inventory(checkout, camp_env)
@@ -92,7 +98,11 @@ def main():
         try:
             rust = start_server(rust_db, rust_port)
             try:
-                rust_cookie = "session_token=benchmark-session" if args.role == "admin" else ""
+                rust_cookie = {
+                    "admin": "session_token=benchmark-session",
+                    "member": "session_token=benchmark-member-session",
+                    "anonymous": "",
+                }[args.role]
                 rust_results = {case: request(rust_port, rust_cookie, *case, args.compare_error_bodies) for case in cases}
             finally:
                 stop_server(rust)
@@ -103,7 +113,7 @@ def main():
                 )
                 try:
                     wait_for_server(camp_port, camp)
-                    cookie = login_campfire(camp_port)[0] if args.role == "admin" else ""
+                    cookie = login_campfire(camp_port, email="member@example.invalid" if args.role == "member" else "benchmark@example.invalid")[0] if args.role != "anonymous" else ""
                     camp_results = {case: request(camp_port, cookie, *case, args.compare_error_bodies) for case in cases}
                 finally:
                     stop_server(camp)

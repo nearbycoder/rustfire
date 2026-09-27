@@ -1700,7 +1700,7 @@ At 32 clients, Rustfire served about 15.7× as many checked user-page reads and 
 
 ## Complete application write-route rejection inventory
 
-On this release build, `python bench/paired_unsafe_route_inventory.py --all-accepts --compare-error-bodies` and its `--role anonymous` repeat expanded all 80 non-Rails POST, PATCH, PUT, and DELETE method/path pairs in pinned Campfire `91d294f` across HTML, JSON, Turbo Stream, and wildcard Accept headers. Each role matched **320/320** response statuses, media types, redirect paths, and applicable packaged error-body hashes. The signed-in run initially matched 54/80 HTML cases; the anonymous run initially matched 276/320 all-Accept cases. This gate checks invalid-CSRF and unauthenticated rejection order on disposable fixtures, not successful writes or side effects.
+On this release build, `python bench/paired_unsafe_route_inventory.py --all-accepts --compare-error-bodies` and its `--role anonymous` repeat expanded all 80 non-Rails POST, PATCH, PUT, and DELETE method/path pairs in pinned Campfire `91d294f` across HTML, JSON, Turbo Stream, and wildcard Accept headers. Each role matched **320/320** response statuses, media types, redirect paths, and applicable packaged error-body hashes. The signed-in run initially matched 54/80 HTML cases; the anonymous run initially matched 276/320 all-Accept cases. On release commit `808f35e`, a `--role member` repeat also matched **320/320**. This gate checks invalid-CSRF and unauthenticated rejection order on disposable fixtures, not successful writes or side effects.
 
 ## Profile form method overrides
 
