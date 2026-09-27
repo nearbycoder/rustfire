@@ -6671,6 +6671,8 @@ async fn message_create(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .starts_with("multipart/form-data");
+    let query_message = uri.query().unwrap_or("").as_bytes();
+    let query_has_message = parameter_group_present(query_message, "message");
     let (body, client_id, upload, rich, message_seen) = if multipart_form {
         let mut multipart = Multipart::from_request(req, &s)
             .await
@@ -6727,12 +6729,27 @@ async fn message_create(
         if !csrf_header_valid && form_csrf.as_deref() != u.csrf_token.as_deref() {
             return Ok(invalid_authenticity_response(&headers, &uri));
         }
-        (body, client_id, upload, rich, message_seen)
+        if query_has_message {
+            let query_fields = fields(query_message).0;
+            let nested = query_fields.keys().any(|name| name.starts_with("message[") && name.ends_with(']'));
+            if query_fields.get("message").is_some_and(|value| !value.trim().is_empty()) && !nested {
+                return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+            }
+            (
+                query_fields.get("message[body]").cloned().unwrap_or_default(),
+                query_fields.get("message[client_message_id]").cloned(),
+                None,
+                matches!(query_fields.get("message[format]").map(String::as_str), None | Some("html")),
+                nested,
+            )
+        } else {
+            (body, client_id, upload, rich, message_seen)
+        }
     } else {
         let RawForm(raw) = RawForm::from_request(req, &s)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        let f = fields(&raw).0;
+        let f = fields(if query_has_message { query_message } else { &raw }).0;
         if f.get("message").is_some_and(|value| !value.trim().is_empty())
             && !f.keys().any(|name| name.starts_with("message[") && name.ends_with(']'))
         {
@@ -6907,7 +6924,7 @@ async fn message_update(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path((room_id, message_id)): Path<(String, String)>,
-    Form(f): Form<HashMap<String, String>>,
+    Form(body_fields): Form<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let rid = path_record_id(&room_id)?;
@@ -6926,7 +6943,37 @@ async fn message_update(
     if !is_admin(&u) && creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
-    let body = form_value(&f, "body", "message[body]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let query = uri.query().unwrap_or("").as_bytes();
+    let f = if parameter_group_present(query, "message") { fields(query).0 } else { body_fields };
+    let nested = f.keys().any(|key| key.starts_with("message[") && key.ends_with(']'));
+    if f.get("message").is_some_and(|value| !value.trim().is_empty()) && !nested {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
+    if !nested {
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
+    }
+    let body = f.get("message[body]").map(String::as_str);
+    let client_id = f.get("message[client_message_id]").map(String::as_str);
+    if body.is_none() {
+        if let Some(client_id) = client_id {
+            let current: String = db.query_row(
+                "SELECT client_message_id FROM messages WHERE id=?1", [mid], |row| row.get(0)
+            ).map_err(db_err)?;
+            if current != client_id {
+                let updated_at = now();
+                let updated_at_ns = message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                db.execute(
+                    "UPDATE messages SET client_message_id=?1,updated_at=?2,updated_at_ns=?3 WHERE id=?4",
+                    params![client_id, updated_at, updated_at_ns, mid],
+                ).map_err(db_err)?;
+                touch_room(&db, rid)?;
+            }
+        }
+        drop(db);
+        let unchanged = message_by_id(&s, rid, mid)?;
+        return message_update_response(&s, &headers, &uri, rid, mid, unchanged);
+    }
+    let body = body.unwrap();
     let rich = matches!(form_value(&f, "format", "message[format]"), None | Some("html"));
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let mut newly_linked = Vec::new();
@@ -6980,13 +7027,14 @@ async fn message_update(
     let updated_at_ns =
         message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
-        "UPDATE messages SET body=?1,body_html=?2,body_source=?3,updated_at=?4,updated_at_ns=?5 WHERE id=?6",
+        "UPDATE messages SET body=?1,body_html=?2,body_source=?3,updated_at=?4,updated_at_ns=?5,client_message_id=COALESCE(?6,client_message_id) WHERE id=?7",
         params![
             plain,
             body_html,
             body_source,
             updated_at,
             updated_at_ns,
+            client_id,
             mid
         ],
     )
@@ -7026,17 +7074,27 @@ async fn message_update(
     }
     drop(db);
     let updated_message = message_by_id(&s, rid, mid)?;
-    let presentation_html = message_presentation_html(&s, &updated_message);
+    message_update_response(&s, &headers, &uri, rid, mid, updated_message)
+}
+fn message_update_response(
+    s: &Arc<AppState>,
+    headers: &HeaderMap,
+    uri: &Uri,
+    rid: i64,
+    mid: i64,
+    updated_message: ChatMessage,
+) -> AppResult {
+    let presentation_html = message_presentation_html(s, &updated_message);
     let _ = s.events.send(Event {
         room_id: rid,
         payload:
-            json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":updated_message.client_message_id,"body":plain,"html":body_html,"presentation_html":presentation_html})
+            json!({"type":"message_updated","room_id":rid,"id":mid,"client_message_id":updated_message.client_message_id,"body":updated_message.body,"html":updated_message.body_html,"presentation_html":presentation_html})
                 .to_string(),
     });
     let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).unwrap_or("");
     let suffix = uri.path().rsplit('/').next().unwrap_or("").rsplit_once('.').map(|(_, format)| format);
     if suffix.is_none() && accept.starts_with("application/vnd.rustfire+json") {
-        Ok(Json(message_json(&s, &updated_message, Some(&headers))?).into_response())
+        Ok(Json(message_json(s, &updated_message, Some(headers))?).into_response())
     } else if suffix == Some("json") || (suffix.is_none() && accept.split(',').next().unwrap_or("").trim().starts_with("application/json")) {
         Ok((StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "application/json; charset=UTF-8")], r#"{"status":500,"error":"Internal Server Error"}"#).into_response())
     } else {
