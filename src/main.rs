@@ -3251,6 +3251,15 @@ async fn reject_banned_ip(
         }
     }
     let browser_navigation = request.method() == Method::GET;
+    let protected_write = request.method() != Method::GET
+        && request.method() != Method::HEAD
+        && !matches!(request.uri().path(), "/first_run" | "/session")
+        && !request.uri().path().starts_with("/join/")
+        && !request.uri().path().starts_with("/session/transfers/")
+        && !request.uri().path().starts_with("/rails/");
+    let anonymous_search_post = request.uri().path() == "/searches"
+        && request.method() == Method::POST
+        && matches!(user(&s, request.headers()), Err(StatusCode::UNAUTHORIZED));
     let bot_api_request = {
         let segments: Vec<_> = request.uri().path().split('/').filter(|part| !part.is_empty()).collect();
         segments.len() >= 4
@@ -3282,7 +3291,10 @@ async fn reject_banned_ip(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if (browser_navigation || bot_api_request) && response.status() == StatusCode::UNAUTHORIZED {
+    if ((browser_navigation || bot_api_request || protected_write)
+        && response.status() == StatusCode::UNAUTHORIZED)
+        || (anonymous_search_post && response.status() == StatusCode::UNPROCESSABLE_ENTITY)
+    {
         let encoded = URL_SAFE_NO_PAD.encode(requested_path.as_bytes());
         let mut redirect = found_redirect(&sign_in_url);
         redirect.headers_mut().append(

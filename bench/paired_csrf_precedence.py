@@ -42,11 +42,13 @@ OVERRIDE_CASES = (
 def request(port, cookie, method, path, accept, body, compare_bodies):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     try:
-        connection.request(method, path, body=body, headers={
-            "Cookie": cookie,
+        headers = {
             "Accept": accept,
             "Content-Type": "application/x-www-form-urlencoded",
-        })
+        }
+        if cookie:
+            headers["Cookie"] = cookie
+        connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         body = response.read()
         location = response.getheader("Location")
@@ -63,10 +65,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--all-accepts", action="store_true", help="compare HTML, JSON, Turbo, and wildcard Accept headers")
     parser.add_argument("--compare-bodies", action="store_true", help="also compare response body length and SHA-256")
+    parser.add_argument("--include-anonymous", action="store_true", help="also compare requests without a session cookie")
     args = parser.parse_args()
     accepts = ACCEPTS if args.all_accepts else ("text/html",)
-    cases = [(method, path, accept, "authenticity_token=invalid") for method, path in CASES for accept in accepts]
-    cases += [(method, path, accept, body) for method, path, body in OVERRIDE_CASES for accept in accepts]
+    authenticated_cases = [(method, path, accept, "authenticity_token=invalid") for method, path in CASES for accept in accepts]
+    authenticated_cases += [(method, path, accept, body) for method, path, body in OVERRIDE_CASES for accept in accepts]
+    cases = [(True, *case) for case in authenticated_cases]
+    if args.include_anonymous:
+        cases += [(False, *case) for case in authenticated_cases]
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-csrf-precedence-") as scratch:
         temp = pathlib.Path(scratch)
@@ -81,7 +87,7 @@ def main():
         try:
             rust = start_server(rust_db, rust_port)
             try:
-                rust_responses = {case: request(rust_port, "session_token=benchmark-session", *case, args.compare_bodies) for case in cases}
+                rust_responses = {case: request(rust_port, "session_token=benchmark-session" if case[0] else "", *case[1:], args.compare_bodies) for case in cases}
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -89,7 +95,7 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, _ = login_campfire(camp_port)
-                    camp_responses = {case: request(camp_port, cookie, *case, args.compare_bodies) for case in cases}
+                    camp_responses = {case: request(camp_port, cookie if case[0] else "", *case[1:], args.compare_bodies) for case in cases}
                 finally:
                     stop_server(camp)
         finally:
@@ -98,8 +104,8 @@ def main():
             redis_log.close()
     mismatches = [(case, rust_responses[case], camp_responses[case])
                   for case in cases if rust_responses[case] != camp_responses[case]]
-    for (method, path, accept, body), rust, camp in mismatches:
-        print(f"{method} {path} Accept={accept} body={body}: Rustfire {rust}, Campfire {camp}")
+    for (authenticated, method, path, accept, body), rust, camp in mismatches:
+        print(f"{'authenticated' if authenticated else 'anonymous'} {method} {path} Accept={accept} body={body}: Rustfire {rust}, Campfire {camp}")
     print(f"Matched {len(cases) - len(mismatches)}/{len(cases)} invalid-CSRF response cases")
     if mismatches:
         raise AssertionError(f"{len(mismatches)} invalid-CSRF cases differ")
