@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
     extract::{
-        ConnectInfo, Form, FromRequest, Multipart, OriginalUri, Path, Query, RawForm, Request,
+        ConnectInfo, Form, FromRequest, MatchedPath, Multipart, OriginalUri, Path, Query, RawForm, Request,
         State, WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
@@ -3151,6 +3151,38 @@ fn presence_update(s: &AppState, uid: i64, rid: i64, action: &str) -> Result<(),
     }
     Ok(())
 }
+fn source_read_only_route(route: &str) -> bool {
+    matches!(route,
+        "/" | "/up" | "/cable" | "/rooms" | "/rooms/new" | "/rooms/new.html"
+        | "/rooms/new.json" | "/rooms/new.turbo_stream" | "/rooms/{id}/refresh"
+        | "/rooms/{id}/refresh.turbo_stream" | "/rooms/{id}/refresh_state"
+        | "/rooms/{id}/settings" | "/rooms/{id}/messages/new"
+        | "/rooms/{id}/messages/new.html" | "/rooms/{id}/messages/new.json"
+        | "/rooms/{id}/messages/new.turbo_stream" | "/rooms/{id}/messages/{mid}/edit"
+        | "/rooms/{id}/messages/{mid}/edit.html" | "/rooms/{id}/messages/{mid}/edit.json"
+        | "/rooms/{id}/@{mid}" | "/rooms/{id}/edit" | "/rooms/opens/new"
+        | "/rooms/opens/new.html" | "/rooms/opens/new.json"
+        | "/rooms/opens/new.turbo_stream" | "/rooms/closeds/new"
+        | "/rooms/closeds/new.html" | "/rooms/closeds/new.json"
+        | "/rooms/closeds/new.turbo_stream" | "/rooms/opens/{id}/edit"
+        | "/rooms/closeds/{id}/edit" | "/rooms/directs/new"
+        | "/rooms/directs/new.html" | "/rooms/directs/new.json"
+        | "/rooms/directs/new.turbo_stream" | "/rooms/directs/{id}/edit"
+        | "/account/edit" | "/account/edit.html" | "/account/edit.json"
+        | "/account/users" | "/account/users.turbo_stream"
+        | "/users/me/sidebar" | "/users/{user_id}/sidebar" | "/users/{id}"
+        | "/autocompletable/users" | "/account/bots/new"
+        | "/account/bots/new.html" | "/account/bots/new.json"
+        | "/account/bots/new.turbo_stream" | "/account/bots/{id}/edit"
+        | "/messages/{id}/boosts/new" | "/messages/{id}/boosts/new.html"
+        | "/messages/{id}/boosts/new.json" | "/messages/{id}/boosts/new.turbo_stream"
+        | "/messages/new" | "/messages/new.html"
+        | "/messages/new.json" | "/messages/new.turbo_stream"
+        | "/messages/{id}/edit" | "/attachments/{id}"
+        | "/attachments/{id}/{kind}"
+    )
+}
+
 async fn reject_banned_ip(
     State(s): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -3172,6 +3204,28 @@ async fn reject_banned_ip(
             _ => {}
         }
         let path = request.uri().path().to_string();
+        if request.extensions().get::<MatchedPath>()
+            .is_none_or(|route| source_read_only_route(route.as_str())
+                || (route.as_str() == "/messages/{id}" && request.method() == Method::POST)) {
+            return next.run(request).await;
+        }
+        if request.method() == Method::POST
+            && path.starts_with("/account/bots/")
+            && path.ends_with("/key")
+        {
+            let (parts, body) = request.into_parts();
+            let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
+                Ok(bytes) => bytes,
+                Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            };
+            let tunneled = form_urlencoded::parse(&bytes).any(|(key, value)| {
+                key == "_method" && matches!(value.as_ref(), "patch" | "put")
+            });
+            request = Request::from_parts(parts, Body::from(bytes));
+            if !tunneled {
+                return next.run(request).await;
+            }
+        }
         if matches!(path.as_str(), "/account" | "/account.1") && request.method() == Method::POST {
             let content_type = request.headers().get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
@@ -6580,6 +6634,21 @@ async fn message_create(
         Err(StatusCode::NOT_FOUND) => {
             let exists: bool = pool(&s)?.query_row("SELECT EXISTS(SELECT 1 FROM rooms WHERE id=?1)", [rid], |row| row.get(0)).map_err(db_err)?;
             if !exists {
+                let requested_format = uri.path().rsplit_once('.').map(|(_, suffix)| suffix);
+                let accepted_type = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok())
+                    .unwrap_or("").split(',').next().unwrap_or("").trim();
+                if matches!(requested_format, None | Some("html"))
+                    && (accepted_type.is_empty() || accepted_type.starts_with("text/html") || accepted_type == "*/*")
+                {
+                    let has_logo: bool = pool(&s)?.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM account_logos WHERE id=1)", [], |row| row.get(0)
+                    ).map_err(db_err)?;
+                    let body = "<turbo-frame id=\"composer-frame\"><span class=\"composer__input input input--actor shake margin-block-end txt-negative txt-align-center\" style=\"--input-border-color: var(--color-negative)\"><span>This room was deleted.</span></span></turbo-frame>";
+                    return Ok(render_source_page_sections(
+                        "Campfire", body, "", "", "", if has_logo { "account-has-logo" } else { "" }, "", "", Some(&u),
+                        u.csrf_token.as_deref().unwrap_or("")
+                    ));
+                }
                 return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
             }
             return Err(StatusCode::NOT_FOUND);
@@ -8012,7 +8081,7 @@ async fn account_update(
     if !f.keys().any(|key| key.starts_with("account["))
         && f.get("account").is_none_or(String::is_empty)
     {
-        return Err(StatusCode::BAD_REQUEST);
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     let new_logo = if let Some((bytes, content_type)) = logo {
         let dir = std::path::PathBuf::from(
