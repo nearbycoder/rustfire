@@ -21,6 +21,27 @@ CASES = {
     "no_password": {"user[name]": "Admin", "user[email_address]": "admin@example.invalid"},
     "no_email": {"user[name]": "Admin", "user[password]": "password123"},
     "all_blank": {"user[name]": "", "user[email_address]": "", "user[password]": ""},
+    "scalar_user": {"user": "unexpected"},
+    "array_user": {"user[]": "unexpected"},
+}
+
+QUERY_CASES = {
+    "query_complete_user": (
+        {"user[name]": "Body", "user[email_address]": "body@example.invalid", "user[password]": "body-password"},
+        {"user[name]": "Query", "user[email_address]": "query@example.invalid", "user[password]": "query-password"},
+    ),
+    "query_name_only": (
+        {"user[name]": "Body", "user[email_address]": "body@example.invalid", "user[password]": "body-password"},
+        {"user[name]": "Query"},
+    ),
+    "query_scalar_user": (
+        {"user[name]": "Body", "user[email_address]": "body@example.invalid", "user[password]": "body-password"},
+        {"user": "unexpected"},
+    ),
+    "query_unknown_user": (
+        {"user[name]": "Body", "user[email_address]": "body@example.invalid", "user[password]": "body-password"},
+        {"user[unknown]": "ignored"},
+    ),
 }
 
 
@@ -37,25 +58,26 @@ def saved_state(database):
     return state
 
 
-def submit(opener, port, path, fields):
+def submit(opener, port, path, fields, query=None):
     status, _, page = fetch(opener, port, path)
     assert status == 200
     token = re.search(r'name=[\'\"]authenticity_token[\'\"] value=[\'\"]([^\'\"]+)', page)
     assert token
     body = urllib.parse.urlencode({"authenticity_token": token.group(1), **fields}).encode()
-    return fetch(opener, port, path, body, "application/x-www-form-urlencoded")
+    post_path = path + ("?" + urllib.parse.urlencode(query) if query else "")
+    return fetch(opener, port, post_path, body, "application/x-www-form-urlencoded")
 
 
-def check(port, database, submitted, mode):
+def check(port, database, submitted, mode, query=None):
     if mode == "first_run":
-        response = submit(browser(), port, "/first_run", submitted)
+        response = submit(browser(), port, "/first_run", submitted, query)
     else:
         assert submit(browser(), port, "/first_run", {
             "user[name]": "Owner", "user[email_address]": "owner@example.invalid", "user[password]": "owner-password",
         })[:2] == (302, "/")
         with sqlite3.connect(database) as db:
             join_code = db.execute("SELECT join_code FROM accounts").fetchone()[0]
-        response = submit(browser(), port, f"/join/{join_code}", submitted)
+        response = submit(browser(), port, f"/join/{join_code}", submitted, query)
     return response, saved_state(database)
 
 
@@ -70,13 +92,15 @@ def main():
         redis_port = free_port()
         redis, redis_log = start_redis(temp, redis_port)
         try:
-            for mode, label, submitted in ((mode, label, fields) for mode in ("first_run", "join") for label, fields in CASES.items()):
+            cases = [(label, fields, None) for label, fields in CASES.items()]
+            cases += [(label, fields, query) for label, (fields, query) in QUERY_CASES.items()]
+            for mode, label, submitted, query in ((mode, label, fields, query) for mode in ("first_run", "join") for label, fields, query in cases):
                 rust_db, camp_db = temp / f"{mode}-{label}-rust.sqlite3", temp / f"{mode}-{label}-camp.sqlite3"
                 rust_port, camp_port = free_port(), free_port()
                 fresh_campfire_database(camp_db)
                 rust = start_server(rust_db, rust_port)
                 try:
-                    rust_result = check(rust_port, rust_db, submitted, mode)
+                    rust_result = check(rust_port, rust_db, submitted, mode, query)
                 finally:
                     stop_server(rust)
                 environment = campfire_env(source_root, RUBY, BUNDLE, camp_db, camp_port, temp)
@@ -87,7 +111,7 @@ def main():
                         cwd=source_root, env=environment, stdout=log, stderr=log)
                     try:
                         wait_for_server(camp_port, camp)
-                        camp_result = check(camp_port, camp_db, submitted, mode)
+                        camp_result = check(camp_port, camp_db, submitted, mode, query)
                     except Exception:
                         log.flush()
                         log.seek(0)
@@ -102,7 +126,7 @@ def main():
             redis.terminate()
             redis.wait(timeout=10)
             redis_log.close()
-    print("PASS five paired partial first-run and invitation submissions")
+    print(f"PASS {len(CASES) + len(QUERY_CASES)} paired first-run and invitation parameter cases per route")
 
 
 if __name__ == "__main__":

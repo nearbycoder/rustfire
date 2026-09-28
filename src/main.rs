@@ -3798,7 +3798,10 @@ struct SignupSubmission {
 async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request) -> Result<SignupSubmission, StatusCode> {
     let mut avatar = None;
     let mut saw_user = false;
-    let values = if headers
+    let query_user = req.uri().query()
+        .filter(|query| parameter_group_present(query.as_bytes(), "user"))
+        .map(str::to_string);
+    let mut values = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
@@ -3824,7 +3827,7 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
                 if !bytes.is_empty() {
                     avatar = Some((bytes.to_vec(), sniff_upload_content_type(&bytes, &content_type).to_string()));
                 }
-            } else if matches!(name.as_str(), "user[name]" | "user[email_address]" | "user[password]") {
+            } else if matches!(name.as_str(), "user" | "user[]" | "user[name]" | "user[email_address]" | "user[password]") {
                 values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
         }
@@ -3837,6 +3840,14 @@ async fn signup_submission(s: &Arc<AppState>, headers: &HeaderMap, req: Request)
         saw_user = values.keys().any(|name| name.starts_with("user["));
         values
     };
+    if let Some(query) = query_user {
+        values = fields(query.as_bytes()).0;
+        avatar = None;
+        saw_user = values.keys().any(|name| name.starts_with("user["));
+    }
+    if values.get("user").is_some_and(|value| !value.is_empty()) || values.contains_key("user[]") {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
     if !saw_user {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -3887,7 +3898,11 @@ async fn first_run_post(
         return Ok(found_redirect("/"));
     }
     let uri = req.uri().clone();
-    let SignupSubmission { name, email, password, avatar } = signup_submission(&s, &headers, req).await?;
+    let SignupSubmission { name, email, password, avatar } = match signup_submission(&s, &headers, req).await {
+        Ok(submission) => submission,
+        Err(StatusCode::INTERNAL_SERVER_ERROR) => return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri)),
+        Err(error) => return Err(error),
+    };
     let Some(name) = name else {
         let mut db = pool(&s)?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
@@ -9415,7 +9430,11 @@ async fn join_post(
     }
     drop(db);
     let uri = req.uri().clone();
-    let SignupSubmission { name, email, password, avatar } = signup_submission(&s, &headers, req).await?;
+    let SignupSubmission { name, email, password, avatar } = match signup_submission(&s, &headers, req).await {
+        Ok(submission) => submission,
+        Err(StatusCode::INTERNAL_SERVER_ERROR) => return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri)),
+        Err(error) => return Err(error),
+    };
     let Some(name) = name else {
         return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
     };
