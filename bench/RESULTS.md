@@ -2061,3 +2061,14 @@ The [32-client Campfire-first](results/bot-upload-streamed-32c8m-camp-first.json
 `python bench/paired_bot_large_raw.py` found that pinned Campfire accepts a `text/plain` bot POST of 25 MiB plus one byte, while the earlier Rustfire build returned HTTP 400 at its fixed 25 MiB body limit. Rustfire now reads the raw request stream without that cap. The paired probe passed at **25 MiB plus one byte** and, with `--mib 129`, **129 MiB plus one byte**: both apps returned HTTP 201 and a message location, saved exactly the submitted bytes, and had matching body and search-index lengths and SHA-256 values. A 32 MiB plus one byte run also passed before the search-index comparison was added.
 
 Three malformed UTF-8 cases extended `python bench/paired_bot_body_inputs.py` from 19 to **22 passing cases**. Campfire returns a packaged JSON 500 for invalid bytes in raw `text/plain`, and a packaged JSON 400 for invalid bytes in a multipart text field; Rustfire now matches those responses without saving a message. The large-body checks are single writes on one bot and room. They establish neither a maximum accepted body size nor comparative throughput under concurrent raw-text writes.
+
+## Browser-channel load after explicit presence parity
+
+On Rustfire commit `dcdcb75`, `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 10 --write-rate 0.5 --sockets-per-room 100 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources` passed in both server orders (add `--rustfire-first` for the second order). Each app saved all 20 rich posts within the writer deadline and delivered all 2,000 expected message appends, 2,000 unread events, and 5,200 presence read events. All 80 sampled append structures matched, and checked page reads had zero errors.
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Read p95, Campfire / Rustfire | Write p95, Campfire / Rustfire | Sampled peak PSS, Campfire / Rustfire |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 1,530.49 | 2,864.15 | 1.87× | 78.72 / 31.84 ms | 248.66 / 35.67 ms | 3,587.37 / 110.52 MiB |
+| Rustfire first | 1,313.23 | 2,911.93 | 2.22× | 107.65 / 31.40 ms | 311.63 / 29.36 ms | 4,066.74 / 111.03 MiB |
+
+The [Campfire-first](results/rich-browser-400-presence-dcdcb75-camp-first.json) and [Rustfire-first](results/rich-browser-400-presence-dcdcb75-rust-first.json) reports retain all strict gates and resource measurements. Both apps ran serially on the same host as the load generator; connection setup was outside the ten-second measurement. This is a current-build sampled workload, not a maximum-scale, sustained-capacity, or whole-app result.
