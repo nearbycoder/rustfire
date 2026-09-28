@@ -4,7 +4,7 @@ Run after `cargo build --release`. Both apps use disposable databases.
 """
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import http.client
 import http.cookiejar
 import json
@@ -173,14 +173,19 @@ def member_state(database):
         return db.execute("SELECT unread_at FROM memberships WHERE room_id=1 AND user_id=2").fetchone()[0]
 
 
-def set_member(database, campfire, involvement, connected):
-    current = datetime.now(timezone.utc)
+def set_member(database, campfire, involvement, connection):
+    current = datetime.now(timezone.utc) - (timedelta(minutes=2) if connection == "stale" else timedelta())
     connected_at = current.strftime("%Y-%m-%d %H:%M:%S.%f") if campfire else current.isoformat().replace("+00:00", "Z")
     with sqlite3.connect(database) as db:
         db.execute(
             "UPDATE memberships SET involvement=?,connections=?,connected_at=?,unread_at=NULL WHERE room_id=1 AND user_id=2",
-            (involvement, 1 if connected else 0, connected_at if connected else None),
+            (involvement, 0 if connection == "none" else 1, None if connection == "none" else connected_at),
         )
+
+
+def set_room_kind(database, kind):
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE rooms SET type=?,name=? WHERE id=1", (kind, None if kind == "Rooms::Direct" else "All Talk"))
 
 
 def exercise(port, database, cookies, csrf, campfire):
@@ -189,15 +194,30 @@ def exercise(port, database, cookies, csrf, campfire):
         for client in sockets:
             client.subscribe_unread()
         results = []
-        for index, (involvement, connected) in enumerate((("mentions", True), ("invisible", False), ("mentions", False)), 1):
-            set_member(database, campfire, involvement, connected)
-            post(port, cookies[0], csrf, index)
-            author_event, member_event = sockets[0].unread(), sockets[1].unread()
-            assert author_event == member_event == {"roomId": 1}, (author_event, member_event)
-            sockets[2].assert_no_unread()
-            saved = member_state(database) is not None
-            assert saved == (index == 3), (index, saved)
-            results.append({"member_connected": connected, "involvement": involvement, "unread_saved": saved, "member_events": 2, "outsider_events": 0})
+        open_cases = (
+            ("mentions", "fresh", False),
+            ("invisible", "none", False),
+            ("mentions", "none", True),
+            ("nothing", "none", True),
+            ("everything", "none", True),
+            ("everything", "fresh", False),
+            ("nothing", "fresh", False),
+            ("mentions", "stale", True),
+        )
+        other_cases = (("everything", "none", True), ("invisible", "none", False), ("mentions", "fresh", False))
+        index = 0
+        for kind, cases in (("Rooms::Open", open_cases), ("Rooms::Closed", other_cases), ("Rooms::Direct", other_cases)):
+            set_room_kind(database, kind)
+            for involvement, connection, expected_unread in cases:
+                index += 1
+                set_member(database, campfire, involvement, connection)
+                post(port, cookies[0], csrf, index)
+                author_event, member_event = sockets[0].unread(), sockets[1].unread()
+                assert author_event == member_event == {"roomId": 1}, (author_event, member_event)
+                sockets[2].assert_no_unread()
+                saved = member_state(database) is not None
+                assert saved == expected_unread, (kind, index, saved)
+                results.append({"room_kind": kind, "member_connection": connection, "involvement": involvement, "unread_saved": saved, "member_events": 2, "outsider_events": 0})
         return results
     finally:
         for client in sockets:

@@ -150,6 +150,8 @@ The paired invalid-key push probe now checks background cleanup and direct test 
 
 A separate controlled push-response probe now matches Campfire's saved subscription outcomes for background HTTP 404, 410, 503, and 204 and direct 404/410 failures. Only background 410 removes a row. This verifies response classification and persistence without a live push-service connection.
 
+A paired unread-channel probe now matches fourteen member-presence and notification-setting states across open, private, and direct room types. The author and room member receive the same event, outsiders receive none, and the saved unread marker matches in each state. Other membership lifecycles, exact timestamps, and sustained fanout remain unverified.
+
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior across untested page states; sampled room and message pages now match in complete parsed head and body structure after documented generated-value normalization
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases; duplicate Open Graph fields with blank later values now retain the earlier value as in the pinned source
 - Browser message create and edit forms ignore `message[format]`, matching Campfire's permitted parameters. An eight-case paired probe now matches rich-text presentation and search results for URL-encoded, multipart, and query submissions with extra format values. Rustfire's internal plain-text message path remains separate.
