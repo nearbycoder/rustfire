@@ -55,6 +55,7 @@ def run(port, database, admin_cookie, admin_csrf, member_cookie):
         "HeartbeatChannel": "confirm_subscription",
         "RoomMessagesChannel": "confirm_subscription",
         "Turbo::StreamsChannel": "reject_subscription",
+        "UnsignedRoomMessagesChannel": "reject_subscription",
     }, initial
     body = urllib.parse.urlencode([("room[name]", "Private"), ("user_ids[]", "1")]).encode()
     status, location, response = request(port, "PATCH", "/rooms/closeds/2", admin_cookie, admin_csrf,
@@ -70,6 +71,7 @@ def run(port, database, admin_cookie, admin_csrf, member_cookie):
         "HeartbeatChannel": "confirm_subscription",
         "RoomMessagesChannel": "reject_subscription",
         "Turbo::StreamsChannel": "reject_subscription",
+        "UnsignedRoomMessagesChannel": "reject_subscription",
     }, removed
     assert retained == initial, retained
     return {"before": initial, "removed_member": removed, "remaining_member": retained}

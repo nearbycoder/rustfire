@@ -1,4 +1,4 @@
-// WebSocket fanout probe for Rustfire JSON, Rustfire Turbo, and Campfire Turbo streams. Use a valid browser session cookie.
+// WebSocket fanout probe for the signed Turbo room streams in both apps. Use a valid browser session cookie.
 // node bench/fanout.mjs --app rustfire --base http://127.0.0.1:3000 --cookie session_token=... --sockets 100 --messages 20
 import net from 'node:net';
 import crypto from 'node:crypto';
@@ -25,22 +25,17 @@ if (!cookie || !['rustfire','rustfire-turbo','campfire'].includes(app) || !['mes
   console.error('Use --app rustfire|rustfire-turbo|campfire --base http://host:port --cookie name=value [--operation messages|boosts|attachments|images|videos --message-id 1 --room 1 --sockets 100 --messages 20]');
   process.exit(2);
 }
-let identifier = JSON.stringify({ channel: 'RoomMessagesChannel', room_id: room });
 const expectedTarget = operation === 'boosts' ? 'boosts_message_boost-fixture' : `messages_rooms_open_${room}`;
 let csrf = args.csrf;
-if (app !== 'rustfire' || !csrf) {
-  const roomResponse = await fetch(new URL(`/rooms/${room}`, base), { headers: { Cookie: cookie } });
-  if (!roomResponse.ok) throw new Error(`Room page returned ${roomResponse.status}`);
-  const html = await roomResponse.text();
-  csrf ??= html.match(/<meta name=['"]csrf-token['"] content=['"]([^'"]+)/i)?.[1];
-  if (app !== 'rustfire') {
-    if (!html.includes(`id='${expectedTarget}'`) && !html.includes(`id="${expectedTarget}"`)) throw new Error(`Room page lacks Turbo target ${expectedTarget}`);
-    const source = html.match(/<turbo-cable-stream-source\b[^>]*>/gi)?.find(tag => /\bchannel=(['"])RoomMessagesChannel\1/i.test(tag));
-    const signedName = source?.match(/\bsigned-stream-name=(['"])(.*?)\1/i)?.[2];
-    if (!signedName) throw new Error('Room stream name was not found');
-    identifier = JSON.stringify({ channel: 'RoomMessagesChannel', signed_stream_name: signedName });
-  }
-}
+const roomResponse = await fetch(new URL(`/rooms/${room}`, base), { headers: { Cookie: cookie } });
+if (!roomResponse.ok) throw new Error(`Room page returned ${roomResponse.status}`);
+const html = await roomResponse.text();
+csrf ??= html.match(/<meta name=['"]csrf-token['"] content=['"]([^'"]+)/i)?.[1];
+if (!html.includes(`id='${expectedTarget}'`) && !html.includes(`id="${expectedTarget}"`)) throw new Error(`Room page lacks Turbo target ${expectedTarget}`);
+const source = html.match(/<turbo-cable-stream-source\b[^>]*>/gi)?.find(tag => /\bchannel=(['"])RoomMessagesChannel\1/i.test(tag));
+const signedName = source?.match(/\bsigned-stream-name=(['"])(.*?)\1/i)?.[2];
+if (!signedName) throw new Error('Room stream name was not found');
+const identifier = JSON.stringify({ channel: 'RoomMessagesChannel', signed_stream_name: signedName });
 const samples = [];
 const sent = new Map();
 let received = 0;
@@ -103,12 +98,11 @@ function connect(index) {
         try { event = JSON.parse(payload.toString()); } catch { unexpected++; continue; }
         if (event.type === 'welcome') socket.write(maskedTextFrame(JSON.stringify({ command: 'subscribe', identifier })));
         else if (event.type === 'confirm_subscription') { ready = true; clearTimeout(timer); resolve(socket); }
-        else if (operation === 'boosts' ? (event.message?.type === 'boost' || typeof event.message === 'string' && /<turbo-stream\b[^>]*action="append"[^>]*target="boosts[_-]/.test(event.message)) : (event.message?.type === 'message' || typeof event.message === 'string' && /<turbo-stream\b[^>]*action="append"/.test(event.message))) {
-          if (typeof event.message === 'string' && !event.message.includes(`target="${expectedTarget}"`)) { unexpected++; continue; }
-          const body = operation === 'boosts' ? (app === 'rustfire' ? event.message.content : event.message) : (app === 'rustfire' ? event.message.message?.body?.plain_text : event.message);
+        else if (typeof event.message === 'string' && (operation === 'boosts' ? /<turbo-stream\b[^>]*action="append"[^>]*target="boosts[_-]/.test(event.message) : /<turbo-stream\b[^>]*action="append"/.test(event.message))) {
+          if (!event.message.includes(`target="${expectedTarget}"`)) { unexpected++; continue; }
+          const body = event.message;
           const id = operation === 'boosts' ? (typeof body === 'string' ? body.match(/z[0-9a-f]{8}/)?.[0] : undefined)
-            : ['attachments','images','videos'].includes(operation) && typeof body === 'string' ? (app === 'rustfire' ? body.match(/^fanout-(?:file|image|video)-(.+)\.(?:txt|png|mp4)$/)?.[1] : body.match(/\bid=['"]message_([\w-]+)['"]/)?.[1])
-            : app === 'rustfire' && typeof body === 'string' && body.startsWith('fanout ') ? body.slice(7)
+            : ['attachments','images','videos'].includes(operation) && typeof body === 'string' ? body.match(/\bid=['"]message_([\w-]+)['"]/)?.[1]
             : typeof body === 'string' ? body.match(/fanout ([\w-]+)/)?.[1] : undefined;
           const start = sent.get(id);
           if (start === undefined) unexpected++;

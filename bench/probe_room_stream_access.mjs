@@ -10,11 +10,13 @@ const base = new URL(args.base);
 if (base.protocol !== 'http:' || !args.cookie || !args['signed-name']) {
   throw new Error('Use --base http://host:port --cookie name=value --signed-name token');
 }
-const identifiers = [
+const subscriptions = [
   { channel: 'HeartbeatChannel' },
   { channel: 'RoomMessagesChannel', signed_stream_name: args['signed-name'] },
   { channel: 'Turbo::StreamsChannel', signed_stream_name: args['signed-name'] },
-].map(value => JSON.stringify(value));
+  { channel: 'RoomMessagesChannel', room_id: 2 },
+];
+const identifiers = subscriptions.map(value => JSON.stringify(value));
 
 function frame(value) {
   const payload = Buffer.from(value);
@@ -34,7 +36,7 @@ const decisions = await new Promise((resolve, reject) => {
   let buffer = Buffer.alloc(0);
   let handshake = false;
   const answers = new Map();
-  const timer = setTimeout(() => fail(new Error('Timed out waiting for three subscription decisions')), 10000);
+  const timer = setTimeout(() => fail(new Error('Timed out waiting for four subscription decisions')), 10000);
   function fail(error) { clearTimeout(timer); socket.destroy(); reject(error); }
   socket.on('error', fail);
   socket.on('close', () => { if (answers.size !== identifiers.length) fail(new Error('Socket closed before all subscription decisions')); });
@@ -70,7 +72,10 @@ const decisions = await new Promise((resolve, reject) => {
         if (answers.size === identifiers.length) {
           clearTimeout(timer);
           socket.destroy();
-          resolve(Object.fromEntries(identifiers.map(identifier => [JSON.parse(identifier).channel, answers.get(identifier)])));
+          resolve(Object.fromEntries(identifiers.map((identifier, index) => [
+            index === 3 ? 'UnsignedRoomMessagesChannel' : subscriptions[index].channel,
+            answers.get(identifier),
+          ])));
         }
       }
     }

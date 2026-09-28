@@ -12882,7 +12882,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                 let list_valid=list_stream.as_deref()==Some("rooms") || list_user==Some(u.id);
                 let signed_room=signed_name.and_then(|token|room_from_stream_token(&s.turbo_stream_signing_key,token).or_else(||s.imported_turbo_stream_signing_key.as_deref().and_then(|key|room_from_stream_token(key,token))));
                 let rid=if signed_name.is_some() {signed_room.as_ref().map(|(id,_)|*id).unwrap_or(0)} else {details.get("room_id").and_then(Value::as_i64).unwrap_or(0)};
-                let signed_valid=signed_name.is_none() || signed_room.as_ref().is_some_and(|(_,kind)|room_for(&s,u.id,rid).is_ok_and(|room|room.kind==*kind));
+                let signed_valid=channel!="RoomMessagesChannel" || signed_room.as_ref().is_some_and(|(_,kind)|room_for(&s,u.id,rid).is_ok_and(|room|room.kind==*kind));
                 if action=="subscribe" {
                     let user_channel=channel=="UnreadRoomsChannel" || channel=="ReadRoomsChannel" || channel=="RoomListChannel" || channel=="HeartbeatChannel" || (channel=="Turbo::StreamsChannel" && list_user==Some(u.id));
                     let hub=match channel {"RoomMessagesChannel"=>Some(&s.events),"TypingNotificationsChannel"=>Some(&s.typing_events),"UnreadRoomsChannel"=>Some(&s.unread_events),"ReadRoomsChannel"=>Some(&s.read_events),"RoomListChannel"=>Some(&s.room_list_events),"Turbo::StreamsChannel" if list_user==Some(u.id)=>Some(&s.turbo_user_rooms),"Turbo::StreamsChannel" if list_stream.as_deref()==Some("rooms")=>Some(&s.turbo_shared_rooms),_=>None};
