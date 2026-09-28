@@ -4,7 +4,7 @@ use axum::{
     extract::{
         ConnectInfo, Form, FromRequest, MatchedPath, Multipart, OriginalUri, Path, Query, RawForm, Request,
         State, WebSocketUpgrade,
-        ws::{Message as WsMessage, WebSocket},
+        ws::{CloseFrame, Message as WsMessage, WebSocket},
     },
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::Next,
@@ -87,7 +87,7 @@ struct AppState {
     room_list_events: RoomHub,
     turbo_user_rooms: RoomHub,
     turbo_shared_rooms: RoomHub,
-    revoked_users: broadcast::Sender<i64>,
+    revoked_users: broadcast::Sender<(i64, bool)>,
     trusted_proxies: HashSet<IpAddr>,
     webhook_client: reqwest::Client,
     webhook_slots: Arc<Semaphore>,
@@ -4421,7 +4421,7 @@ async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(
             }
             db.execute("DELETE FROM sessions WHERE token=?1", [&t])
                 .map_err(db_err)?;
-            let _ = s.revoked_users.send(uid);
+            let _ = s.revoked_users.send((uid, true));
         }
     }
     let mut r = found_redirect("/");
@@ -8240,7 +8240,7 @@ fn update_room_values(
     notify_room_lists(s, prior_members.union(&current_members).copied());
     broadcast_room_updated(s, &Room { id: rid, name: name.unwrap_or(&r.name).to_owned(), kind: ty.to_owned(), creator_id: r.creator_id }, &current_members);
     for id in revoked {
-        let _ = s.revoked_users.send(id);
+        let _ = s.revoked_users.send((id, true));
     }
     Ok(())
 }
@@ -9590,7 +9590,7 @@ async fn user_deactivate(
         .map_err(db_err)?;
     s.has_push_subscriptions
         .store(has_push_subscriptions, Ordering::Relaxed);
-    let _ = s.revoked_users.send(id);
+    let _ = s.revoked_users.send((id, false));
     Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn join_get(
@@ -10504,7 +10504,7 @@ async fn user_ban(
     )
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
-    let _ = s.revoked_users.send(id);
+    let _ = s.revoked_users.send((id, false));
     Ok(found_redirect(&format!("/users/{id}")))
 }
 
@@ -12825,11 +12825,15 @@ async fn ws_upgrade(
             return Err(StatusCode::FORBIDDEN);
         }
     }
-    let u = user(&s, &headers)?;
-    Ok(ws
-        .protocols(["actioncable-v1-json"])
-        .on_upgrade(move |socket| ws_loop(s, u, socket))
-        .into_response())
+    let ws = ws.protocols(["actioncable-v1-json"]);
+    match user(&s, &headers) {
+        Ok(u) => Ok(ws.on_upgrade(move |socket| ws_loop(s, u, socket)).into_response()),
+        Err(StatusCode::UNAUTHORIZED) => Ok(ws.on_upgrade(|mut socket| async move {
+            let _ = socket.send(WsMessage::Text(json!({"type":"disconnect","reason":"unauthorized","reconnect":false}).to_string().into())).await;
+            let _ = socket.send(WsMessage::Close(Some(CloseFrame {code:1000,reason:"".into()}))).await;
+        }).into_response()),
+        Err(status) => Err(status),
+    }
 }
 async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
@@ -12854,7 +12858,15 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     loop {
         tokio::select! {
             _=heartbeat.tick()=>{if sender.send(WsMessage::Text(json!({"type":"ping","message":Utc::now().timestamp()}).to_string().into())).await.is_err(){break}},
-            revoked=revoked_rx.recv()=>{if revoked==Ok(u.id){break}},
+            revoked=revoked_rx.recv()=>{
+                if let Ok((uid,reconnect))=revoked {
+                    if uid==u.id {
+                        let _=sender.send(WsMessage::Text(json!({"type":"disconnect","reason":"remote","reconnect":reconnect}).to_string().into())).await;
+                        let _=sender.send(WsMessage::Close(Some(CloseFrame {code:1000,reason:"".into()}))).await;
+                        break;
+                    }
+                }
+            },
             incoming=receiver.next()=>{
                 let text=match incoming {Some(Ok(WsMessage::Text(text)))=>text,Some(Ok(WsMessage::Close(_)))|None|Some(Err(_))=>break,_=>continue};
                 let Ok(cmd)=serde_json::from_str::<Value>(&text) else {continue};
