@@ -6,6 +6,7 @@ The probe uses disposable databases and never changes a real account.
 
 from datetime import datetime, timedelta, timezone
 import http.cookiejar
+import json
 import pathlib
 import re
 import sqlite3
@@ -16,6 +17,7 @@ import urllib.request
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_bot_admin import request
+from paired_direct_upload import PAYLOAD, path_from_url, raw_request
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 
 
@@ -124,6 +126,46 @@ def exercise(port, database, session_id, cookie):
     return "fresh unchanged; stale agent, IP, and times refreshed; immediate repeat unchanged"
 
 
+def active_storage_without_refresh(port, database, session_id, cookie):
+    status, _, page = request(port, "GET", "/account/edit", cookie, "")
+    assert status == 200, status
+    csrf = re.search(rb'<meta name=[\'\"]csrf-token[\'\"] content=[\'\"]([^\'\"]+)', page)
+    assert csrf, "signed-in CSRF token missing"
+    original = set_metadata(database, session_id, timedelta(hours=2))
+    status, _, body = request(
+        port, "POST", "/rails/active_storage/direct_uploads", cookie, csrf.group(1).decode(),
+        PAYLOAD, "application/json", {"User-Agent": NEW_AGENT, "X-Forwarded-For": NEW_IP},
+    )
+    assert status == 200, (status, body[:200])
+    assert metadata(database, session_id) == original, ("direct upload metadata", metadata(database, session_id))
+    upload_path = path_from_url(json.loads(body)["direct_upload"]["url"])
+    status, _, _ = raw_request(port, "PUT", upload_path, b"incorrect", {
+        "Cookie": cookie, "Content-Type": "text/plain", "User-Agent": NEW_AGENT,
+        "X-Forwarded-For": NEW_IP,
+    })
+    assert status == 422, status
+    assert metadata(database, session_id) == original, ("direct upload bytes", metadata(database, session_id))
+    return "direct upload POST and PUT authenticate without refreshing stale session"
+
+
+def rejected_csrf_activity(port, database, session_id, cookie):
+    original = set_metadata(database, session_id, timedelta(hours=2))
+    before = datetime.now(timezone.utc)
+    status, _, _ = request(
+        port, "POST", "/rooms/1/messages", cookie, "incorrect-csrf",
+        b"message%5Bbody%5D=Rejected", "application/x-www-form-urlencoded",
+        {"User-Agent": NEW_AGENT, "X-Forwarded-For": NEW_IP},
+    )
+    after = datetime.now(timezone.utc)
+    assert status == 422, status
+    saved = metadata(database, session_id)
+    if saved != original:
+        assert saved[:2] == (NEW_AGENT, NEW_IP), saved
+        assert before - timedelta(seconds=2) <= timestamp(saved[2]) <= after + timedelta(seconds=2), saved
+        assert before - timedelta(seconds=2) <= timestamp(saved[3]) <= after + timedelta(seconds=2), saved
+    return saved != original
+
+
 def main():
     revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=REPOSITORY, text=True).strip()
     assert revision == REVISION, revision
@@ -142,6 +184,8 @@ def main():
         try:
             rust_session, rust_cookie = sign_in(rust_port, rust_db)
             rust_result = exercise(rust_port, rust_db, rust_session, rust_cookie)
+            rust_storage = active_storage_without_refresh(rust_port, rust_db, rust_session, rust_cookie)
+            rust_rejected = rejected_csrf_activity(rust_port, rust_db, rust_session, rust_cookie)
         finally:
             stop_server(rust_process)
         with (temp / "puma.log").open("w+") as log:
@@ -153,6 +197,8 @@ def main():
                 wait_for_server(camp_port, camp_process)
                 camp_session, cookie = sign_in(camp_port, camp_db)
                 camp_result = exercise(camp_port, camp_db, camp_session, cookie)
+                camp_storage = active_storage_without_refresh(camp_port, camp_db, camp_session, cookie)
+                camp_rejected = rejected_csrf_activity(camp_port, camp_db, camp_session, cookie)
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -160,8 +206,9 @@ def main():
                 raise
             finally:
                 stop_server(camp_process)
-    assert rust_result == camp_result
-    print("PASS paired session creation and resume:", rust_result)
+    assert rust_result == camp_result and rust_storage == camp_storage and rust_rejected == camp_rejected, (rust_rejected, camp_rejected)
+    print("PASS paired session creation and resume:", rust_result, ";", rust_storage,
+          "; rejected CSRF refreshed session:", rust_rejected)
 
 
 if __name__ == "__main__":

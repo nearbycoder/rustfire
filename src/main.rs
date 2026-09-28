@@ -2447,6 +2447,13 @@ fn user(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
     }
     Ok(actor)
 }
+fn user_without_activity_refresh(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
+    // Active Storage authenticates with SessionLookup but does not call
+    // Authentication#resume_session in the pinned Campfire source.
+    let mut headers = headers.clone();
+    headers.remove("x-rustfire-peer-ip");
+    user(state, &headers)
+}
 fn generate_bot_token() -> Result<String, StatusCode> {
     const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     let mut token = String::with_capacity(12);
@@ -3813,6 +3820,12 @@ async fn reject_banned_ip(
                         false
                     };
                     if !form_valid {
+                        if !anonymous_direct_upload && !path.starts_with("/rails/active_storage/") {
+                            match user(&s, &parts.headers) {
+                                Ok(_) | Err(StatusCode::UNAUTHORIZED) => {}
+                                Err(error) => return error.into_response(),
+                            }
+                        }
                         return if anonymous_direct_upload { StatusCode::UNPROCESSABLE_ENTITY.into_response() } else { invalid_authenticity_response(&parts.headers, &parts.uri) };
                     }
                     request = Request::from_parts(parts, Body::from(bytes));
@@ -12151,7 +12164,7 @@ async fn direct_upload_create(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> AppResult {
-    user(&s, &headers)?;
+    user_without_activity_refresh(&s, &headers)?;
     let blob = payload.get("blob").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let filename = blob.get("filename").and_then(Value::as_str).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let byte_size = blob.get("byte_size").and_then(Value::as_i64).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
@@ -12180,7 +12193,7 @@ async fn direct_upload_put(
     Path(token): Path<String>,
     body: Body,
 ) -> AppResult {
-    user(&s, &headers)?;
+    user_without_activity_refresh(&s, &headers)?;
     let data = disk_token_data(&s.blob_signing_key, &token, "blob_token").ok_or(StatusCode::NOT_FOUND)?;
     let storage_key = data.get("key").and_then(Value::as_str).ok_or(StatusCode::NOT_FOUND)?;
     let content_type = data.get("content_type").ok_or(StatusCode::NOT_FOUND)?.as_str();

@@ -1,6 +1,17 @@
 # Preliminary Rustfire measurements
 
-## Latest 8,000-socket rich browser-channel load
+## Session-refresh build at 8,000 browser-channel sockets
+
+At Rustfire commit `0727425` (release binary SHA-256 `b3d7a6f2da17ff000cc189f20a5bea6aa774323e59b6714d9d1b714e2ac197bd`), the pinned Campfire comparison was repeated in both server orders after adding the one-hour authenticated-session refresh. The command was `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 0.5 --sockets-per-room 2000 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources`, with `--rustfire-first` in the second run. Each app and order saved all 60 rich posts within the deadline and delivered all 120,000 message appends, 120,000 unread events, and 2,004,000 presence read events. All 240 paired sampled append structures matched per order; final-page and saved-row checks passed; no checked read errors, missing or unexpected socket events, or early closes occurred.
+
+| Server order | Rustfire reads/s / p95 | Campfire reads/s / p95 | Rustfire last write | Campfire last write | Peak server PSS, Rustfire / Campfire |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 2,618 / 34.5 ms | 1,109 / 145.8 ms | 27.56 s | 29.14 s | 1,274 / 5,874 MiB |
+| Rustfire first | 2,602 / 34.6 ms | 1,178 / 136.7 ms | 27.56 s | 29.13 s | 1,283 / 5,976 MiB |
+
+Rustfire served **2.21–2.36×** as many checked reads per second and used **4.61–4.66×** less sampled peak server PSS. The [Campfire-first](results/rich-browser-8k-session-0727425-camp-first.json) and [Rustfire-first](results/rich-browser-8k-session-0727425-rust-first.json) reports contain the strict gates and counters. Both apps and the load generator shared one host; Campfire used 22 Puma workers and isolated Redis, and Rustfire used one release process. Socket setup was outside the timed interval. Subsequent CSRF and direct-upload session fixes were not in this measured binary. This is a passing workload point, not maximum capacity, hours-long stability, or whole-app performance at complete parity.
+
+## Previous 8,000-socket rich browser-channel load at 51900c0
 
 At current Rustfire commit `51900c0`, the 30-second four-room workload was repeated against pinned Campfire `91d294f` in both server orders. The command was `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 0.5 --sockets-per-room 2000 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources`, with `--rustfire-first` added for the reverse order. Every app and order saved all 60 scheduled rich posts within the deadline, delivered all **120,000 message appends**, **120,000 unread events**, and **2,004,000 presence read events**, and had zero checked read errors, missing or unexpected socket events, or early closes. Each order matched 240 sampled append structures and passed the final page and saved-row checks.
 
