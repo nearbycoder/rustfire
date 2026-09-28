@@ -9,10 +9,10 @@ import tempfile
 import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
-from paired_banned_content import start_redis
+from paired_banned_content import REDIS_CLI, start_redis
 from paired_direct_lookup import campfire_env, wait_for_server
 from paired_first_run import BUNDLE, REVISION, RUBY, SOURCE, fetch, fresh_campfire_database
-from paired_join import browser
+from paired_join import browser, csrf_token, fetch as join_fetch
 
 
 CASES = {
@@ -23,6 +23,9 @@ CASES = {
     "all_blank": {"user[name]": "", "user[email_address]": "", "user[password]": ""},
     "scalar_user": {"user": "unexpected"},
     "array_user": {"user[]": "unexpected"},
+    "password_72_bytes": {"user[name]": "Admin", "user[email_address]": "admin@example.invalid", "user[password]": "p" * 72},
+    "password_73_bytes": {"user[name]": "Admin", "user[email_address]": "admin@example.invalid", "user[password]": "p" * 73},
+    "password_80_utf8_bytes": {"user[name]": "Admin", "user[email_address]": "admin@example.invalid", "user[password]": "é" * 40},
 }
 
 QUERY_CASES = {
@@ -78,7 +81,18 @@ def check(port, database, submitted, mode, query=None):
         with sqlite3.connect(database) as db:
             join_code = db.execute("SELECT join_code FROM accounts").fetchone()[0]
         response = submit(browser(), port, f"/join/{join_code}", submitted, query)
-    return response, saved_state(database)
+    login_results = []
+    password = submitted.get("user[password]")
+    if password and len(password.encode()) >= 72 and response[:2] == (302, "/"):
+        alternate = password[:-1] + ("è" if password[-1] == "é" else "q")
+        for candidate in (password, alternate):
+            opener = browser()
+            sign_in_page = join_fetch(opener, port, "/session/new")[2]
+            status, location, _, _ = join_fetch(opener, port, "/session",
+                                                 {"email_address": submitted["user[email_address]"], "password": candidate},
+                                                 csrf_token(sign_in_page))
+            login_results.append((status, location))
+    return response, saved_state(database), login_results
 
 
 def main():
@@ -95,6 +109,8 @@ def main():
             cases = [(label, fields, None) for label, fields in CASES.items()]
             cases += [(label, fields, query) for label, (fields, query) in QUERY_CASES.items()]
             for mode, label, submitted, query in ((mode, label, fields, query) for mode in ("first_run", "join") for label, fields, query in cases):
+                subprocess.run([str(REDIS_CLI), "-p", str(redis_port), "FLUSHDB"],
+                               check=True, capture_output=True)
                 rust_db, camp_db = temp / f"{mode}-{label}-rust.sqlite3", temp / f"{mode}-{label}-camp.sqlite3"
                 rust_port, camp_port = free_port(), free_port()
                 fresh_campfire_database(camp_db)
@@ -121,7 +137,8 @@ def main():
                         stop_server(camp)
                 assert rust_result == camp_result, (mode, label, rust_result, camp_result)
                 status, location, response_body = rust_result[0]
-                print(f"{mode}/{label}: {status} {location or '-'}; {len(response_body)} response chars; saved {rust_result[1][0]} account(s), {len(rust_result[1][1])} user(s)")
+                login = f"; exact/changed-suffix login {rust_result[2]}" if rust_result[2] else ""
+                print(f"{mode}/{label}: {status} {location or '-'}; {len(response_body)} response chars; saved {rust_result[1][0]} account(s), {len(rust_result[1][1])} user(s){login}")
         finally:
             redis.terminate()
             redis.wait(timeout=10)
