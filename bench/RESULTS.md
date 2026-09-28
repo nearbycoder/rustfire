@@ -2003,3 +2003,14 @@ Commit `9e8c6d1` passed the same 30-second, four-room, four-user load in both se
 | Rustfire first | 1,166.7 | 2,562.6 | 2.20× | 6,030.5 / 1,281.4 MiB |
 
 Campfire ran 22 Puma workers plus Redis; Rustfire ran one release process. The load generator and servers shared one host. Socket setup was excluded from the timed interval. The result establishes an advantage for this checked workload on this build; it does not establish maximum connection capacity, longer-term stability, or a whole-app advantage at full behavior parity.
+
+## Current-build two-minute 8,000-socket rich browser-channel load
+
+Commit `e1d16d8` repeated the four-room, four-user workload for 120 measured seconds in both server orders: `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 120 --write-rate 0.5 --sockets-per-room 2000 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources`, with `--rustfire-first` for the reverse order. Each app saved all 240 scheduled rich posts within the writer deadline and delivered all 480,000 expected message appends, 480,000 unread events, and 2,004,000 presence-read events in each order. Both orders had zero checked read errors, missing or unexpected socket events, or early socket closes; 960 captured append structures matched, and final pages and saved rows passed. Full reports: [Campfire first](results/rich-browser-8k-120s-current-2026-09-28-camp-first.json) and [Rustfire first](results/rich-browser-8k-120s-current-2026-09-28-rust-first.json).
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Read p95, Campfire / Rustfire | Write p95, Campfire / Rustfire | Sampled peak server PSS, Campfire / Rustfire |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 1,239.8 | 2,484.2 | 2.00× | 117.08 / 36.02 ms | 473.15 / 44.87 ms | 6,283.8 / 1,282.3 MiB |
+| Rustfire first | 1,185.8 | 2,354.4 | 1.99× | 143.31 / 39.55 ms | 621.26 / 57.97 ms | 6,199.4 / 1,280.9 MiB |
+
+Campfire used 22 Puma workers plus Redis; Rustfire used one release process. Both apps ran serially on the same host as the load generator. Socket setup was excluded from the measured interval. The two-minute passing result extends the sampled duration and shows 4.84–4.90× lower sampled peak server PSS for Rustfire at this load. It does not establish either app's maximum connection count, hours-long stability, cross-host deployment capacity, or a whole-app advantage at complete feature parity.
