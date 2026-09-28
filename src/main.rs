@@ -4301,7 +4301,11 @@ async fn login_post(
     Form(f): Form<Login>,
 ) -> AppResult {
     let ip = client_ip(&s.trusted_proxies, &headers, addr.ip());
-    if login_rate_limited(&s, ip)? {
+    let rate_state = s.clone();
+    if tokio::task::spawn_blocking(move || login_rate_limited(&rate_state, ip))
+        .await
+        .map_err(db_err)??
+    {
         return login_page(&s, &headers, &f.email_address, Some(StatusCode::TOO_MANY_REQUESTS));
     }
     let db = pool(&s)?;
@@ -4313,8 +4317,13 @@ async fn login_post(
         )
         .optional()
         .map_err(db_err)?;
+    drop(db);
     if let Some((id, Some(pw))) = row {
-        if verify(&f.password, &pw).unwrap_or(false) {
+        let password = f.password;
+        if tokio::task::spawn_blocking(move || verify(&password, &pw).unwrap_or(false))
+            .await
+            .map_err(db_err)?
+        {
             let destination = cookie(&headers, "return_to")
                 .and_then(|encoded| safe_return_path(&encoded))
                 .unwrap_or_else(|| "/".to_string());
