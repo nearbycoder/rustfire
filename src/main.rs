@@ -9208,7 +9208,7 @@ async fn user_role_update(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path(id): Path<i64>,
-    Form(f): Form<HashMap<String, String>>,
+    Form(mut f): Form<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
@@ -9223,7 +9223,13 @@ async fn user_role_update(
         )
         .optional()
         .map_err(db_err)?;
-    prior.ok_or(StatusCode::NOT_FOUND)?;
+    let prior = prior.ok_or(StatusCode::NOT_FOUND)?;
+    if let Some(query) = uri.query().filter(|query| parameter_group_present(query.as_bytes(), "user")) {
+        f = fields(query.as_bytes()).0;
+    }
+    if f.get("user").is_some_and(|value| !value.is_empty()) || f.contains_key("user[]") {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
     if !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
@@ -9232,11 +9238,13 @@ async fn user_role_update(
     } else {
         0
     };
-    db.execute(
-        "UPDATE users SET role=?1,updated_at=?2 WHERE id=?3",
-        params![role, now(), id],
-    )
-    .map_err(db_err)?;
+    if role != prior {
+        db.execute(
+            "UPDATE users SET role=?1,updated_at=?2 WHERE id=?3",
+            params![role, now(), id],
+        )
+        .map_err(db_err)?;
+    }
     Ok(found_redirect(&public_url(&headers, "/account/edit")))
 }
 async fn user_role_update_alias(
