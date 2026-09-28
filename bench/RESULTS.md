@@ -1925,3 +1925,12 @@ Campfire used 22 Puma workers and Rustfire one release process. The load generat
 The pinned Campfire ActionText test exercises a room signed ID whose signature cannot verify. A new paired HTTP case found that Rustfire left its attachment tag in the message and indexed its filename, while Campfire displayed the missing-attachment marker and indexed no attachment text. Rustfire now recognizes room GlobalIDs in both Rails 7 and current signed-ID envelopes and applies that fallback. A separate paired case showed that a link-preview attachment still renders its card when it carries such an ID, so preview handling takes precedence. The expanded `python bench/paired_action_text_fallbacks.py` checks **16** cases; the signed-mention and inline-upload probes passed after the first room-ID fix. These cases cover selected signed-ID and preview shapes, not every ActionText attachable.
 
 An administrator sweep with `python bench/paired_valid_write_route_inventory.py --body foo=bar` also matched **80/80** valid-CSRF submitted-form method/path cases. It compares response shape, common table-count changes, and route-specific follow-up state on fresh disposable databases; it does not verify every meaningful form value.
+
+Commit `24a4370` repeated a ten-second, 32-client rich-mention bot API read in both server orders. Both apps returned matching normalized 40-message JSON, with 53,003 bytes per warmed body and zero checked read errors. The [paired report](results/room-sgid-rich-mention-reads-10s.json) preserves commands and raw measurements:
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Campfire / Rustfire read p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Rustfire first | 1,465.8 | 2,987.0 | 2.04× | 54.81 / 14.98 ms |
+| Campfire first | 952.2 | 2,819.7 | 2.96× | 64.63 / 15.85 ms |
+
+Campfire used 22 Puma workers and Rustfire one release process on the same host. These short reads exercise a signed-mention JSON page; they do not establish sustained capacity or a whole-app speed advantage.

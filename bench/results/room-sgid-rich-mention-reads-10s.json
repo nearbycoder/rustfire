@@ -1,0 +1,89 @@
+{
+  "campfire_commit": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "commands": [
+    "python bench/paired_mention_reads.py --clients 32 --seconds 10 --campfire-workers 22 --sample-dir /tmp/rustfire-room-sgid-final-rust-first",
+    "python bench/paired_mention_reads.py --clients 32 --seconds 10 --campfire-workers 22 --campfire-first --sample-dir /tmp/rustfire-room-sgid-final-camp-first"
+  ],
+  "date": "2026-09-28",
+  "rustfire_commit": "24a437089c3064eec627941a135582f43d07f577",
+  "trials": [
+    {
+      "campfire": {
+        "body_bytes": 53003,
+        "reads": {
+          "32": {
+            "clients": 32,
+            "errors": 0,
+            "median_ms": 15.09852,
+            "p95_ms": 54.81175,
+            "p99_ms": 67.76857,
+            "rps": 1465.8184448226953,
+            "seconds": 10.017611698,
+            "successes": 14684
+          }
+        }
+      },
+      "campfire_first": false,
+      "campfire_workers": 22,
+      "clients": [
+        32
+      ],
+      "rustfire": {
+        "body_bytes": 53003,
+        "reads": {
+          "32": {
+            "clients": 32,
+            "errors": 0,
+            "median_ms": 10.807869,
+            "p95_ms": 14.982654,
+            "p99_ms": 16.835308,
+            "rps": 2987.0339685160116,
+            "seconds": 10.006247105,
+            "successes": 29889
+          }
+        }
+      },
+      "seconds": 10.0,
+      "slo_ms": null
+    },
+    {
+      "campfire": {
+        "body_bytes": 53003,
+        "reads": {
+          "32": {
+            "clients": 32,
+            "errors": 0,
+            "median_ms": 31.497432,
+            "p95_ms": 64.627313,
+            "p99_ms": 88.672005,
+            "rps": 952.2423820174105,
+            "seconds": 10.015307216,
+            "successes": 9537
+          }
+        }
+      },
+      "campfire_first": true,
+      "campfire_workers": 22,
+      "clients": [
+        32
+      ],
+      "rustfire": {
+        "body_bytes": 53003,
+        "reads": {
+          "32": {
+            "clients": 32,
+            "errors": 0,
+            "median_ms": 11.471089,
+            "p95_ms": 15.848808,
+            "p99_ms": 18.283196,
+            "rps": 2819.738837955168,
+            "seconds": 10.007664405,
+            "successes": 28219
+          }
+        }
+      },
+      "seconds": 10.0,
+      "slo_ms": null
+    }
+  ]
+}
