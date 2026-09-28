@@ -2928,21 +2928,35 @@ fn public_web_url(input: &str) -> Option<reqwest::Url> {
 async fn pinned_web_client(url: &reqwest::Url) -> Option<reqwest::Client> {
     let host = url.host_str()?;
     let port = url.port_or_known_default()?;
-    let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await.ok()?.collect();
-    if addresses.is_empty()
-        || addresses
-            .iter()
-            .any(|address| !public_network_ip(address.ip()))
-    {
-        return None;
-    }
+    let address = first_public_address(tokio::net::lookup_host((host, port)).await.ok()?)?;
     reqwest::Client::builder()
         .no_proxy()
-        .resolve(host, addresses[0])
+        .resolve(host, address)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(7))
         .build()
         .ok()
+}
+fn first_public_address(addresses: impl IntoIterator<Item = SocketAddr>) -> Option<SocketAddr> {
+    // Campfire's Surfguard.resolve_public_ips filters blocked answers, then
+    // prefers IPv4 while retaining resolver order within each address family.
+    // Its resolver rejects more than 256 raw answers, including duplicates.
+    // reqwest is pinned to the chosen address, so it cannot resolve again.
+    let mut first_v4 = None;
+    let mut first_v6 = None;
+    for (index, address) in addresses.into_iter().enumerate() {
+        if index >= 256 {
+            return None;
+        }
+        if public_network_ip(address.ip()) {
+            if address.is_ipv4() {
+                first_v4.get_or_insert(address);
+            } else {
+                first_v6.get_or_insert(address);
+            }
+        }
+    }
+    first_v4.or(first_v6)
 }
 async fn fetch_public_url(input: &str, head: bool) -> Option<reqwest::Response> {
     let mut url = public_web_url(input)?;
@@ -14809,6 +14823,26 @@ mod tests {
         ] {
             assert!(super::public_network_ip(address.parse().unwrap()), "{address}");
         }
+    }
+    #[test]
+    fn link_preview_dns_filters_blocked_answers_and_prefers_public_ipv4() {
+        let parse = |address: &str| address.parse::<std::net::SocketAddr>().unwrap();
+        let public_v6 = parse("[2606:4700:4700::1111]:443");
+        let public_v4 = parse("8.8.8.8:443");
+        assert_eq!(
+            super::first_public_address([
+                public_v6,
+                parse("10.0.0.1:443"),
+                public_v4,
+                parse("169.254.169.254:443"),
+            ]),
+            Some(public_v4),
+        );
+        assert_eq!(super::first_public_address([parse("[::1]:443")]), None);
+        assert_eq!(super::first_public_address([public_v6]), Some(public_v6));
+        assert_eq!(super::first_public_address([parse("10.0.0.1:443"), parse("127.0.0.1:443")]), None);
+        assert_eq!(super::first_public_address(vec![public_v4; 256]), Some(public_v4));
+        assert_eq!(super::first_public_address(vec![public_v4; 257]), None);
     }
     #[test]
     fn link_preview_media_filter_matches_campfire_url_pattern() {

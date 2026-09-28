@@ -156,6 +156,8 @@ The transfer page also matches Campfire's parsed head and body in anonymous and 
 
 ## Remaining parity work
 
+Open Graph outbound DNS selection now follows the pinned Campfire Surfguard resolver for mixed answers: it drops blocked addresses, prefers the first public IPv4 address before IPv6, rejects more than 256 raw answers, and pins the selected address for the request. A deterministic Rust test covers these selection cases; live remote-site behavior and other fetch edge cases remain unverified.
+
 A paired private-room stream probe now confirms that a member's previously valid signed message token is rejected on a fresh socket after their membership is removed. The member's login and heartbeat remain valid, a remaining member can still use the same token, unsigned room-ID subscriptions are rejected, and `Turbo::StreamsChannel` rejects the room token both before and after removal. This covers subscription decisions for one room type and membership transition; broader authorization and delivery states remain open.
 
 The paired invalid-key push probe now checks background cleanup and direct test notifications separately. Both apps discard background subscriptions with malformed P-256 points, including a short but valid-base64 point, retain malformed-base64 and blank-auth subscriptions, return the same 500 page for direct test failures without deleting those rows, and skip delivery to a saved endpoint outside the permitted host list. Rustfire also has a decryptable encryption fallback for legacy auth-secret lengths, compressed P-256 keys, and payloads above its normal Web Push library's limit that Campfire accepts. This checks local delivery decisions; real push-service responses and browser delivery remain open.
