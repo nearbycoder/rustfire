@@ -9177,30 +9177,33 @@ async fn custom_styles_update(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    Form(f): Form<HashMap<String, String>>,
+    Form(mut f): Form<HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     if !is_admin(&u) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let Some(css) = f
-        .get("account[custom_styles]")
-        .or_else(|| f.get("custom_styles"))
-    else {
+    if let Some(query) = uri.query().filter(|query| parameter_group_present(query.as_bytes(), "account")) {
+        f = fields(query.as_bytes()).0;
+    }
+    if f.get("account").is_some_and(|value| !value.is_empty()) || f.contains_key("account[]") {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
+    if !f.keys().any(|key| key.starts_with("account[") && key.ends_with(']')) {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
-    };
-    let mut db = pool(&s)?;
-    let tx = db.transaction().map_err(db_err)?;
-    tx.execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css])
-        .map_err(db_err)?;
-    tx.execute(
-        "UPDATE accounts SET custom_styles=?1,updated_at=?2 WHERE id=1",
-        params![css, now()],
-    )
-    .map_err(db_err)?;
-    tx.commit().map_err(db_err)?;
-    if let Some(styles) = CUSTOM_STYLES.get() {
-        *styles.write().unwrap() = Some(css.clone());
+    }
+    if let Some(css) = f.get("account[custom_styles]") {
+        let mut db = pool(&s)?;
+        let previous: Option<String> = db.query_row("SELECT custom_styles FROM accounts WHERE id=1", [], |row| row.get(0)).map_err(db_err)?;
+        if previous.as_deref() != Some(css.as_str()) {
+            let tx = db.transaction().map_err(db_err)?;
+            tx.execute("UPDATE account_custom_styles SET css=?1 WHERE id=1", [css]).map_err(db_err)?;
+            tx.execute("UPDATE accounts SET custom_styles=?1,updated_at=?2 WHERE id=1", params![css, now()]).map_err(db_err)?;
+            tx.commit().map_err(db_err)?;
+            if let Some(styles) = CUSTOM_STYLES.get() {
+                *styles.write().unwrap() = Some(css.clone());
+            }
+        }
     }
     Ok(found_redirect(&public_url(&headers, "/account/custom_styles/edit")))
 }
