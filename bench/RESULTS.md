@@ -2014,3 +2014,16 @@ Commit `e1d16d8` repeated the four-room, four-user workload for 120 measured sec
 | Rustfire first | 1,185.8 | 2,354.4 | 1.99× | 143.31 / 39.55 ms | 621.26 / 57.97 ms | 6,199.4 / 1,280.9 MiB |
 
 Campfire used 22 Puma workers plus Redis; Rustfire used one release process. Both apps ran serially on the same host as the load generator. Socket setup was excluded from the measured interval. The two-minute passing result extends the sampled duration and shows 4.84–4.90× lower sampled peak server PSS for Rustfire at this load. It does not establish either app's maximum connection count, hours-long stability, cross-host deployment capacity, or a whole-app advantage at complete feature parity.
+
+## Concurrent sign-in bursts
+
+On commit `c17cac1`, `python bench/paired_login_capacity.py` ran checked sign-ins against pinned Campfire `91d294f` in both server orders at 32 clients/128 logins and 64 clients/240 logins. Each client fetched a CSRF token and posted the same email and password from a distinct forwarded IP. Both apps used the same cost-12 bcrypt digest. Every request redirected successfully, and every session was saved under the expected IP. Campfire ran 22 Puma workers plus isolated Redis; Rustfire ran one release process with a persistent SQLite rate counter. The reports retain the Rustfire binary SHA-256.
+
+| Clients / logins | Server order | Campfire logins/s | Rustfire logins/s | Rustfire / Campfire | GET-plus-POST p95, Campfire / Rustfire |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 32 / 128 | Campfire first | 92.19 | 114.28 | 1.24× | 512.05 / 262.39 ms |
+| 32 / 128 | Rustfire first | 102.18 | 127.42 | 1.25× | 435.32 / 264.93 ms |
+| 64 / 240 | Campfire first | 124.04 | 135.87 | 1.10× | 996.33 / 636.77 ms |
+| 64 / 240 | Rustfire first | 109.00 | 150.91 | 1.38× | 1,107.07 / 623.59 ms |
+
+Full reports: [32 clients, Campfire first](results/login-capacity-32x128-camp-first.json), [32 clients, Rustfire first](results/login-capacity-32x128-rust-first.json), [64 clients, Campfire first](results/login-capacity-64x240-camp-first.json), and [64 clients, Rustfire first](results/login-capacity-64x240-rust-first.json). Before commit `c17cac1`, the 8-client/32-login pilot passed, but a 32-client/128-login run timed out on one Rustfire POST after 30 seconds. The sign-in handler then released its pooled database connection before bcrypt verification and moved the rate-limit transaction and bcrypt work to blocking threads. The failing pre-change attempt produced no complete paired report and is not a quantified speed comparison. These measured intervals lasted 1.00–2.20 seconds per app, with server startup excluded and the load clients sharing the host. The results establish checked burst throughput for this sign-in path, not a sustained or whole-app capacity advantage.

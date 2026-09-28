@@ -1,0 +1,27 @@
+{
+  "campfire": {
+    "clients": 32,
+    "elapsed_s": 1.3884434886276722,
+    "errors": 0,
+    "logins_per_s": 92.18956410427212,
+    "p50_ms": 272.35431922599673,
+    "p95_ms": 512.0499096810818,
+    "requests": 128,
+    "successes": 128
+  },
+  "campfire_workers": 22,
+  "rustfire": {
+    "clients": 32,
+    "elapsed_s": 1.1200643200427294,
+    "errors": 0,
+    "logins_per_s": 114.27915139294583,
+    "p50_ms": 227.56296582520008,
+    "p95_ms": 262.3934205621481,
+    "requests": 128,
+    "successes": 128
+  },
+  "rustfire_binary_sha256": "25dd5b34f407ace815a22d3afd57cb5cd29a91582e99a69646f5f5cea569198f",
+  "rustfire_first": false,
+  "rustfire_revision": "c17cac11adc20cb2cc8bde38c80816b8e83a3ca9",
+  "source_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb"
+}
