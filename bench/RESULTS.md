@@ -2040,3 +2040,18 @@ Full reports: [32 clients, Campfire first](results/login-capacity-32x128-camp-fi
 | 64 | Rustfire first | 512 | 81.72 | 835.20 | 10.22× | 1,468.11 / 163.69 | 5,442 / 1,311 |
 
 The [32-client Campfire-first](results/bot-upload-32c8m-camp-first.json), [32-client Rustfire-first](results/bot-upload-32c8m-rust-first.json), [64-client Campfire-first](results/bot-upload-64c8m-camp-first.json), and [64-client Rustfire-first](results/bot-upload-64c8m-rust-first.json) reports retain exact elapsed time, bytes/s, CPU time, PSS samples, and response latencies. These were short bursts: Rustfire's timed intervals lasted 0.36–0.62 seconds and Campfire's 3.27–6.27 seconds, with warmup and server startup excluded. This demonstrates higher checked throughput at these client counts for generic bot files on this host, not a sustained maximum, performance with image analysis, webhook or socket load, separate load hosts, or a whole-app advantage at complete parity.
+
+## Streamed bot attachment repeat
+
+The preceding bot burst used Rustfire's in-memory multipart file buffering. A one-client 129 MiB probe then showed Campfire accepting a named bot attachment while Rustfire rejected the warmup request with HTTP 400 at its 128 MiB multipart cap. Rustfire now stages each named bot file as the multipart parser receives it and renames the staged file into storage after message creation. The [large-file rerun](results/bot-upload-streamed-129m.json) passed one warmup and one timed 129 MiB upload per app, checked both response locations and original-file SHA-256 values, and found no leftover Rustfire staged file. Its one timed upload per app is a compatibility check, not a stable throughput estimate.
+
+The 8 MiB generic-file burst was then repeated on the streamed build with the same fixture, 22 Campfire Puma workers, one Rustfire process, isolated Redis, and both server orders. Every timed and warmup upload returned HTTP 201 with a distinct message ID; every original file hash matched; and Rustfire left no staged files.
+
+| Clients | Server order | Timed uploads | Campfire uploads/s | Rustfire uploads/s | Rustfire / Campfire | p95 ms, Campfire / Rustfire | Sampled peak PSS MiB, Campfire / Rustfire |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | Campfire first | 256 | 74.43 | 1,040.49 | 13.98× | 970.44 / 68.90 | 3,855 / 136 |
+| 32 | Rustfire first | 256 | 65.95 | 1,240.53 | 18.81× | 930.99 / 65.56 | 4,746 / 147 |
+| 64 | Campfire first | 512 | 85.22 | 1,024.49 | 12.02× | 1,552.08 / 99.08 | 5,790 / 288 |
+| 64 | Rustfire first | 512 | 77.84 | 1,033.13 | 13.27× | 1,660.77 / 106.05 | 6,130 / 273 |
+
+The [32-client Campfire-first](results/bot-upload-streamed-32c8m-camp-first.json), [32-client Rustfire-first](results/bot-upload-streamed-32c8m-rust-first.json), [64-client Campfire-first](results/bot-upload-streamed-64c8m-camp-first.json), and [64-client Rustfire-first](results/bot-upload-streamed-64c8m-rust-first.json) reports retain elapsed time, payload throughput, CPU time, and memory samples. Rustfire's timed intervals lasted 0.21–0.50 seconds and Campfire's 3.44–6.58 seconds, so these are burst measurements. `python tests/bot_upload_abort.py` also confirmed that an interrupted bot request had already written part of a staged file and then removed it without saving a message. The current Rustfire path used far less sampled PSS than its earlier buffered version under these fixtures, but the results are not hours-long stability tests, maximum file or client limits, mixed browser/socket/webhook workloads, or a whole-app speed claim at complete feature parity.

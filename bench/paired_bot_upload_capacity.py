@@ -132,6 +132,8 @@ def verify(database, uploads, campfire, ids, data):
         path = uploads / stored[:2] / stored[2:4] / stored if campfire else uploads / stored
         with path.open("rb") as saved:
             assert hashlib.file_digest(saved, "sha256").digest() == digest, (message_id, path)
+    if not campfire:
+        assert not list(uploads.glob("message-upload-*")), "Rustfire left staged bot-upload files"
 
 
 def main():

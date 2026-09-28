@@ -230,6 +230,8 @@ A paired generic-file composer benchmark warmed each client connection, then che
 
 A separate bot API benchmark verified every 8 MiB generic-file upload and saved SHA-256 at 32 and 64 concurrent clients in both server orders. Rustfire completed **6.65–10.38×** as many uploads per second at 32 clients and **9.79–10.22×** at 64 clients, with lower p95 latency and sampled peak PSS. The [paired reports](../bench/RESULTS.md#paired-bot-file-upload-bursts) cover this one-bot, one-room burst; they do not establish sustained or whole-app capacity.
 
+After bot attachments moved to staged streaming files, a paired 129 MiB upload passed in both apps where Rustfire had previously returned HTTP 400 at its 128 MiB multipart cap. Repeating the 8 MiB benchmark on the current build passed every response, saved hash, and staged-file cleanup check at 32 and 64 clients in both orders. Rustfire completed **13.98–18.81×** as many checked uploads per second at 32 clients and **12.02–13.27×** at 64 clients, with lower sampled peak PSS. These are short same-host bursts; [current reports](../bench/RESULTS.md#streamed-bot-attachment-repeat) do not establish sustained or whole-app capacity.
+
 ## Checks
 
 ```sh

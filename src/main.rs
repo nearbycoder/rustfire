@@ -11616,10 +11616,13 @@ async fn bot_messages_post(
     }
     let blank_query_attachment = query_attachment.is_some();
     let (body, attachment) = if blank_query_attachment {
-        let raw = axum::body::to_bytes(req.into_body(), 128 * 1024 * 1024)
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        if raw.iter().all(u8::is_ascii_whitespace) {
+        let mut raw = req.into_body().into_data_stream();
+        let mut has_content = false;
+        while let Some(chunk) = raw.next().await {
+            let chunk = chunk.map_err(|_| StatusCode::BAD_REQUEST)?;
+            has_content |= chunk.iter().any(|byte| !byte.is_ascii_whitespace());
+        }
+        if !has_content {
             return Ok((StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "text/html")]).into_response());
         }
         (String::new(), None)
@@ -11627,13 +11630,8 @@ async fn bot_messages_post(
         let boundary = multer::parse_boundary(content_type).map_err(|_| StatusCode::BAD_REQUEST)?;
         let captured = Arc::new(Mutex::new(Some(Vec::new())));
         let stream_capture = captured.clone();
-        let mut received = 0usize;
         let stream = req.into_body().into_data_stream().map(move |part| {
             let bytes = part.map_err(|error| std::io::Error::other(error.to_string()))?;
-            received = received.saturating_add(bytes.len());
-            if received > 128 * 1024 * 1024 {
-                return Err(std::io::Error::other("multipart body exceeds limit"));
-            }
             if let Some(raw) = stream_capture.lock().unwrap().as_mut() {
                 raw.extend_from_slice(&bytes);
             }
@@ -11642,7 +11640,7 @@ async fn bot_messages_post(
         let mut multipart = multer::Multipart::new(stream, boundary);
         let mut attachment = None;
         let mut invalid_attachment = false;
-        while let Some(field) = multipart
+        while let Some(mut field) = multipart
             .next_field()
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?
@@ -11655,16 +11653,21 @@ async fn bot_messages_post(
                         .content_type()
                         .map(ToString::to_string)
                         .unwrap_or_else(|| "application/octet-stream".to_string());
-                    let bytes = field
-                        .bytes()
-                        .await
-                        .map_err(|_| StatusCode::BAD_REQUEST)?
-                        .to_vec();
+                    let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
+                    tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
+                    let temporary = std::path::Path::new(&dir).join(format!("message-upload-{}", Uuid::new_v4()));
+                    let cleanup = UploadTemporaryFile(temporary.clone());
+                    let mut staged = tokio::fs::File::create(&temporary).await.map_err(db_err)?;
+                    while let Some(chunk) = field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+                        staged.write_all(&chunk).await.map_err(db_err)?;
+                    }
+                    staged.flush().await.map_err(db_err)?;
+                    drop(staged);
                     attachment = Some(Upload {
                         filename,
                         content_type,
-                        bytes,
-                        temporary: None,
+                        bytes: Vec::new(),
+                        temporary: Some(cleanup),
                     });
                 } else if field.file_name().is_none()
                     && !field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?.is_empty()
