@@ -4102,7 +4102,7 @@ async fn session_post(
 ) -> AppResult {
     let mut values = fields(&raw).0;
     if values.get("_method").map(String::as_str) == Some("delete") {
-        return logout(State(s), headers, raw).await;
+        return logout(State(s), headers, OriginalUri(uri), raw).await;
     }
     if let Some(query) = uri.query() {
         values.extend(fields(query.as_bytes()).0);
@@ -4134,7 +4134,7 @@ async fn session_post(
         Ok(response)
     }
 }
-async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> AppResult {
+async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri, body: Bytes) -> AppResult {
     match user(&s, &headers) {
         Ok(_) => {}
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
@@ -4149,19 +4149,20 @@ async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes)
             .optional()
             .map_err(db_err)?;
         if let Some(uid) = uid {
-            let endpoint = if headers
+            let mut values = if headers
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("")
                 .starts_with("application/x-www-form-urlencoded")
             {
-                form_urlencoded::parse(&body).find_map(|(key, value)| {
-                    (key == "push_subscription_endpoint").then(|| value.into_owned())
-                })
+                fields(&body).0
             } else {
-                None
+                HashMap::new()
             };
-            if let Some(endpoint) = endpoint {
+            if let Some(query) = uri.query() {
+                values.extend(fields(query.as_bytes()).0);
+            }
+            if let Some(endpoint) = values.get("push_subscription_endpoint") {
                 db.execute(
                     "DELETE FROM push_subscriptions WHERE user_id=?1 AND endpoint=?2",
                     params![uid, endpoint],

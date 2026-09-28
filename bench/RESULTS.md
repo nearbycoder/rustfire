@@ -1889,3 +1889,7 @@ The shared signup parser returned an empty 400 for a nonblank scalar or array `u
 ## Sign-in query and form precedence
 
 `python bench/paired_session_parameter_edges.py` found that Campfire uses URL `email_address` and `password` values over matching form fields individually, including empty values. Rustfire had ignored the URL fields. With query values merged after form parsing, the release build matched **10/10** paired outcomes for valid and rejected sign-ins, including last-value precedence among duplicate URL email fields. The comparator checked status, redirect, rejected-form email, and session-count changes. The full paired sign-in/sign-out workflow, 18-case CSRF-precedence probe, and all **52** Rust unit tests also passed. These short requests do not establish complete authentication or rate-limit parity or performance.
+
+## Sign-out endpoint selection
+
+`python bench/paired_logout_parameter_edges.py` found that Campfire selects the URL `push_subscription_endpoint` over the form value and the final value among duplicates, while Rustfire initially read only the first form value. The release build now matches **7/7** paired direct DELETE and POST override cases in response and saved push subscriptions, retaining another user's endpoint. The normal paired session workflow, clicked Chromium sign-out workflow, and all **52** Rust unit tests passed afterward. This checks local subscription cleanup, not delivery or remote unsubscribe behavior.
