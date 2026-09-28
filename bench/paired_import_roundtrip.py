@@ -23,6 +23,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_bot_admin import AvatarPreview, PNG, cleanup_campfire_uploads, multipart, request
 from paired_attachment_mime import post as post_attachment
 from paired_direct_lookup import login_campfire, seed_campfire, wait_for_server
+from paired_direct_upload import path_from_url, raw_request
 from paired_room_shell import AGENT, assert_equal, measure_room_page, section
 
 
@@ -99,6 +100,30 @@ def attachment(port, document, cookie, csrf):
     disk_status, _, body = request(port, "GET", urllib.parse.urlsplit(location).path, cookie, csrf)
     assert disk_status == 200 and body == b"Imported attachment\n", (disk_status, body)
     return path
+
+
+def create_unattached_blob(port, cookie, csrf, filename, data, upload=True):
+    payload = {"blob": {"filename": filename, "byte_size": len(data),
+                        "checksum": base64.b64encode(hashlib.md5(data).digest()).decode(),
+                        "content_type": "text/plain"}}
+    status, _, body = request(port, "POST", "/rails/active_storage/direct_uploads",
+                              cookie, csrf, json.dumps(payload).encode(), "application/json")
+    assert status == 200, (filename, status, body[:300])
+    metadata = json.loads(body)
+    if upload:
+        status, _, _ = raw_request(port, "PUT", path_from_url(metadata["direct_upload"]["url"]), data,
+                                   {"Cookie": cookie, "Content-Type": "text/plain"})
+        assert status == 204, (filename, status)
+    return metadata
+
+
+def unattached_blob_bytes(port, metadata):
+    path = f"/rails/active_storage/blobs/redirect/{metadata['signed_id']}/{metadata['filename']}"
+    status, location, _ = raw_request(port, "GET", path)
+    assert status == 302 and location, (path, status, location)
+    status, _, body = raw_request(port, "GET", path_from_url(location))
+    assert status == 200, (path, status)
+    return path, body
 
 
 def measure_imported_reads(temp, repository, ruby, env, camp_port, rust_db, rust_port,
@@ -188,6 +213,11 @@ def main():
             assert status == 200, status
             post_attachment(camp_port, cookie, csrf,
                 ("import-text", "notes.txt", "text/plain", b"Imported attachment\n"))
+            orphan_bytes = b"Uploaded to Campfire before posting a message\n"
+            orphan = create_unattached_blob(camp_port, cookie, csrf, "orphan.txt", orphan_bytes)
+            pending = create_unattached_blob(camp_port, cookie, csrf, "pending.txt", b"not uploaded", upload=False)
+            orphan_path, source_orphan_bytes = unattached_blob_bytes(camp_port, orphan)
+            assert source_orphan_bytes == orphan_bytes
             for number in range(args.extra_messages):
                 rich = urllib.parse.urlencode({"message[body]": f"<div>Imported item {number:02d} <strong>bold</strong></div>"}).encode()
                 status, _, _ = request(camp_port, "POST", "/rooms/1/messages", cookie, csrf, rich,
@@ -244,9 +274,15 @@ def main():
                 imported_highwater = db.execute("SELECT last_id FROM id_sequences WHERE name='attachments'").fetchone()[0]
                 imported_membership_times = db.execute("SELECT id,created_at,updated_at FROM memberships ORDER BY id").fetchall()
                 imported_sessions = db.execute("SELECT id,user_agent,ip_address,created_at,updated_at,last_active_at FROM sessions ORDER BY id").fetchall()
+                imported_orphan = db.execute("SELECT storage_key,uploaded FROM direct_upload_blobs WHERE id=?", (orphan["id"],)).fetchone()
+                imported_pending = db.execute("SELECT storage_key,uploaded FROM direct_upload_blobs WHERE id=?", (pending["id"],)).fetchone()
             assert imported_highwater == source_highwater, (imported_highwater, source_highwater)
             assert imported_membership_times == source_membership_times, (imported_membership_times, source_membership_times)
             assert imported_sessions == source_sessions, (imported_sessions, source_sessions)
+            assert imported_orphan == (orphan["key"], 1), imported_orphan
+            assert imported_pending == (pending["key"], 0), imported_pending
+            assert (uploads / orphan["key"]).read_bytes() == orphan_bytes
+            assert not (uploads / pending["key"]).exists()
             print("imported deleted-blob ID high-water mark matches")
             print("imported membership creation and update timestamps match")
             print("imported session agent, IP, and timestamps match")
@@ -258,6 +294,7 @@ def main():
                 target = {name: page(rust_port, path, cookie, csrf) for name, path in paths.items()}
                 target_preview, _ = preview(rust_port, target["bot_edit"], cookie, csrf)
                 target_attachment = attachment(rust_port, target["room"], cookie, csrf)
+                target_orphan_path, target_orphan_bytes = unattached_blob_bytes(rust_port, orphan)
                 if args.extra_messages == 39:
                     target_cache = {name: check_paged_cache(rust_port, paths[name], cookie)
                         for name in ("older_page", "after_page")}
@@ -268,6 +305,8 @@ def main():
             print("imported original avatar signed path and bytes match")
             assert source_attachment == target_attachment, (source_attachment, target_attachment)
             print("imported message attachment signed path and bytes match")
+            assert (source_orphan_bytes, orphan_path) == (target_orphan_bytes, target_orphan_path)
+            print("imported unattached direct-upload signed path and bytes match")
             if args.extra_messages == 39:
                 assert source_cache == target_cache, (source_cache, target_cache)
                 print("imported older/after ETag, Last-Modified, and empty-page status match")

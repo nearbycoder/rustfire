@@ -219,6 +219,32 @@ def main():
             bot_file.write_bytes(image_bytes)
             fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,created_at)
                 VALUES(21,?,'bot.png','image/png','{}','local',?,'2026-01-01 00:00:00')""", (bot_key, len(image_bytes)))
+            orphan_bytes = b"uploaded before the message was posted"
+            orphan_key = "ab22cdef1234567890"
+            orphan_file = source_files / orphan_key[:2] / orphan_key[2:4] / orphan_key
+            orphan_file.parent.mkdir(parents=True, exist_ok=True)
+            orphan_file.write_bytes(orphan_bytes)
+            orphan_checksum = base64.b64encode(hashlib.md5(orphan_bytes).digest()).decode()
+            pending_key = "ab23cdef1234567890"
+            pending_checksum = base64.b64encode(hashlib.md5(b"pending").digest()).decode()
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,checksum,created_at)
+                VALUES(22,?,'orphan.txt','text/plain','{}','local',?,?, '2026-01-01 00:00:00')""",
+                (orphan_key, len(orphan_bytes), orphan_checksum))
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,checksum,created_at)
+                VALUES(23,?,'pending.txt',NULL,'{}','local',?,?, '2026-01-01 00:00:00')""",
+                (pending_key, len(b"pending"), pending_checksum))
+            variant_key = "ab24cdef1234567890"
+            variant_file = source_files / variant_key[:2] / variant_key[2:4] / variant_key
+            variant_file.parent.mkdir(parents=True, exist_ok=True)
+            variant_file.write_bytes(image_bytes)
+            variant_checksum = base64.b64encode(hashlib.md5(image_bytes).digest()).decode()
+            fixture.execute("""INSERT INTO active_storage_variant_records(id,blob_id,variation_digest)
+                VALUES(1,11,'cached-variation')""")
+            fixture.execute("""INSERT INTO active_storage_blobs(id,key,filename,content_type,metadata,service_name,byte_size,checksum,created_at)
+                VALUES(24,?,'cached.png','image/png','{}','local',?,?, '2026-01-01 00:00:00')""",
+                (variant_key, len(image_bytes), variant_checksum))
+            fixture.execute("""INSERT INTO active_storage_attachments(id,name,record_type,record_id,blob_id,created_at)
+                VALUES(26,'image','ActiveStorage::VariantRecord',1,24,'2026-01-01 00:00:00')""")
             fixture.execute("DELETE FROM message_search_index WHERE rowid IN (1,2)")
             fixture.execute("UPDATE sqlite_sequence SET seq=40 WHERE name='users'")
             fixture.execute("UPDATE sqlite_sequence SET seq=50 WHERE name='rooms'")
@@ -234,10 +260,13 @@ def main():
         environment = dict(os.environ, RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE=secret,
             RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY=private_key, RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY=public_key)
         command = [sys.executable, "tools/import_campfire.py", "--source-db", str(source_db), "--source-files", str(source_files), "--target-db", str(target_db), "--target-uploads", str(target_uploads), "--rustfire-bin", "target/debug/rustfire"]
-        completed = subprocess.run(command, env=environment, capture_output=True, text=True, check=True)
+        completed = subprocess.run(command, env=environment, capture_output=True, text=True)
+        assert completed.returncode == 0, (completed.stdout, completed.stderr)
         result = json.loads(completed.stdout)
         assert result["messages"] == 11 and result["attachments"] == 1 and result["inline_embeds"] == 9, result
         assert result["reindexed_messages"] == 3, result
+        assert result["unattached_blobs"] == 2, result
+        assert result["variant_blobs"] == 1, result
         assert result["push_subscriptions"] == 2
         assert target_db.with_suffix(".vapid.der").is_file()
         with sqlite3.connect(target_db) as imported:
@@ -337,6 +366,15 @@ def main():
             assert (target_uploads / "avatars" / bot_avatars[0][0]).read_bytes() == image_bytes
             blob = imported.execute("SELECT storage_key,filename,content_type,byte_size,uploaded FROM direct_upload_blobs WHERE id=21").fetchone()
             assert blob == (f"avatars/{bot_avatars[0][0]}", "bot.png", "image/png", len(image_bytes), 1)
+            assert imported.execute("SELECT storage_key,filename,content_type,content_type_is_null,byte_size,checksum,uploaded FROM direct_upload_blobs WHERE id=22").fetchone() == (
+                orphan_key, "orphan.txt", "text/plain", 0, len(orphan_bytes), orphan_checksum, 1)
+            assert (target_uploads / orphan_key).read_bytes() == orphan_bytes
+            assert imported.execute("SELECT storage_key,filename,content_type,content_type_is_null,byte_size,checksum,uploaded FROM direct_upload_blobs WHERE id=23").fetchone() == (
+                pending_key, "pending.txt", "", 1, len(b"pending"), pending_checksum, 0)
+            assert not (target_uploads / pending_key).exists()
+            assert imported.execute("SELECT storage_key,filename,content_type,byte_size,checksum,uploaded FROM direct_upload_blobs WHERE id=24").fetchone() == (
+                variant_key, "cached.png", "image/png", len(image_bytes), variant_checksum, 1)
+            assert (target_uploads / variant_key).read_bytes() == image_bytes
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
@@ -355,6 +393,21 @@ def main():
                 raise AssertionError("imported Rustfire server did not serve the room")
             assert "Imported room" in page and "Hello" in page and "imported.txt" in page
             source_blob_key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"ActiveStorage", 1000, 64)
+            for blob_id, filename, expected in ((22, "orphan.txt", orphan_bytes), (23, "pending.txt", None), (24, "cached.png", image_bytes)):
+                blob_payload = json.dumps({"_rails": {"data": blob_id, "pur": "blob_id"}}, separators=(",", ":")).encode()
+                blob_encoded = base64.b64encode(blob_payload).decode()
+                token = f"{blob_encoded}--{hmac.new(source_blob_key, blob_encoded.encode(), hashlib.sha1).hexdigest()}"
+                url = f"http://127.0.0.1:{port}/rails/active_storage/blobs/redirect/{token}/{filename}"
+                if expected is None:
+                    try:
+                        urllib.request.urlopen(url, timeout=2)
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 404, error.code
+                    else:
+                        raise AssertionError("pending source upload unexpectedly served bytes")
+                else:
+                    with urllib.request.urlopen(url, timeout=2) as response:
+                        assert response.read() == expected
             bot_blob_payload = json.dumps({"_rails": {"data": 21, "pur": "blob_id"}}, separators=(",", ":")).encode()
             bot_blob_encoded = base64.b64encode(bot_blob_payload).decode()
             bot_blob_token = f"{bot_blob_encoded}--{hmac.new(source_blob_key, bot_blob_encoded.encode(), hashlib.sha1).hexdigest()}"
@@ -563,7 +616,7 @@ def main():
         assert derived_image.returncode == 0, derived_image.stderr
         with sqlite3.connect(bad_target) as imported:
             assert imported.execute("SELECT width,height FROM inline_blobs WHERE id=11").fetchone() == (1, 1)
-    print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, saved and rebuilt search text, user/room/push ID high-water marks, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
+        print("PASS Campfire account, users, room, rich messages and inline files/images/PDFs/videos including uncommon MIME types, member-only mention recipients, preview URLs, unattached and cached-variant blobs, saved and rebuilt search text, user/room/push ID high-water marks, boost, session, push key, avatar, and logo import; invalid media and inconsistent metadata fail safely")
 
 
 if __name__ == "__main__":

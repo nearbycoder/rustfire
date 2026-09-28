@@ -119,7 +119,8 @@ def import_data(source, target, source_files, uploads):
         raise ValueError("expected one Campfire account")
     unknown_media = list(source.execute("""SELECT DISTINCT record_type,name FROM active_storage_attachments
         WHERE NOT ((record_type='Message' AND name='attachment') OR (record_type='User' AND name='avatar')
-        OR (record_type='Account' AND name='logo') OR (record_type='ActionText::RichText' AND name='embeds'))"""))
+        OR (record_type='Account' AND name='logo') OR (record_type='ActionText::RichText' AND name='embeds')
+        OR (record_type='ActiveStorage::VariantRecord' AND name='image'))"""))
     if unknown_media:
         raise ValueError(f"unknown Active Storage attachment types: {unknown_media}")
 
@@ -277,6 +278,37 @@ def import_data(source, target, source_files, uploads):
             target.execute(f"INSERT INTO {table}({key_column},stored_name,content_type) VALUES(?,?,?)", (record_id, stored, content_type))
             count += 1
         counts[table] = count
+
+    # Direct uploads can exist before a composer post attaches them to a
+    # message. Active Storage also attaches generated preview blobs to variant
+    # records. Preserve both source IDs and storage keys so previously issued
+    # signed blob links still resolve after the account is imported.
+    counts["unattached_blobs"] = 0
+    counts["variant_blobs"] = 0
+    for blob_id, key, filename, content_type, size, checksum, created_at, variant in rows(source, """SELECT
+            blob.id,blob.key,blob.filename,blob.content_type,blob.byte_size,blob.checksum,blob.created_at,
+            EXISTS (SELECT 1 FROM active_storage_attachments variant
+                WHERE variant.blob_id=blob.id AND variant.record_type='ActiveStorage::VariantRecord' AND variant.name='image')
+            FROM active_storage_blobs blob WHERE NOT EXISTS (
+                SELECT 1 FROM active_storage_attachments attachment WHERE attachment.blob_id=blob.id
+                AND NOT (attachment.record_type='ActiveStorage::VariantRecord' AND attachment.name='image')
+            ) ORDER BY blob.id"""):
+        if not key or not key.isalnum() or len(key) < 4:
+            raise ValueError(f"invalid Active Storage key: {key!r}")
+        source_path = source_files / key[:2] / key[2:4] / key
+        # A metadata-only direct upload has no file yet. Keep its row without
+        # claiming that its bytes are available to signed download routes.
+        uploaded = source_path.is_file()
+        if uploaded:
+            if source_path.stat().st_size != size:
+                raise ValueError(f"Active Storage byte size mismatch: {source_path}")
+            shutil.copyfile(source_path, uploads / key)
+        target.execute("""INSERT INTO direct_upload_blobs
+            (id,storage_key,filename,content_type,content_type_is_null,byte_size,checksum,created_at,uploaded)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (blob_id, key, filename, content_type or "", int(content_type is None), size,
+             checksum or "", created_at, int(uploaded)))
+        counts["variant_blobs" if variant else "unattached_blobs"] += 1
 
     foreign_keys = list(target.execute("PRAGMA foreign_key_check"))
     if foreign_keys:
