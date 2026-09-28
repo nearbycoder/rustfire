@@ -92,6 +92,21 @@ def workflow(port, cookie, csrf, database, campfire):
             )
     status, location, _ = mutation(port, "POST", cookie, csrf)
     result["private_session_ban"] = (status, location, state(database))
+    with sqlite3.connect(database) as db:
+        db.execute("DELETE FROM sessions WHERE user_id=2")
+        for index, address in enumerate((None, "", "   ", "\t\n", "203.0.113.3")):
+            if campfire:
+                db.execute(
+                    "INSERT INTO sessions(user_id,token,ip_address,user_agent,created_at,updated_at,last_active_at) VALUES(2,?1,?2,'Paired ban probe','2026-01-01','2026-01-01','2026-01-01')",
+                    (f"paired-blank-session-{index}", address),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO sessions(user_id,token,csrf_token,ip_address,created_at,last_active_at) VALUES(2,?1,?2,?3,'2026-01-01','2026-01-01')",
+                    (f"paired-blank-session-{index}", f"paired-blank-csrf-{index}", address),
+                )
+    status, location, _ = mutation(port, "POST", cookie, csrf)
+    result["blank_session_ip_ban"] = (status, location, state(database))
     return result
 
 

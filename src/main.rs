@@ -10481,6 +10481,9 @@ async fn user_ban(
         .map_err(db_err)?;
     drop(ip_stmt);
     for ip in ips {
+        if ip.trim().is_empty() {
+            continue;
+        }
         if !ip.parse::<IpAddr>().map(public_ip).unwrap_or(false) {
             return Ok(rails_error_response(StatusCode::UNPROCESSABLE_ENTITY, &headers, &uri));
         }
