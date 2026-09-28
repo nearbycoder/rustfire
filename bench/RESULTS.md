@@ -76,6 +76,8 @@ Rustfire served **3.07–3.10×** as many checked reads per second and met the 3
 
 The `--no-rooms` fixture compared the signed-in welcome screen separately. Rustfire's old page differed by 13.420% of pixels at 1280×800. After matching Campfire's empty message area, sidebar frame, and packaged empty-message SVG, both apps' screenshots matched pixel for pixel at 1280×800 and 390×844. The SVG is byte-identical to the pinned source asset. This fixture removes the administrator's room membership while retaining other account records; it does not cover every way an account can reach a no-room state.
 
+`python bench/paired_empty_room_index.py` checked another path in that fixture. Pinned Campfire returns a packaged 500 from `/rooms` when the signed-in user has no memberships, while Rustfire previously redirected to `/`. After matching the source edge, twelve combinations of `/rooms`, `.json`, and `?format=json` with HTML, JSON, Turbo Stream, and wildcard Accept headers matched in status, media type, redirect, and complete response-body hash. Both apps still returned a 200 HTML welcome page at `/`, and anonymous `/rooms` requests still redirected to sign-in. This checks an unusual route failure, not empty-state behavior across the application.
+
 ## Room-page read check after query-format parity
 
 After the 3,348-case GET format sweep passed across three roles, `python bench/paired_room_shell.py --read-clients 32 --seconds 5 --campfire-workers 22` ran in both server orders on the release build. The probe checked every successful room-page read and matched the sampled parsed page sections before timing. Each app had zero read errors.

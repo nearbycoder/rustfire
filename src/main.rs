@@ -4002,7 +4002,7 @@ async fn root(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
         }
     })
 }
-async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
+async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap, OriginalUri(uri): OriginalUri) -> AppResult {
     let u = match user(&s, &headers) {
         Ok(user) => user,
         Err(StatusCode::UNAUTHORIZED) => return Ok(found_redirect("/session/new")),
@@ -4016,10 +4016,10 @@ async fn rooms_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppR
         )
         .optional()
         .map_err(db_err)?;
-    Ok(found_redirect(
-        &rid.map(|id| format!("/rooms/{id}"))
-            .unwrap_or_else(|| "/".to_string()),
-    ))
+    Ok(match rid {
+        Some(id) => found_redirect(&format!("/rooms/{id}")),
+        None => rails_exception_500_response(&headers, &uri),
+    })
 }
 async fn room_namespace_index(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     if first_run_needed(&s)? {
