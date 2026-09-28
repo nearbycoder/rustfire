@@ -5758,7 +5758,6 @@ async fn messages_index(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path(room_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
 ) -> AppResult {
     fn cursor_not_found(headers: &HeaderMap, uri: &Uri) -> Response {
         let mut response = rails_error_response(StatusCode::NOT_FOUND, headers, uri);
@@ -5769,21 +5768,35 @@ async fn messages_index(
     let u = user(&s, &headers)?;
     let rid = path_record_id(&room_id)?;
     room_for(&s, u.id, rid)?;
-    let before = params.get("before").filter(|value| !value.trim().is_empty())
-        .map(|value| path_record_id(value)).transpose();
-    let before = match before {
-        Ok(value) => value,
-        Err(_) => return Ok(cursor_not_found(&headers, &uri)),
+    let (before_param, after_param) = match rails_cursor_params(uri.query().unwrap_or("").as_bytes()) {
+        Ok(values) => values,
+        Err(_) => return Ok(rails_exception_400_response(&headers, &uri)),
     };
-    let after = if before.is_some() {
-        None
-    } else {
-        let cursor = params.get("after").filter(|value| !value.trim().is_empty())
-            .map(|value| path_record_id(value)).transpose();
-        match cursor {
-            Ok(value) => value,
+    let cursor = if before_param.present() { Some((true, before_param)) }
+        else if after_param.present() { Some((false, after_param)) }
+        else { None };
+    let (before, after) = match cursor {
+        Some((is_before, RailsCursorParam::Scalar(value))) => match path_record_id(&value) {
+            Ok(id) if is_before => (Some(id), None),
+            Ok(id) => (None, Some(id)),
             Err(_) => return Ok(cursor_not_found(&headers, &uri)),
+        },
+        Some((_, RailsCursorParam::Array(values))) => {
+            let db = pool(&s)?;
+            for value in values {
+                let Ok(id) = path_record_id(&value) else {
+                    return Ok(cursor_not_found(&headers, &uri));
+                };
+                let found: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id=?2)",
+                    params![rid, id], |row| row.get(0),
+                ).map_err(db_err)?;
+                if !found { return Ok(cursor_not_found(&headers, &uri)); }
+            }
+            return Ok(rails_exception_500_response(&headers, &uri));
         }
+        Some((_, RailsCursorParam::Hash)) => return Ok(cursor_not_found(&headers, &uri)),
+        _ => (None, None),
     };
     let q = Paging { before, after };
     if let Some(cursor) = q.before.or(q.after) {
@@ -11009,16 +11022,6 @@ fn rails_cursor_params(raw: &[u8]) -> Result<(RailsCursorParam, RailsCursorParam
     }
     Ok((before, after))
 }
-fn rails_record_id(value: &str) -> Option<i64> {
-    let input = value.trim_start().as_bytes();
-    let mut end = usize::from(input.first().is_some_and(|byte| *byte == b'+' || *byte == b'-'));
-    let digits = end;
-    while input.get(end).is_some_and(u8::is_ascii_digit) {
-        end += 1;
-    }
-    if end == digits { return None; }
-    std::str::from_utf8(&input[..end]).ok()?.parse().ok()
-}
 async fn bot_messages_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -11040,15 +11043,15 @@ async fn bot_messages_get(
         else if after_present { Some((false, after_param)) }
         else { None };
     let (before, after) = match cursor {
-        Some((is_before, RailsCursorParam::Scalar(value))) => match rails_record_id(&value) {
-            Some(value) if is_before => (Some(value), None),
-            Some(value) => (None, Some(value)),
-            None => return Ok(bot_pagination_not_found(&headers, &uri)),
+        Some((is_before, RailsCursorParam::Scalar(value))) => match path_record_id(&value) {
+            Ok(value) if is_before => (Some(value), None),
+            Ok(value) => (None, Some(value)),
+            Err(_) => return Ok(bot_pagination_not_found(&headers, &uri)),
         },
         Some((_, RailsCursorParam::Array(values))) => {
             let db = pool(&s)?;
             for value in values {
-                let Some(id) = rails_record_id(&value) else {
+                let Ok(id) = path_record_id(&value) else {
                     return Ok(bot_pagination_not_found(&headers, &uri));
                 };
                 let found: bool = db.query_row(

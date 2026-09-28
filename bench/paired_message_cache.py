@@ -116,7 +116,14 @@ def check(port, cookie, database, rails, sample_path=None):
 
     empty = fetch(port, cookie, path + "?before=1")
     assert empty[0] == 204 and not empty[2], (empty[0], len(empty[2]))
-    cursor_cases = ("?before=bad", "?after=bad", "?before=0", "?after=999", "?before=2&after=1", "?before=2&after=bad", "?before=2abc")
+    cursor_cases = (
+        "?before=bad", "?after=bad", "?before=0", "?after=999",
+        "?before=2&after=1", "?before=2&after=bad", "?before=2abc",
+        "?before=2&before=3", "?before=2&before%5B%5D=3",
+        "?before%5B%5D=3&before=2", "?before%5B%5D=2",
+        "?before%5B%5D=", "?before%5Bvalue%5D=2", "?after%5B%5D=1",
+        "?before=2&after%5B%5D=1", "?after=1.0",
+    )
     cursor_results = {}
     cursor_bodies = {}
     for suffix in cursor_cases:
@@ -125,7 +132,13 @@ def check(port, cookie, database, rails, sample_path=None):
             cursor_etag = get_header(response_headers, "ETag")
             assert cursor_etag and fetch(port, cookie, path + suffix, {"If-None-Match": cursor_etag})[0] == 304, (suffix, status, cursor_etag)
             cursor_bodies[suffix] = body
-        cursor_results[suffix] = (status, get_header(response_headers, "Content-Type"), hashlib.sha256(body).hexdigest() if status == 404 else ids(body))
+        cursor_results[suffix] = (status, get_header(response_headers, "Content-Type"), hashlib.sha256(body).hexdigest() if status >= 400 else ids(body))
+    for suffix in ("?before%5B%5D=2", "?before%5B%5D=", "?before=2&before%5B%5D=3", "?before=2"):
+        status, response_headers, body = fetch(port, cookie, path + suffix, {"Accept": "application/json"})
+        cursor_results[f"JSON {suffix}"] = (
+            status, get_header(response_headers, "Content-Type"),
+            hashlib.sha256(body).hexdigest() if status >= 400 else ids(body),
+        )
 
     changed_at = datetime.now(timezone.utc) + timedelta(seconds=10)
     update_timestamp(database, rails, changed_at)
