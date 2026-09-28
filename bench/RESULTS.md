@@ -2072,3 +2072,14 @@ On Rustfire commit `dcdcb75`, `python bench/paired_message_multi.py --rooms 4 --
 | Rustfire first | 1,313.23 | 2,911.93 | 2.22× | 107.65 / 31.40 ms | 311.63 / 29.36 ms | 4,066.74 / 111.03 MiB |
 
 The [Campfire-first](results/rich-browser-400-presence-dcdcb75-camp-first.json) and [Rustfire-first](results/rich-browser-400-presence-dcdcb75-rust-first.json) reports retain all strict gates and resource measurements. Both apps ran serially on the same host as the load generator; connection setup was outside the ten-second measurement. This is a current-build sampled workload, not a maximum-scale, sustained-capacity, or whole-app result.
+
+## Disconnected-member rich writes after membership timestamp parity
+
+On Rustfire commit `bb61383`, `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 10 --write-rate 3 --rich-writes --campfire-workers 22 --resources` passed in both server orders (add `--rustfire-first` for the second order). No presence sockets were subscribed, so members remained disconnected and each post exercised Campfire's unread and membership `updated_at` writes. Each app saved all 120 scheduled rich posts within the writer deadline, and checked page reads had zero errors. The separate fourteen-state [unread probe](README.md) compares saved unread and timestamp transitions directly; this load trial checks message persistence and final pages.
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Read p95, Campfire / Rustfire | Write p95, Campfire / Rustfire | Sampled peak PSS, Campfire / Rustfire |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 1,525.58 | 2,763.58 | 1.81× | 89.12 / 32.97 ms | 146.42 / 30.21 ms | 2,991.79 / 53.11 MiB |
+| Rustfire first | 1,470.19 | 2,964.31 | 2.02× | 99.55 / 30.93 ms | 122.44 / 32.34 ms | 2,980.54 / 51.14 MiB |
+
+The [Campfire-first](results/rich-disconnected-members-bb61383-camp-first.json) and [Rustfire-first](results/rich-disconnected-members-bb61383-rust-first.json) reports retain complete read, write, persistence, and resource results. Both apps and the load client shared one host, and the measured interval lasted ten seconds. This demonstrates an advantage for this mixed workload; it does not establish sustained capacity or whole-app parity.

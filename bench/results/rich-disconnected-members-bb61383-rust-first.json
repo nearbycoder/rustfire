@@ -1,0 +1,119 @@
+{
+  "browser_channels": false,
+  "campfire": {
+    "reader_exit_code": 0,
+    "reads": {
+      "clients": 64,
+      "errors": 0,
+      "median_ms": 35.330107,
+      "p95_ms": 99.545253,
+      "p99_ms": 150.254087,
+      "rps": 1470.18896334861,
+      "seconds": 10.038845596,
+      "successes": 14759
+    },
+    "reads_complete": true,
+    "resources": {
+      "server_cpu_seconds": 214.72,
+      "server_peak_pss_mib": 2980.54,
+      "server_processes_peak": 24
+    },
+    "writes": {
+      "complete": true,
+      "count": 120,
+      "deadline_met": true,
+      "max_elapsed_s": 9.266360819339752,
+      "p95_ms": 122.44257237762213,
+      "per_room": [
+        {
+          "count": 30,
+          "elapsed_s": 9.257,
+          "room": 1,
+          "user": 1
+        },
+        {
+          "count": 30,
+          "elapsed_s": 9.253,
+          "room": 2,
+          "user": 2
+        },
+        {
+          "count": 30,
+          "elapsed_s": 9.266,
+          "room": 3,
+          "user": 3
+        },
+        {
+          "count": 30,
+          "elapsed_s": 9.249,
+          "room": 4,
+          "user": 4
+        }
+      ]
+    }
+  },
+  "campfire_workers": 22,
+  "clients": 64,
+  "paired_validation_errors": [],
+  "rich_writes": true,
+  "rooms": 4,
+  "rustfire": {
+    "reader_exit_code": 0,
+    "reads": {
+      "clients": 64,
+      "errors": 0,
+      "median_ms": 21.615252,
+      "p95_ms": 30.926504,
+      "p99_ms": 35.297476,
+      "rps": 2964.312798772536,
+      "seconds": 10.015137408,
+      "successes": 29688
+    },
+    "reads_complete": true,
+    "resources": {
+      "server_cpu_seconds": 254.17,
+      "server_peak_pss_mib": 51.14,
+      "server_processes_peak": 1
+    },
+    "writes": {
+      "complete": true,
+      "count": 120,
+      "deadline_met": true,
+      "max_elapsed_s": 9.20156446006149,
+      "p95_ms": 32.34356641769409,
+      "per_room": [
+        {
+          "count": 30,
+          "elapsed_s": 9.201,
+          "room": 1,
+          "user": 1
+        },
+        {
+          "count": 30,
+          "elapsed_s": 9.197,
+          "room": 2,
+          "user": 2
+        },
+        {
+          "count": 30,
+          "elapsed_s": 9.202,
+          "room": 3,
+          "user": 3
+        },
+        {
+          "count": 30,
+          "elapsed_s": 9.193,
+          "room": 4,
+          "user": 4
+        }
+      ]
+    }
+  },
+  "rustfire_first": true,
+  "seconds": 10.0,
+  "socket_users_per_room": 1,
+  "sockets_per_room": 0,
+  "stream_markup_checked_events": 0,
+  "users": 4,
+  "write_rate_per_room": 3.0
+}
