@@ -2037,6 +2037,17 @@ The same four-room, four-user browser-channel workload passed at 2,500 sockets p
 
 Campfire ran 22 Puma workers plus Redis and Rustfire one process on the same host as the load clients. Socket setup was outside the measured interval. Both apps passed at this point, so the result demonstrates a checked throughput and memory advantage at 10,000 connections but does not establish either app's maximum connection capacity or sustained multi-hour scale.
 
+## Exploratory 16,000-socket rich browser-channel load at 0.5 posts/s per room
+
+The same release binary (SHA-256 `e771d684f1b808cd06c3a453ad1a5a7f3eaf7d3c843573539aca66b161db2326`) was compared with pinned Campfire `91d294f` at 4,000 sockets per room. Run `python bench/paired_message_multi.py --rooms 4 --users 4 --clients 64 --seconds 30 --write-rate 0.5 --sockets-per-room 4000 --socket-users-per-room 4 --browser-channels --rich-writes --campfire-workers 22 --resources` to reproduce the Campfire-first order. Both apps saved all 60 rich posts, delivered all 240,000 expected message appends and unread events, completed all 8,008,000 setup presence-read events, and had zero checked read errors, missing or unexpected socket events, or early closes. All 240 sampled append structures and final page and saved-row checks matched.
+
+| App | Checked reads/s | Read p95 | Write p95 | Last write | Sampled peak server PSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Campfire | 882.7 | 185.44 ms | 930.52 ms | **30.033 s** | 8,463.8 MiB |
+| Rustfire | 2,415.0 | 38.78 ms | 67.94 ms | 27.602 s | 2,506.0 MiB |
+
+Rustfire served **2.74×** as many checked reads per second and used **3.38×** less sampled peak server PSS in this order. Campfire's last writer missed the strict 30-second deadline by **33 ms**, so the [raw report](results/rich-browser-16k-30s-camp-first.json) correctly records a failed paired trial. The reverse-order attempt was interrupted during socket setup and produced no result. This small deadline miss and one completed order do not establish a repeatable write-capacity boundary at 16,000 sockets. Socket setup was outside the measured interval, and both apps and load clients shared one host.
+
 ## Concurrent sign-in bursts
 
 On commit `c17cac1`, `python bench/paired_login_capacity.py` ran checked sign-ins against pinned Campfire `91d294f` in both server orders at 32 clients/128 logins and 64 clients/240 logins. Each client fetched a CSRF token and posted the same email and password from a distinct forwarded IP. Both apps used the same cost-12 bcrypt digest. Every request redirected successfully, and every session was saved under the expected IP. Campfire ran 22 Puma workers plus isolated Redis; Rustfire ran one release process with a persistent SQLite rate counter. The reports retain the Rustfire binary SHA-256.

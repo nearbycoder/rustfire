@@ -6,6 +6,10 @@ Rustfire is an independent, open-source Rust implementation of [ONCE Campfire](h
 
 Rustfire is not affiliated with or endorsed by 37signals.
 
+## Performance status
+
+In a checked 30-second, 10,000-socket browser-channel workload, both apps passed the read, write, delivery, persistence, and sampled markup checks in both server orders. Rustfire served **2.21–2.34×** as many checked reads per second and used **4.06–4.27×** less sampled peak server memory. The [paired 10,000-socket reports](bench/RESULTS.md#checked-10000-socket-rich-browser-channel-load) include the workload and limits. A [16,000-socket exploratory run](bench/RESULTS.md#exploratory-16000-socket-rich-browser-channel-load-at-05-postss-per-room) completed in one order; its strict paired gate failed because Campfire finished its last write 33 ms late. These results measure specific workloads and do not establish whole-app performance or maximum connection capacity.
+
 ## Quick start
 
 The Docker image builds Rustfire and includes its runtime media tools:
