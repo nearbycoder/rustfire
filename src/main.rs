@@ -7737,10 +7737,11 @@ fn form_value<'a>(
     flat: &str,
     nested: &str,
 ) -> Option<&'a str> {
-    values
-        .get(flat)
-        .or_else(|| values.get(nested))
-        .map(String::as_str)
+    values.get(flat).or_else(|| values.get(nested)).map(String::as_str)
+}
+fn permitted_form_value<'a>(values: &'a HashMap<String, String>, nested: &str) -> Option<&'a str> {
+    // Rails strong parameters ignore flat keys outside the required group.
+    values.get(nested).map(String::as_str)
 }
 async fn create_room(
     State(s): State<Arc<AppState>>,
@@ -8784,10 +8785,9 @@ async fn account_update(
     if f.get("account[logo]").is_some_and(|value| !value.is_empty()) {
         return Ok(rails_exception_500_response(&headers, &uri));
     }
-    let name = form_value(&f, "name", "account[name]");
-    let restricted = form_value(
+    let name = permitted_form_value(&f, "account[name]");
+    let restricted = permitted_form_value(
         &f,
-        "restrict_room_creation",
         "account[settings][restrict_room_creation_to_administrators]",
     );
     if !f.keys().any(|key| key.starts_with("account["))
@@ -9727,14 +9727,14 @@ async fn profile_post(
     if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
         return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], "").into_response());
     }
-    let name = form_value(&f, "name", "user[name]").unwrap_or(&u.name);
-    let email = form_value(&f, "email_address", "user[email_address]");
-    let password = match form_value(&f, "password", "user[password]") {
+    let name = permitted_form_value(&f, "user[name]").unwrap_or(&u.name);
+    let email = permitted_form_value(&f, "user[email_address]");
+    let password = match permitted_form_value(&f, "user[password]") {
         Some(p) if p.is_empty() => None,
         Some(p) => Some(hash(p, DEFAULT_COST).map_err(db_err)?),
         None => None,
     };
-    let bio = form_value(&f, "bio", "user[bio]");
+    let bio = permitted_form_value(&f, "user[bio]");
     if pool(&s)?
         .execute(
             "UPDATE users SET name=?1,email_address=COALESCE(?2,email_address),bio=COALESCE(?3,bio),password_digest=COALESCE(?4,password_digest),updated_at=?5 WHERE id=?6 AND (name IS NOT ?1 OR email_address IS NOT COALESCE(?2,email_address) OR bio IS NOT COALESCE(?3,bio) OR ?4 IS NOT NULL)",
@@ -10849,11 +10849,11 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, Original
     if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
-    let name = form_value(&f, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let name = permitted_form_value(&f, "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
-    let webhook_url = form_value(&f, "webhook_url", "user[webhook_url]")
+    let webhook_url = permitted_form_value(&f, "user[webhook_url]")
         .unwrap_or("")
         .trim();
     if !valid_webhook_url(webhook_url) {
@@ -10954,11 +10954,11 @@ async fn bot_update(
     }
     active_bot(&s, id)?;
     let (f, avatar) = bot_fields(&s, &headers, req).await?;
-    let name = form_value(&f, "name", "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let name = permitted_form_value(&f, "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     if name.trim().is_empty() {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
-    let webhook_url = form_value(&f, "webhook_url", "user[webhook_url]").map(str::trim);
+    let webhook_url = permitted_form_value(&f, "user[webhook_url]").map(str::trim);
     if webhook_url.is_some_and(|url| !valid_webhook_url(url)) {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }

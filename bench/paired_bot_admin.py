@@ -61,11 +61,12 @@ def request(port, method, path, cookie, csrf, body=b"", content_type=None, extra
         connection.close()
 
 
-def multipart(name, webhook, avatar=True, method=None, webhook_field="user[webhook_url]"):
+def multipart(name, webhook, avatar=True, method=None, webhook_field="user[webhook_url]", extra_fields=()):
     boundary = b"bot-admin-probe"
     fields = [("user[name]", name.encode())]
     if webhook_field:
         fields.append((webhook_field, webhook.encode()))
+    fields.extend((key, value.encode()) for key, value in extra_fields)
     if method:
         fields.insert(0, ("_method", method.encode()))
     body = b"".join(
@@ -91,7 +92,7 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     form_fields = sorted(set(re.findall(rb'name=["\'](user\[[^"\']+\])["\']', page)))
     statuses["new_fields"] = [field.decode() for field in form_fields]
 
-    body, content_type = multipart("Paired Bot", "https://example.com/first")
+    body, content_type = multipart("Paired Bot", "https://example.com/first", extra_fields=(("name", "Flat Bot"), ("webhook_url", "https://example.com/flat")))
     status, location, payload = request(port, "POST", "/account/bots", cookie, csrf, body, content_type)
     statuses["create"] = (status, urllib.parse.urlsplit(location).path)
     assert status in (302, 303), (status, payload[:300])
@@ -150,7 +151,7 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     decoded_page = html.unescape(page.decode())
     statuses["edit_form"] = ("user[avatar]" in decoded_page, "Paired Bot" in decoded_page, "https://example.com/first" in decoded_page)
 
-    body, content_type = multipart("Renamed Bot", "https://example.com/second", method="patch")
+    body, content_type = multipart("Renamed Bot", "https://example.com/second", method="patch", extra_fields=(("name", "Flat Bot"), ("webhook_url", "https://example.com/flat")))
     status, location, payload = request(port, "POST", f"/account/bots/{bot_id}", cookie, csrf, body, content_type)
     statuses["update"] = (status, urllib.parse.urlsplit(location).path)
     assert status in (302, 303), (status, payload[:300])
