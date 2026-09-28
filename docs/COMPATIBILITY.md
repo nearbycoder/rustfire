@@ -156,6 +156,8 @@ The transfer page also matches Campfire's parsed head and body in anonymous and 
 
 ## Remaining parity work
 
+A paired private-room stream probe now confirms that a member's previously valid signed message token is rejected on a fresh socket after their membership is removed. The member's login and heartbeat remain valid, a remaining member can still use the same token, and `Turbo::StreamsChannel` rejects the room token both before and after removal. This covers subscription decisions for one room type and membership transition; broader authorization and delivery states remain open.
+
 The paired invalid-key push probe now checks background cleanup and direct test notifications separately. Both apps discard background subscriptions with malformed P-256 points, including a short but valid-base64 point, retain malformed-base64 and blank-auth subscriptions, return the same 500 page for direct test failures without deleting those rows, and skip delivery to a saved endpoint outside the permitted host list. Rustfire also has a decryptable encryption fallback for legacy auth-secret lengths, compressed P-256 keys, and payloads above its normal Web Push library's limit that Campfire accepts. This checks local delivery decisions; real push-service responses and browser delivery remain open.
 
 A separate controlled push-response probe now matches Campfire's saved subscription outcomes for background HTTP 404, 410, 503, and 204 and direct 404/410 failures. Only background 410 removes a row. This verifies response classification and persistence without a live push-service connection.
