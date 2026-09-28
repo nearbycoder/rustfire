@@ -2561,6 +2561,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "ego-tree",
+ "encoding_rs",
  "form_urlencoded",
  "futures-util",
  "hkdf",

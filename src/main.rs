@@ -3023,6 +3023,36 @@ fn og_attributes(document: &str) -> HashMap<String, String> {
     }
     attributes
 }
+fn decode_og_document(body: &[u8]) -> String {
+    if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(body) {
+        return encoding.decode(body).0.into_owned();
+    }
+    // Net::HTTP passes document bytes to Nokogiri without interpreting the
+    // response header. Nokogiri then detects the HTML meta encoding before
+    // extracting Open Graph attributes.
+    let preview = String::from_utf8_lossy(body);
+    let html = ParsedHtml::parse_document(&preview);
+    let selector = Selector::parse("meta").unwrap();
+    let encoding = html.select(&selector).find_map(|meta| {
+        let tag = meta.value();
+        let label = tag.attr("charset").or_else(|| {
+            if !tag.attr("http-equiv").is_some_and(|value| value.eq_ignore_ascii_case("content-type")) {
+                return None;
+            }
+            let content = tag.attr("content")?;
+            let offset = content.to_ascii_lowercase().find("charset=")? + "charset=".len();
+            Some(content[offset..].split(';').next()?.trim().trim_matches(['\'', '"']))
+        })?;
+        encoding_rs::Encoding::for_label(label.as_bytes())
+    }).unwrap_or(encoding_rs::UTF_8);
+    if encoding == encoding_rs::WINDOWS_1252 {
+        // Nokogiri's Campfire path maps these raw bytes as ISO-8859-1 even
+        // when the meta label says Windows-1252. In particular 0x80..0x9f
+        // survive as C1 controls in the JSON, not Windows punctuation.
+        return body.iter().map(|&byte| char::from(byte)).collect();
+    }
+    encoding.decode(body).0.into_owned()
+}
 fn allowed_og_image_content_type(value: &str) -> bool {
     // Campfire lowercases the whole HEAD Content-Type header and compares it
     // directly; a parameterized value does not match its four allowed types.
@@ -3077,7 +3107,7 @@ async fn unfurl_url(input: &str) -> Option<Value> {
         }
         body.extend_from_slice(&chunk);
     }
-    let attributes = og_attributes(&String::from_utf8_lossy(&body));
+    let attributes = og_attributes(&decode_og_document(&body));
     let title = clean_og_text(attributes.get("title")?);
     let description = clean_og_text(attributes.get("description")?);
     if title.trim().is_empty() || description.trim().is_empty() {

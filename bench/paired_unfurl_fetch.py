@@ -27,6 +27,7 @@ CASES = (
     "good", "no_image", "empty", "redirect", "relative_redirect",
     "private_redirect", "wrong_type", "large_header", "large_body",
     "markup", "bad_image", "image_redirect", "bad_canonical", "duplicate_blank",
+    "latin1", "latin1_http_equiv", "windows1252", "no_content_length", "large_stream",
 )
 
 
@@ -70,6 +71,9 @@ def fixture_handler(fixture_port):
             if self.path == "/large_body":
                 self.reply(200, b"x" * (5 * 1024 * 1024 + 1), content_type="text/html")
                 return
+            if self.path == "/large_stream":
+                self.reply(200, b"x" * (5 * 1024 * 1024 + 1), content_type="text/html", omit_length=True)
+                return
             if self.path == "/empty":
                 self.reply(200, b"<html><head></head></html>", content_type="text/html")
                 return
@@ -78,6 +82,10 @@ def fixture_handler(fixture_port):
             if self.path == "/markup":
                 title = "&#x3c;img src=x&#x3e;Hey!"
                 description = "&#x3c;img src=x&#x3e;desc.."
+            if self.path in ("/latin1", "/latin1_http_equiv"):
+                title, description = "Café", "Résumé"
+            if self.path == "/windows1252":
+                title, description = "“Café”", "It’s fine"
             image = {
                 "/good": base + "/image.png",
                 "/redirect": base + "/image.png",
@@ -97,16 +105,22 @@ def fixture_handler(fixture_port):
                 tags.append(f'<meta property="og:image" content="{image}">')
             if self.path == "/duplicate_blank":
                 tags.extend(('<meta property="og:title" content="">', '<meta property="og:description" content="">'))
-            body = ("<html><head><meta charset='utf-8'>" + "".join(tags) + "</head></html>").encode()
-            self.reply(200, body, content_type="text/html; charset=utf-8")
+            encoding = "iso-8859-1" if self.path in ("/latin1", "/latin1_http_equiv") else "cp1252" if self.path == "/windows1252" else "utf-8"
+            declared_encoding = "windows-1252" if encoding == "cp1252" else encoding
+            declaration = f"<meta charset='{declared_encoding}'>"
+            if self.path == "/latin1_http_equiv":
+                declaration = "<meta http-equiv='Content-Type' content='text/html; charset=ISO-8859-1'>"
+            body = ("<html><head>" + declaration + "".join(tags) + "</head></html>").encode(encoding)
+            self.reply(200, body, content_type=f"text/html; charset={encoding}", omit_length=self.path == "/no_content_length")
 
-        def reply(self, status, body, content_type=None, location=None, content_length=None):
+        def reply(self, status, body, content_type=None, location=None, content_length=None, omit_length=False):
             self.send_response(status)
             if content_type:
                 self.send_header("Content-Type", content_type)
             if location:
                 self.send_header("Location", location)
-            self.send_header("Content-Length", str(len(body) if content_length is None else content_length))
+            if not omit_length:
+                self.send_header("Content-Length", str(len(body) if content_length is None else content_length))
             self.end_headers()
             if self.command != "HEAD":
                 try:
