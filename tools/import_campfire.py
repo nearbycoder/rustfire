@@ -162,7 +162,7 @@ def import_data(source, target, source_files, uploads):
         target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name='push_subscriptions'", push_sequence)
     counts["sessions"] = copy_table(
         source, target, "sessions",
-        ("id", "user_id", "token", "created_at", "last_active_at", "ip_address"),
+        ("id", "user_id", "token", "created_at", "last_active_at", "ip_address", "user_agent", "updated_at"),
     )
     target.execute("CREATE TABLE import_missing_search(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE)")
 

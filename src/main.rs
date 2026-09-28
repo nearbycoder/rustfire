@@ -2432,7 +2432,20 @@ fn safe_return_path(encoded: &str) -> Option<String> {
 fn user(state: &AppState, headers: &HeaderMap) -> Result<User, StatusCode> {
     let token = session_token(state, headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let db = pool(state)?;
-    db.query_row("SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at,a.updated_at FROM users u JOIN sessions s ON s.user_id=u.id JOIN accounts a ON a.id=1 WHERE s.token=?1 AND u.status=0", [token], |r| Ok(User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)?,account_updated_at:r.get(7)? })).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)
+    let (actor, session_id, last_active_at): (User, i64, String) = db.query_row(
+        "SELECT u.id,u.name,COALESCE(u.email_address,''),u.role,u.bot_token,s.csrf_token,u.updated_at,a.updated_at,s.id,s.last_active_at FROM users u JOIN sessions s ON s.user_id=u.id JOIN accounts a ON a.id=1 WHERE s.token=?1 AND u.status=0",
+        [token],
+        |r| Ok((User { id:r.get(0)?,name:r.get(1)?,email:r.get(2)?,role:r.get(3)?,bot_token:r.get(4)?,csrf_token:r.get(5)?,updated_at:r.get(6)?,account_updated_at:r.get(7)? },r.get(8)?,r.get(9)?)),
+    ).optional().map_err(db_err)?.ok_or(StatusCode::UNAUTHORIZED)?;
+    if let Some(ip) = headers.get("x-rustfire-peer-ip").and_then(|value| value.to_str().ok()) {
+        let cutoff = Utc::now() - Duration::hours(1);
+        if message_timestamp_ns(&last_active_at).is_none_or(|stamp| stamp < cutoff.timestamp_nanos_opt().unwrap_or(0)) {
+            let current = now();
+            let agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok());
+            db.execute("UPDATE sessions SET user_agent=?1,ip_address=?2,last_active_at=?3,updated_at=?3 WHERE id=?4",params![agent,ip,current,session_id]).map_err(db_err)?;
+        }
+    }
+    Ok(actor)
 }
 fn generate_bot_token() -> Result<String, StatusCode> {
     const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -3405,21 +3418,22 @@ fn import_campfire_vapid_key(db_path: &std::path::Path) -> Result<(), Box<dyn st
     options.open(path)?.write_all(&der)?;
     Ok(())
 }
-fn create_session(state: &AppState, uid: i64, ip: IpAddr) -> Result<Response, StatusCode> {
-    create_session_to(state, uid, ip, "/")
+fn create_session(state: &AppState, uid: i64, ip: IpAddr, headers: &HeaderMap) -> Result<Response, StatusCode> {
+    create_session_to(state, uid, ip, "/", headers)
 }
 fn create_session_to(
     state: &AppState,
     uid: i64,
     ip: IpAddr,
     destination: &str,
+    headers: &HeaderMap,
 ) -> Result<Response, StatusCode> {
     let token = Uuid::new_v4().to_string();
     let csrf_token = Uuid::new_v4().to_string();
     let db = pool(state)?;
     db.execute(
-        "INSERT INTO sessions(user_id,token,csrf_token,ip_address,created_at,last_active_at) VALUES(?1,?2,?3,?4,?5,?5)",
-        params![uid, token, csrf_token, ip.to_string(), now()],
+        "INSERT INTO sessions(user_id,token,csrf_token,ip_address,user_agent,created_at,updated_at,last_active_at) VALUES(?1,?2,?3,?4,?5,?6,?6,?6)",
+        params![uid, token, csrf_token, ip.to_string(), headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()), now()],
     )
     .map_err(db_err)?;
     Ok(session_response(token, destination))
@@ -3618,8 +3632,17 @@ async fn reject_banned_ip(
     mut request: Request,
     next: Next,
 ) -> Response {
+    request.headers_mut().remove("x-rustfire-peer-ip");
+    let resolved_ip = client_ip(&s.trusted_proxies, request.headers(), addr.ip());
+    if request.extensions().get::<MatchedPath>()
+        .is_some_and(|route| !matches!(route.as_str(), "/cable" | "/up")) {
+        request.headers_mut().insert(
+            "x-rustfire-peer-ip",
+            HeaderValue::from_str(&resolved_ip.to_string()).expect("valid IP header"),
+        );
+    }
     if request.method() != Method::GET && request.method() != Method::HEAD {
-        let ip = client_ip(&s.trusted_proxies, request.headers(), addr.ip()).to_string();
+        let ip = resolved_ip.to_string();
         match pool(&s).and_then(|db| {
             db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM bans WHERE ip_address=?1)",
@@ -3940,7 +3963,7 @@ async fn transfer_update(
     let destination = cookie(&headers, "return_to")
         .and_then(|encoded| safe_return_path(&encoded))
         .unwrap_or_else(|| "/".to_string());
-    let mut response = create_session_to(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()), &destination)?;
+    let mut response = create_session_to(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()), &destination, &headers)?;
     response.headers_mut().append(
         header::SET_COOKIE,
         format!(
@@ -4206,7 +4229,7 @@ async fn first_run_post(
         }
     }
     let Some(uid) = created? else { return Ok(found_redirect("/")) };
-    create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
+    create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()), &headers)
 }
 fn app_version() -> String {
     env::var("APP_VERSION").ok().filter(|value| !value.trim().is_empty())
@@ -4327,7 +4350,7 @@ async fn login_post(
             let destination = cookie(&headers, "return_to")
                 .and_then(|encoded| safe_return_path(&encoded))
                 .unwrap_or_else(|| "/".to_string());
-            let mut response = create_session_to(&s, id, ip, &destination)?;
+            let mut response = create_session_to(&s, id, ip, &destination, &headers)?;
             response.headers_mut().append(
                 header::SET_COOKIE,
                 format!(
@@ -9744,7 +9767,7 @@ async fn join_post(
             return Err(error);
         }
     }
-    create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))
+    create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()), &headers)
 }
 fn profile_translation_button(english: &str, translations: [&str; 6]) -> String {
     let mut entries = String::new();
@@ -13261,7 +13284,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT NOT NULL,email_address TEXT UNIQUE,password_digest TEXT,role INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 0,bot_token TEXT UNIQUE,bio TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS webhooks(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,url TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS push_subscriptions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,endpoint TEXT NOT NULL,p256dh_key TEXT NOT NULL,auth_key TEXT NOT NULL,user_agent TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,token TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,last_active_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,token TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,last_active_at TEXT NOT NULL,user_agent TEXT,updated_at TEXT);
         CREATE TABLE IF NOT EXISTS login_rate_limits(ip_address TEXT PRIMARY KEY,attempts INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_login_rate_limits_expiry ON login_rate_limits(expires_at_ms);
         CREATE TABLE IF NOT EXISTS bans(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,ip_address TEXT NOT NULL);
@@ -13377,6 +13400,27 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
     if !has_session_ip {
         conn.execute("ALTER TABLE sessions ADD COLUMN ip_address TEXT", [])?;
     }
+    let has_session_agent: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='user_agent')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_session_agent {
+        conn.execute("ALTER TABLE sessions ADD COLUMN user_agent TEXT", [])?;
+    }
+    let has_session_updated_at: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='updated_at')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_session_updated_at {
+        conn.execute("ALTER TABLE sessions ADD COLUMN updated_at TEXT", [])?;
+        conn.execute("UPDATE sessions SET updated_at=created_at WHERE updated_at IS NULL", [])?;
+    }
+    conn.execute_batch("CREATE TRIGGER IF NOT EXISTS session_insert_updated_at AFTER INSERT ON sessions
+        WHEN new.updated_at IS NULL BEGIN
+            UPDATE sessions SET updated_at=new.created_at WHERE id=new.id;
+        END;")?;
     let has_csrf: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='csrf_token')",
         [],

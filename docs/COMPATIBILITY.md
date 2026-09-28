@@ -62,7 +62,7 @@ The offline importer preserves account settings and styles, user IDs and passwor
 
 Imported user and bot avatar originals are stored in the avatar directory used by Rustfire's image renderer. The importer preserves their source blob IDs and filenames for signed original-file links, including a blob shared by more than one avatar. Replacing or deleting one avatar retains the shared file while another user still references it.
 
-`python bench/paired_import_roundtrip.py` creates a disposable bot, rich-text message, and file attachment in pinned Campfire, imports the stopped account, and compares the rendered bot list, bot editor, and room page with Rustfire. The sampled signed avatar and attachment paths and original bytes match; complete parsed page structure matches after normalizing generated values. The importer now preserves every sampled membership's `created_at` and `updated_at`, including a deliberately changed update time. This is a repeatable sample, not a full migration validation.
+`python bench/paired_import_roundtrip.py` creates a disposable bot, rich-text message, and file attachment in pinned Campfire, imports the stopped account, and compares the rendered bot list, bot editor, and room page with Rustfire. The sampled signed avatar and attachment paths and original bytes match; complete parsed page structure matches after normalizing generated values. The importer preserves every sampled membership's `created_at` and `updated_at` and every sampled session's agent, IP, and timestamps, including deliberately changed values. This is a repeatable sample, not a full migration validation.
 
 `python bench/paired_import_malformed_action_text.py` creates one malformed ActionText message through Campfire's HTTP route. Its saved row has no search index entry. After import, Rustfire retains the same row and missing entry, serves the same trimmed failed-content message fragment, and returns the same edit-page 500 response. This checks a failure state that ordinary import fixtures omit.
 
@@ -158,6 +158,8 @@ The transfer page also matches Campfire's parsed head and body in anonymous and 
 - Outbound link-preview and push URL resolution pins a vetted DNS address. Its IPv4 and IPv6 classification now follows the pinned Campfire Surfguard default policy for mapped and compatible IPv4, NAT64, SIIT, IETF assignments, transition ranges, and the pinned allocated-unicast list. Focused Rust checks cover source-specified blocked and allowed addresses; this does not replace a broader security review or live DNS rebinding tests.
 
 ## Remaining parity work
+
+`python bench/paired_session_resume.py` now checks the pinned source's one-hour authenticated-session refresh rule against Rustfire: a fresh session stays untouched, a stale session saves the current browser agent and trusted client IP plus new activity and update times, and an immediate second request leaves the row unchanged. The request also supplies a spoofed internal IP header to confirm Rustfire discards it. Session creation, timeout boundaries, and broader authentication flows still need paired coverage.
 
 A twelve-case paired autocomplete input probe now matches Campfire's room access, query-key behavior, empty and malformed room IDs, JSON media type, and escaping of names containing markup. The existing large-user probe still checks signed IDs and avatar paths separately. Other parameter shapes and browser editor interactions remain to be tested.
 

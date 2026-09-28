@@ -223,6 +223,8 @@ def main():
             with sqlite3.connect(camp_db) as db:
                 db.execute("UPDATE memberships SET updated_at='2025-01-02 03:04:05.123456' WHERE id=(SELECT MIN(id) FROM memberships)")
                 source_membership_times = db.execute("SELECT id,created_at,updated_at FROM memberships ORDER BY id").fetchall()
+                db.execute("UPDATE sessions SET user_agent='Imported agent',ip_address='203.0.113.8',updated_at='2025-01-03 04:05:06.123456' WHERE id=(SELECT MAX(id) FROM sessions)")
+                source_sessions = db.execute("SELECT id,user_agent,ip_address,created_at,updated_at,last_active_at FROM sessions ORDER BY id").fetchall()
                 db.execute("""INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                     VALUES(1,'https://push.example.test/import','test-p256dh','test-auth','test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""")
                 live_max = db.execute("SELECT MAX(id) FROM active_storage_blobs").fetchone()[0]
@@ -241,10 +243,13 @@ def main():
             with sqlite3.connect(rust_db) as db:
                 imported_highwater = db.execute("SELECT last_id FROM id_sequences WHERE name='attachments'").fetchone()[0]
                 imported_membership_times = db.execute("SELECT id,created_at,updated_at FROM memberships ORDER BY id").fetchall()
+                imported_sessions = db.execute("SELECT id,user_agent,ip_address,created_at,updated_at,last_active_at FROM sessions ORDER BY id").fetchall()
             assert imported_highwater == source_highwater, (imported_highwater, source_highwater)
             assert imported_membership_times == source_membership_times, (imported_membership_times, source_membership_times)
+            assert imported_sessions == source_sessions, (imported_sessions, source_sessions)
             print("imported deleted-blob ID high-water mark matches")
             print("imported membership creation and update timestamps match")
+            print("imported session agent, IP, and timestamps match")
             rust_process = start_server(rust_db, rust_port, {
                 "RUSTFIRE_UPLOAD_DIR": str(uploads),
                 "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"],
