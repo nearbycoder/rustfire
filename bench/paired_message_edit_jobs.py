@@ -197,6 +197,86 @@ def main():
                 )
                 assert rust_result == camp_result, (label, rust_result, camp_result)
                 print(f"PASS {label} delayed analysis/purge and old signed blob lifecycle", flush=True)
+            with sqlite3.connect(rust_base) as db:
+                db.execute("UPDATE messages SET body='' WHERE id=1")
+                db.execute("DELETE FROM message_search_index WHERE rowid=1")
+                db.execute("INSERT INTO message_search_index(rowid,body) VALUES(1,'old.txt')")
+            with sqlite3.connect(camp_base) as db:
+                db.execute("UPDATE action_text_rich_texts SET body='' WHERE record_type='Message' AND record_id=1")
+                db.execute("DELETE FROM message_search_index WHERE rowid=1")
+                db.execute("INSERT INTO message_search_index(rowid,body) VALUES(1,'old.txt')")
+            index = len(CASES)
+            rust_old = temp / f"rust-uploads-{index}" / OLD_RUST_STORED
+            rust_old.parent.mkdir(parents=True, exist_ok=True)
+            rust_old.write_bytes(OLD_FILE)
+            camp_old = checkout / "storage/files" / OLD_CAMP_KEY[:2] / OLD_CAMP_KEY[2:4] / OLD_CAMP_KEY
+            camp_old.parent.mkdir(parents=True, exist_ok=True)
+            camp_old.write_bytes(OLD_FILE)
+            rust_db, camp_db = temp / f"rust-{index}.sqlite3", temp / f"camp-{index}.sqlite3"
+            old_paths = {}
+
+            def before_clear(rust_port, rust_cookie, camp_port, camp_cookie):
+                old_paths["rust"] = blob_path(rust_port, rust_cookie, "old.txt")
+                old_paths["camp"] = blob_path(camp_port, camp_cookie, "old.txt")
+
+            def after_clear(rust_port, rust_cookie, camp_port, camp_cookie):
+                rust_before, camp_before = rust_state(rust_db, rust_old), camp_state(camp_db, camp_old)
+                assert rust_before == (None, 1, ("purge",), True), rust_before
+                assert [row[0] for row in camp_before[0]] == [1] and camp_before[1], camp_before
+                with sqlite3.connect(camp_db) as db:
+                    assert db.execute("SELECT COUNT(*) FROM active_storage_attachments WHERE record_type='Message' AND record_id=1").fetchone()[0] == 0
+                assert get(rust_port, rust_cookie, old_paths["rust"]) == (200, OLD_FILE)
+                assert get(camp_port, camp_cookie, old_paths["camp"]) == (200, OLD_FILE)
+                worker_env = dict(env, DATABASE_URL=f"sqlite3:{camp_db}", PORT=str(camp_port), QUEUE="default", INTERVAL="0.1")
+                with open(temp / "worker-clear.log", "w+") as worker_log:
+                    worker = subprocess.Popen(
+                        [str(RUBY), str(RUBY.parent / "bundle"), "exec", "rake", "resque:work"],
+                        cwd=checkout, env=worker_env, stdout=worker_log, stderr=worker_log, start_new_session=True,
+                    )
+                    try:
+                        wait_for_worker(redis_port, worker)
+                        deadline = time.monotonic() + 15
+                        while time.monotonic() < deadline:
+                            rust_after, camp_after = rust_state(rust_db, rust_old), camp_state(camp_db, camp_old)
+                            if rust_after == (None, 0, (), False) and camp_after == ((), False):
+                                break
+                            time.sleep(.05)
+                        else:
+                            raise AssertionError(("cleared attachment was not purged", rust_after, camp_after))
+                    finally:
+                        if worker.poll() is None:
+                            os.killpg(worker.pid, signal.SIGTERM)
+                        worker.wait(timeout=10)
+                assert get(rust_port, rust_cookie, old_paths["rust"])[0] == 404
+                assert get(camp_port, camp_cookie, old_paths["camp"])[0] == 404
+                with sqlite3.connect(rust_db) as db:
+                    rust_search = db.execute("SELECT body FROM message_search_index WHERE rowid=1").fetchone()
+                with sqlite3.connect(camp_db) as db:
+                    camp_search = db.execute("SELECT body FROM message_search_index WHERE rowid=1").fetchone()
+                assert rust_search == camp_search, (rust_search, camp_search)
+                replacements = (
+                    edit_attachment(rust_port, rust_cookie, "benchmark-csrf", "again.txt", "text/plain", b"again\n"),
+                    edit_attachment(camp_port, camp_cookie, csrf_token(camp_port, camp_cookie), "again.txt", "text/plain", b"again\n"),
+                )
+                assert replacements[0][0] == replacements[1][0] == 302, replacements
+                with sqlite3.connect(rust_db) as db:
+                    rust_new = db.execute("SELECT id,filename FROM attachments WHERE message_id=1").fetchone()
+                    rust_search = db.execute("SELECT body FROM message_search_index WHERE rowid=1").fetchone()
+                with sqlite3.connect(camp_db) as db:
+                    camp_new = db.execute("SELECT b.id,b.filename FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id=a.blob_id WHERE a.record_type='Message' AND a.record_id=1").fetchone()
+                    camp_search = db.execute("SELECT body FROM message_search_index WHERE rowid=1").fetchone()
+                assert rust_new == camp_new == (2, "again.txt"), (rust_new, camp_new)
+                assert rust_search == camp_search, (rust_search, camp_search)
+                return normalized_page(rust_port, rust_cookie), normalized_page(camp_port, camp_cookie)
+
+            body, form_type = multipart_body((("message[attachment]", ""),))
+            rust_result, camp_result = run_case(
+                ("PATCH", "/rooms/1/messages/1", "text/html"), index, temp,
+                rust_base, camp_base, checkout, env, redis_port, body=body, content_type=form_type,
+                before_request=before_clear, after_request=after_clear,
+            )
+            assert rust_result == camp_result, ("clear", rust_result, camp_result)
+            print("PASS file-only clear, search update, purge, and next attachment ID", flush=True)
         finally:
             redis.terminate()
             redis.wait(timeout=10)

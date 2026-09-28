@@ -79,7 +79,7 @@ def request(port, database, cookie, csrf, method, path, accept, body=b"", conten
             response.status,
             (response.getheader("Content-Type") or "").split(";", 1)[0],
             redirect,
-            (len(body), hashlib.sha256(body).hexdigest()) if response.status in ERROR_STATUSES else None,
+            (len(body), hashlib.sha256(body).hexdigest()) if response.status in ERROR_STATUSES or response.status == 400 else None,
             tuple(end - start for start, end in zip(before, after)),
             involvement,
             room_state,

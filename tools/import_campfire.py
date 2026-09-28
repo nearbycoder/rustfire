@@ -203,7 +203,11 @@ def import_data(source, target, source_files, uploads):
         WHERE attachment.record_type='Message' AND attachment.name='attachment' ORDER BY attachment.record_id,attachment.id""")
     counts["attachments"] = 0
     max_blob_id = source.execute("SELECT COALESCE(max(id),0) FROM active_storage_blobs").fetchone()[0]
-    next_id = max_blob_id + 1
+    source_blob_sequence = source.execute("SELECT seq FROM sqlite_sequence WHERE name='active_storage_blobs'").fetchone()
+    last_source_blob_id = max(max_blob_id, source_blob_sequence[0] if source_blob_sequence else 0)
+    target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name='attachments'",
+                   (last_source_blob_id,))
+    next_id = last_source_blob_id + 1
     used_blob_ids = set()
     for record_id, blob_id, key, filename, content_type, size, created, metadata in blobs:
         if target.execute("SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id=?)", (record_id,)).fetchone()[0]:

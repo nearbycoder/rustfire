@@ -54,6 +54,8 @@ QUERY_FORMS = (
     ("query scalar replaces group", b"message%5Bbody%5D=Body", "text/vnd.turbo-stream.html", "message=scalar"),
     ("query only", b"", "text/vnd.turbo-stream.html", "message%5Bbody%5D=Query"),
     ("query client ID replaces form body", b"message%5Bbody%5D=Body", "text/vnd.turbo-stream.html", "message%5Bclient_message_id%5D=edge-1"),
+    ("query scalar attachment", b"message%5Bbody%5D=Body", "text/html", "message%5Battachment%5D=hello"),
+    ("query blank attachment", b"message%5Bbody%5D=Body", "text/html", "message%5Battachment%5D="),
 )
 MULTIPART_QUERY_FORMS = (
     ("multipart query body", (("message[body]", "Body"),), "message%5Bbody%5D=Query"),
@@ -61,6 +63,12 @@ MULTIPART_QUERY_FORMS = (
     ("multipart query replaces scalar", (("message", "scalar"),), "message%5Bbody%5D=Query"),
     ("multipart query scalar", (("message[body]", "Body"),), "message=scalar"),
     ("multipart query suppresses file", (("message[body]", "Body"), ("message[attachment]", "sample file", "sample.txt")), "message%5Bbody%5D=Query"),
+    ("multipart zero-byte file", (("message[attachment]", b"", "empty.txt", "text/plain"),), ""),
+    ("multipart blank attachment", (("message[attachment]", ""),), ""),
+    ("multipart empty filename", (("message[attachment]", b"", "", "text/plain"),), ""),
+    ("multipart scalar attachment", (("message[attachment]", "hello"),), ""),
+    ("multipart query overrides empty filename", (("message[attachment]", b"", "", "text/plain"),), "message%5Bbody%5D=Query"),
+    ("multipart query overrides scalar attachment", (("message[attachment]", "hello"),), "message%5Bbody%5D=Query"),
 )
 EDIT_QUERY_FORMS = (
     ("edit query body", b"message%5Bbody%5D=Body", "message%5Bbody%5D=Query"),
@@ -69,6 +77,8 @@ EDIT_QUERY_FORMS = (
     ("edit query scalar", b"message%5Bbody%5D=Body", "message=scalar"),
     ("edit query only", b"", "message%5Bbody%5D=Query"),
     ("edit query client ID", b"message%5Bbody%5D=Body", "message%5Bclient_message_id%5D=edge-1"),
+    ("edit scalar attachment", b"message%5Battachment%5D=hello", ""),
+    ("edit blank attachment", b"message%5Battachment%5D=", ""),
 )
 EDIT_MULTIPART_FORMS = (
     ("edit multipart body", (("message[body]", "Edited"),), ""),
@@ -78,6 +88,14 @@ EDIT_MULTIPART_FORMS = (
     ("edit multipart image", (("message[attachment]", IMAGE.read_bytes(), "moon.jpg", "image/jpeg"),), ""),
     ("edit multipart video", (("message[attachment]", VIDEO.read_bytes(), "alpha-centuri.mov", "video/quicktime"),), ""),
     ("edit multipart malformed JPEG", (("message[attachment]", b"A plain text attachment.\n", "notes.txt", "image/jpeg"),), ""),
+    ("edit multipart zero-byte file", (("message[attachment]", b"", "empty.txt", "text/plain"),), ""),
+    ("edit multipart empty filename", (("message[attachment]", b"", "", "text/plain"),), ""),
+    ("edit multipart blank attachment", (("message[attachment]", ""),), ""),
+    ("edit multipart scalar attachment", (("message[attachment]", "hello"),), ""),
+    ("edit duplicate file then blank", (("message[attachment]", b"first", "first.txt", "text/plain"), ("message[attachment]", "")), ""),
+    ("edit duplicate blank then file", (("message[attachment]", ""), ("message[attachment]", b"last", "last.txt", "text/plain")), ""),
+    ("edit duplicate files last wins", (("message[attachment]", b"first", "first.txt", "text/plain"), ("message[attachment]", b"last", "last.txt", "text/plain")), ""),
+    ("edit duplicate empty filename then file", (("message[attachment]", b"", "", "text/plain"), ("message[attachment]", b"last", "last.txt", "text/plain")), ""),
 )
 EDIT_POST_FORMS = (
     ("POST patch override", b"_method=patch&message%5Bbody%5D=Edited", ""),
@@ -90,6 +108,8 @@ EDIT_MULTIPART_POST_FORMS = (
     ("POST multipart query suppresses file", (("_method", "patch"), ("message[body]", "Body"), ("message[attachment]", "new file", "new.txt")), "message%5Bbody%5D=Query"),
     ("POST multipart image", (("_method", "patch"), ("message[attachment]", IMAGE.read_bytes(), "moon.jpg", "image/jpeg")), ""),
     ("POST multipart malformed JPEG", (("_method", "put"), ("message[attachment]", b"A plain text attachment.\n", "notes.txt", "image/jpeg")), ""),
+    ("POST multipart zero-byte file", (("_method", "patch"), ("message[attachment]", b"", "empty.txt", "text/plain")), ""),
+    ("POST multipart blank attachment", (("_method", "patch"), ("message[attachment]", "")), ""),
 )
 OLD_FILE = b"old attachment bytes"
 OLD_RUST_STORED = "11111111-1111-4111-8111-111111111111"
@@ -308,7 +328,10 @@ def main():
                     camp_old.write_bytes(OLD_FILE)
                 method, path = ("POST" if args.edit_post_only or args.edit_multipart_post_only or args.large_post else "PATCH", "/rooms/1/messages/1") if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only or args.edit_large else ("POST", "/rooms/1/messages")
                 preview_kind = "image" if label in ("edit multipart image", "POST multipart image") else "video" if label == "edit multipart video" else "malformed" if label in ("edit multipart malformed JPEG", "POST multipart malformed JPEG") else None
-                stream_expected = args.edit_stream and label != "edit query scalar"
+                stream_expected = args.edit_stream and label not in (
+                    "edit query scalar", "edit scalar attachment",
+                    "edit multipart empty filename", "edit multipart scalar attachment",
+                )
                 stream_target = "presentation_message_edge-1" if label == "edit query client ID" else "presentation_message_boost-fixture"
                 captures = []
                 def start_captures(rust_port, rust_cookie, camp_port, camp_cookie):
@@ -352,12 +375,12 @@ def main():
                         if capture.poll() is None:
                             capture.kill()
                             capture.communicate()
-                rust_files = temp / f"rust-uploads-{index}" if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large else None
-                camp_files = checkout / "storage/files" if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large else None
+                rust_files = temp / f"rust-uploads-{index}"
+                camp_files = checkout / "storage/files"
                 rust_saved = saved_message(temp / f"rust-{index}.sqlite3", False, rust_files)
                 camp_saved = saved_message(temp / f"camp-{index}.sqlite3", True, camp_files)
                 if args.edit_multipart_only or args.edit_multipart_post_only or args.edit_large:
-                    replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "edit multipart malformed JPEG", "POST multipart patch file", "POST multipart put file only", "POST multipart image", "POST multipart malformed JPEG", "edit multipart 129 MiB text", "POST edit multipart 129 MiB text")
+                    replaced = label in ("edit multipart file", "edit multipart file only", "edit multipart image", "edit multipart video", "edit multipart malformed JPEG", "edit multipart zero-byte file", "edit multipart blank attachment", "edit duplicate file then blank", "edit duplicate blank then file", "edit duplicate files last wins", "edit duplicate empty filename then file", "POST multipart patch file", "POST multipart put file only", "POST multipart image", "POST multipart malformed JPEG", "POST multipart zero-byte file", "POST multipart blank attachment", "edit multipart 129 MiB text", "POST edit multipart 129 MiB text")
                     if not replaced:
                         assert rust_old.exists(), (label, "retained old Rustfire attachment")
                 if args.edit_query_only or args.edit_multipart_only or args.edit_post_only or args.edit_multipart_post_only or args.edit_large:

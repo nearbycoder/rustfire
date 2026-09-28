@@ -5995,6 +5995,30 @@ fn replace_message_attachment(db: &mut rusqlite::Connection, mid: i64, mut file:
     tx.commit().map_err(db_err)?;
     Ok(())
 }
+fn clear_message_attachment(db: &mut rusqlite::Connection, mid: i64, t: &str) -> Result<(), StatusCode> {
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let previous: Option<(i64, i64, String, String, String)> = tx.query_row(
+        "SELECT a.id,m.room_id,a.filename,a.content_type,a.stored_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.message_id=?1",
+        [mid], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(db_err)?;
+    if let Some((id, room_id, filename, content_type, stored)) = previous {
+        tx.execute(
+            "INSERT INTO replaced_attachments(id,room_id,filename,content_type,stored_name) VALUES(?1,?2,?3,?4,?5)",
+            params![id,room_id,filename,content_type,stored],
+        ).map_err(db_err)?;
+        tx.execute("DELETE FROM attachments WHERE message_id=?1", [mid]).map_err(db_err)?;
+        tx.execute(
+            "INSERT INTO attachment_jobs(kind,attachment_id,stored_name,available_at_ms,created_at) VALUES('purge',?1,?2,?3,?4)",
+            params![id,stored,Utc::now().timestamp_millis()+500,t],
+        ).map_err(db_err)?;
+        let plain: String = tx.query_row("SELECT body FROM messages WHERE id=?1", [mid], |row| row.get(0)).map_err(db_err)?;
+        if plain.is_empty() {
+            refresh_file_only_search_entry(&tx, mid)?;
+        }
+    }
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
 fn insert_message(
     s: &Arc<AppState>,
     u: &User,
@@ -6752,7 +6776,7 @@ async fn message_create(
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         let mut body = String::new();
         let mut client_id = None;
-        let mut upload = None;
+        let mut upload = ParsedMessageUpload::None;
         let mut rich = true;
         let mut message_seen = false;
         let mut form_csrf = None;
@@ -6764,7 +6788,15 @@ async fn message_create(
             let name = field.name().unwrap_or("").to_string();
             message_seen |= name.starts_with("message[") && name.ends_with(']');
             if name == "message[attachment]" {
-                let filename = field.file_name().unwrap_or("attachment").to_string();
+                let Some(filename) = field.file_name().map(str::to_owned) else {
+                    upload = ParsedMessageUpload::Scalar(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
+                    continue;
+                };
+                if filename.is_empty() {
+                    while field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)?.is_some() {}
+                    upload = ParsedMessageUpload::EmptyFilename;
+                    continue;
+                }
                 let content_type = field
                     .content_type()
                     .unwrap_or("application/octet-stream")
@@ -6774,21 +6806,17 @@ async fn message_create(
                 let temporary = std::path::Path::new(&dir).join(format!("message-upload-{}", Uuid::new_v4()));
                 let cleanup = UploadTemporaryFile(temporary.clone());
                 let mut staged = tokio::fs::File::create(&temporary).await.map_err(db_err)?;
-                let mut count = 0usize;
                 while let Some(chunk) = field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)? {
-                    count = count.checked_add(chunk.len()).ok_or(StatusCode::BAD_REQUEST)?;
                     staged.write_all(&chunk).await.map_err(db_err)?;
                 }
                 staged.flush().await.map_err(db_err)?;
                 drop(staged);
-                if count > 0 {
-                    upload = Some(Upload {
-                        filename,
-                        content_type,
-                        bytes: Vec::new(),
-                        temporary: Some(cleanup),
-                    })
-                }
+                upload = ParsedMessageUpload::File(Upload {
+                    filename,
+                    content_type,
+                    bytes: Vec::new(),
+                    temporary: Some(cleanup),
+                });
             } else if name == "message[body]" {
                 body = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
             } else if name == "message[client_message_id]" {
@@ -6808,6 +6836,9 @@ async fn message_create(
             if query_fields.get("message").is_some_and(|value| !value.trim().is_empty()) && !nested {
                 return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
             }
+            if query_fields.get("message[attachment]").is_some_and(|value| !value.is_empty()) {
+                return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+            }
             (
                 query_fields.get("message[body]").cloned().unwrap_or_default(),
                 query_fields.get("message[client_message_id]").cloned(),
@@ -6816,6 +6847,13 @@ async fn message_create(
                 nested,
             )
         } else {
+            let upload = match upload {
+                ParsedMessageUpload::None => None,
+                ParsedMessageUpload::Scalar(value) if value.is_empty() => None,
+                ParsedMessageUpload::Scalar(_) => return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri)),
+                ParsedMessageUpload::EmptyFilename => return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri)),
+                ParsedMessageUpload::File(file) => Some(file),
+            };
             (body, client_id, upload, rich, message_seen)
         }
     } else {
@@ -6826,6 +6864,9 @@ async fn message_create(
         if f.get("message").is_some_and(|value| !value.trim().is_empty())
             && !f.keys().any(|name| name.starts_with("message[") && name.ends_with(']'))
         {
+            return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+        }
+        if f.get("message[attachment]").is_some_and(|value| !value.is_empty()) {
             return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
         }
         (
@@ -7010,36 +7051,48 @@ fn authorized_message_edit(
     }
     Ok((rid, mid, db))
 }
+enum ParsedMessageUpload {
+    None,
+    File(Upload),
+    EmptyFilename,
+    Scalar(String),
+}
 async fn parse_message_update_request(
     s: &Arc<AppState>, req: Request,
-) -> Result<(HashMap<String, String>, Option<Upload>), StatusCode> {
+) -> Result<(HashMap<String, String>, ParsedMessageUpload), StatusCode> {
     let multipart_form = req.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok())
         .unwrap_or("").starts_with("multipart/form-data");
     if multipart_form {
         let mut multipart = Multipart::from_request(req, s).await.map_err(|_| StatusCode::BAD_REQUEST)?;
         let mut values = HashMap::new();
-        let mut upload = None;
+        let mut upload = ParsedMessageUpload::None;
         while let Some(mut field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
             let name = field.name().unwrap_or("").to_owned();
             if name == "message[attachment]" {
-                values.insert(name.clone(), String::new());
-                let filename = field.file_name().unwrap_or("attachment").to_owned();
+                let Some(filename) = field.file_name().map(str::to_owned) else {
+                    let value = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                    values.insert(name, value.clone());
+                    upload = ParsedMessageUpload::Scalar(value);
+                    continue;
+                };
+                values.insert(name, String::new());
+                if filename.is_empty() {
+                    while field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)?.is_some() {}
+                    upload = ParsedMessageUpload::EmptyFilename;
+                    continue;
+                }
                 let content_type = field.content_type().unwrap_or("application/octet-stream").to_owned();
                 let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
                 tokio::fs::create_dir_all(&dir).await.map_err(db_err)?;
                 let temporary = std::path::Path::new(&dir).join(format!("message-edit-upload-{}", Uuid::new_v4()));
                 let cleanup = UploadTemporaryFile(temporary.clone());
                 let mut staged = tokio::fs::File::create(&temporary).await.map_err(db_err)?;
-                let mut count = 0usize;
                 while let Some(chunk) = field.chunk().await.map_err(|_| StatusCode::BAD_REQUEST)? {
-                    count = count.checked_add(chunk.len()).ok_or(StatusCode::BAD_REQUEST)?;
                     staged.write_all(&chunk).await.map_err(db_err)?;
                 }
                 staged.flush().await.map_err(db_err)?;
                 drop(staged);
-                if count > 0 {
-                    upload = Some(Upload { filename, content_type, bytes: Vec::new(), temporary: Some(cleanup) });
-                }
+                upload = ParsedMessageUpload::File(Upload { filename, content_type, bytes: Vec::new(), temporary: Some(cleanup) });
             } else {
                 values.insert(name, field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
@@ -7048,7 +7101,7 @@ async fn parse_message_update_request(
     } else {
         let Form(values) = Form::<HashMap<String, String>>::from_request(req, s).await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        Ok((values, None))
+        Ok((values, ParsedMessageUpload::None))
     }
 }
 fn message_update_csrf_error(
@@ -7070,10 +7123,15 @@ async fn message_update(
     req: Request,
 ) -> AppResult {
     let (rid, mid, db) = authorized_message_edit(&s, &headers, &room_id, &message_id)?;
-    let (body_fields, upload) = parse_message_update_request(&s, req).await?;
+    let (body_fields, parsed_upload) = parse_message_update_request(&s, req).await?;
     if let Some(response) = message_update_csrf_error(&s, &headers, &uri, &body_fields)? {
         return Ok(response);
     }
+    let upload = match parsed_upload {
+        ParsedMessageUpload::None | ParsedMessageUpload::Scalar(_) => None,
+        ParsedMessageUpload::File(file) => Some(file),
+        ParsedMessageUpload::EmptyFilename => return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri)),
+    };
     message_update_values(&s, &headers, &uri, rid, mid, db, body_fields, upload)
 }
 fn message_update_values(
@@ -7093,13 +7151,20 @@ fn message_update_values(
     if !nested {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
+    if f.get("message[attachment]").is_some_and(|value| !value.is_empty()) && upload.is_none() {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
+    let clear_attachment = f.contains_key("message[attachment]") && upload.is_none();
+    let has_attachment: bool = if clear_attachment {
+        db.query_row("SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id=?1)", [mid], |row| row.get(0)).map_err(db_err)?
+    } else { false };
     let body = f.get("message[body]").map(String::as_str);
     let client_id = f.get("message[client_message_id]").map(String::as_str);
     if body.is_none() {
         let current: String = db.query_row(
             "SELECT client_message_id FROM messages WHERE id=?1", [mid], |row| row.get(0)
         ).map_err(db_err)?;
-        if client_id.is_some_and(|id| id != current) || upload.is_some() {
+        if client_id.is_some_and(|id| id != current) || upload.is_some() || has_attachment {
             let updated_at = now();
             let updated_at_ns = message_timestamp_ns(&updated_at).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
             db.execute(
@@ -7108,6 +7173,8 @@ fn message_update_values(
             ).map_err(db_err)?;
             if let Some(file) = upload.take() {
                 replace_message_attachment(&mut db, mid, file, &updated_at)?;
+            } else if has_attachment {
+                clear_message_attachment(&mut db, mid, &updated_at)?;
             }
             touch_room(&db, rid)?;
         }
@@ -7216,6 +7283,8 @@ fn message_update_values(
     }
     if let Some(file) = upload.take() {
         replace_message_attachment(&mut db, mid, file, &updated_at)?;
+    } else if has_attachment {
+        clear_message_attachment(&mut db, mid, &updated_at)?;
     }
     drop(db);
     let updated_message = message_by_id(&s, rid, mid)?;
@@ -7255,10 +7324,15 @@ async fn message_post_override(
     Path((room_id, message_id)): Path<(String, String)>,
     req: Request,
 ) -> AppResult {
-    let (form, upload) = parse_message_update_request(&s, req).await?;
+    let (form, parsed_upload) = parse_message_update_request(&s, req).await?;
     if let Some(response) = message_update_csrf_error(&s, &headers, &uri, &form)? {
         return Ok(response);
     }
+    let upload = match parsed_upload {
+        ParsedMessageUpload::None | ParsedMessageUpload::Scalar(_) => None,
+        ParsedMessageUpload::File(file) => Some(file),
+        ParsedMessageUpload::EmptyFilename => return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri)),
+    };
     match form.get("_method").map(String::as_str) {
         Some("patch" | "put") => {
             let (rid, mid, db) = authorized_message_edit(&s, &headers, &room_id, &message_id)?;
@@ -12529,8 +12603,10 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TRIGGER IF NOT EXISTS message_id_track AFTER INSERT ON messages BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='messages'; END;
         CREATE TABLE IF NOT EXISTS message_mentions(message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(message_id,user_id));
         CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY,message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL,width REAL,height REAL);
-        INSERT OR IGNORE INTO id_sequences(name,last_id) VALUES('attachments',0);
         CREATE TABLE IF NOT EXISTS inline_blobs(id INTEGER PRIMARY KEY,filename TEXT NOT NULL,content_type TEXT NOT NULL,stored_name TEXT NOT NULL,byte_size INTEGER NOT NULL,created_at TEXT NOT NULL,width INTEGER,height INTEGER);
+        INSERT INTO id_sequences(name,last_id) VALUES('attachments',MAX(COALESCE((SELECT MAX(id) FROM attachments),0),COALESCE((SELECT MAX(id) FROM replaced_attachments),0),COALESCE((SELECT MAX(id) FROM inline_blobs),0))) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
+        CREATE TRIGGER IF NOT EXISTS attachment_id_track AFTER INSERT ON attachments BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='attachments'; END;
+        CREATE TRIGGER IF NOT EXISTS inline_blob_id_track AFTER INSERT ON inline_blobs BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='attachments'; END;
         CREATE TABLE IF NOT EXISTS direct_upload_blobs(id INTEGER PRIMARY KEY,storage_key TEXT NOT NULL UNIQUE,filename TEXT NOT NULL,content_type TEXT NOT NULL,content_type_is_null INTEGER NOT NULL DEFAULT 0,byte_size INTEGER NOT NULL,checksum TEXT NOT NULL,created_at TEXT NOT NULL,uploaded INTEGER NOT NULL DEFAULT 0);
         INSERT INTO id_sequences(name,last_id) VALUES('direct_upload_blobs',MAX(999999999999,COALESCE((SELECT MAX(id) FROM direct_upload_blobs),0))) ON CONFLICT(name) DO UPDATE SET last_id=MAX(id_sequences.last_id,excluded.last_id);
         CREATE TRIGGER IF NOT EXISTS direct_upload_blob_id_track AFTER INSERT ON direct_upload_blobs BEGIN UPDATE id_sequences SET last_id=MAX(last_id,new.id) WHERE name='direct_upload_blobs'; END;
