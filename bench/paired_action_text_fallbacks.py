@@ -15,7 +15,7 @@ import urllib.parse
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
-from paired_rich_filters import Presentation, indexed_texts
+from paired_rich_filters import Presentation, edit_message, indexed_texts
 
 
 FALLBACK_CASES = [
@@ -117,7 +117,9 @@ def run(port, cookie, csrf, database, cases):
         else:
             db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,3,'mentions',?)", (stamp,))
     bot_read = malformed_bot_read(port)
-    return presentations, search, saved, failed, reads, bot_read
+    recovery = edit_message(port, cookie, csrf, database, "invalid-sgid", "<div>Recovered</div>")
+    recovered_failed = failed_message_count(port, cookie)
+    return presentations, search, saved, failed, reads, bot_read, recovery, recovered_failed
 
 
 def main():
@@ -172,6 +174,10 @@ def main():
     assert rust[3] == camp[3] == 1, ("saved malformed message fallback", rust[3], camp[3])
     assert rust[4] == camp[4], ("saved malformed message reads", rust[4], camp[4])
     assert rust[5] == camp[5], ("saved malformed message bot JSON", rust[5], camp[5])
+    assert rust[6][0] == camp[6][0] == 302, ("recovery status", rust[6], camp[6])
+    assert rust[6][1].startswith("/rooms/1/messages/") and camp[6][1].startswith("/rooms/1/messages/"), ("recovery redirect", rust[6], camp[6])
+    assert rust[6][2] == camp[6][2] is None, ("recovery search", rust[6], camp[6])
+    assert rust[7] == camp[7] == 0, ("recovery presentation", rust[7], camp[7])
     assert not mismatches, f"{len(mismatches)} ActionText fallback cases differ"
     print(f"PASS {len(CASES)} ActionText fallback cases")
 
