@@ -10963,12 +10963,67 @@ fn bot_xml_error(status: StatusCode) -> Response {
 fn bot_path_format(uri: &Uri) -> Option<&str> {
     uri.path().rsplit('/').next()?.rsplit_once('.').map(|(_, format)| format)
 }
+#[derive(Default)]
+enum RailsCursorParam {
+    #[default]
+    Missing,
+    Scalar(String),
+    Array(Vec<String>),
+    Hash,
+}
+impl RailsCursorParam {
+    fn present(&self) -> bool {
+        match self {
+            Self::Missing => false,
+            Self::Scalar(value) => !value.trim().is_empty(),
+            Self::Array(_) | Self::Hash => true,
+        }
+    }
+}
+fn rails_cursor_params(raw: &[u8]) -> Result<(RailsCursorParam, RailsCursorParam), StatusCode> {
+    let mut before = RailsCursorParam::Missing;
+    let mut after = RailsCursorParam::Missing;
+    for (key, value) in form_urlencoded::parse(raw) {
+        let (name, slot) = if key == "before" || key.starts_with("before[") {
+            ("before", &mut before)
+        } else if key == "after" || key.starts_with("after[") {
+            ("after", &mut after)
+        } else {
+            continue;
+        };
+        if key == name {
+            *slot = RailsCursorParam::Scalar(value.into_owned());
+        } else if key.ends_with(']') {
+            if matches!(slot, RailsCursorParam::Scalar(_)) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            if key == format!("{name}[]") {
+                match slot {
+                    RailsCursorParam::Array(items) => items.push(value.into_owned()),
+                    _ => *slot = RailsCursorParam::Array(vec![value.into_owned()]),
+                }
+            } else {
+                *slot = RailsCursorParam::Hash;
+            }
+        }
+    }
+    Ok((before, after))
+}
+fn rails_record_id(value: &str) -> Option<i64> {
+    let input = value.trim_start().as_bytes();
+    let mut end = usize::from(input.first().is_some_and(|byte| *byte == b'+' || *byte == b'-'));
+    let digits = end;
+    while input.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if end == digits { return None; }
+    std::str::from_utf8(&input[..end]).ok()?.parse().ok()
+}
 async fn bot_messages_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path((rid, key)): Path<(i64, String)>,
-    Query(q): Query<HashMap<String, String>>,
 ) -> AppResult {
     let u = bot_api_actor(&s, &headers, &key)?;
     room_for(&s, u.id, rid)?;
@@ -10976,19 +11031,37 @@ async fn bot_messages_get(
     if uri.path().ends_with(".xml") {
         return Ok(bot_xml_error(StatusCode::NOT_ACCEPTABLE));
     }
-    let before_value = q.get("before").filter(|value| !value.trim().is_empty());
-    let after_value = q.get("after").filter(|value| !value.trim().is_empty());
-    let (before, after) = if let Some(value) = before_value {
-        match value.parse::<i64>() {
-            Ok(cursor) => (Some(cursor), None),
-            Err(_) => return Ok(bot_pagination_not_found(&headers, &uri)),
+    let (before_param, after_param) = match rails_cursor_params(uri.query().unwrap_or("").as_bytes()) {
+        Ok(values) => values,
+        Err(_) => return Ok(rails_exception_400_response(&headers, &uri)),
+    };
+    let after_present = after_param.present();
+    let cursor = if before_param.present() { Some((true, before_param)) }
+        else if after_present { Some((false, after_param)) }
+        else { None };
+    let (before, after) = match cursor {
+        Some((is_before, RailsCursorParam::Scalar(value))) => match rails_record_id(&value) {
+            Some(value) if is_before => (Some(value), None),
+            Some(value) => (None, Some(value)),
+            None => return Ok(bot_pagination_not_found(&headers, &uri)),
+        },
+        Some((_, RailsCursorParam::Array(values))) => {
+            let db = pool(&s)?;
+            for value in values {
+                let Some(id) = rails_record_id(&value) else {
+                    return Ok(bot_pagination_not_found(&headers, &uri));
+                };
+                let found: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE room_id=?1 AND id=?2)",
+                    params![rid, id], |row| row.get(0),
+                ).map_err(db_err)?;
+                if !found { return Ok(bot_pagination_not_found(&headers, &uri)); }
+            }
+            return Ok(rails_exception_500_response(&headers, &uri));
         }
-    } else if let Some(value) = after_value {
-        match value.parse::<i64>() {
-            Ok(cursor) => (None, Some(cursor)),
-            Err(_) => return Ok(bot_pagination_not_found(&headers, &uri)),
-        }
-    } else { (None, None) };
+        Some((_, RailsCursorParam::Hash)) => return Ok(bot_pagination_not_found(&headers, &uri)),
+        _ => (None, None),
+    };
     if let Some(cursor) = before.or(after) {
         let found: bool = pool(&s)?
             .query_row(
@@ -11024,7 +11097,7 @@ async fn bot_messages_get(
     r.headers_mut()
         .insert("x-total-count", count.to_string().parse().unwrap());
     if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
-        let (direction, cursor) = if after_value.is_some() {
+        let (direction, cursor) = if after_present {
             ("after", last.id)
         } else {
             ("before", first.id)
