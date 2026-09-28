@@ -159,6 +159,8 @@ The transfer page also matches Campfire's parsed head and body in anonymous and 
 
 ## Remaining parity work
 
+A twelve-case paired autocomplete input probe now matches Campfire's room access, query-key behavior, empty and malformed room IDs, JSON media type, and escaping of names containing markup. The existing large-user probe still checks signed IDs and avatar paths separately. Other parameter shapes and browser editor interactions remain to be tested.
+
 Open Graph outbound DNS selection now follows the pinned Campfire Surfguard resolver for mixed answers: it drops blocked addresses, prefers the first public IPv4 address before IPv6, rejects more than 256 raw answers, and pins the selected address for the request. A deterministic Rust test covers these selection cases; live remote-site behavior and other fetch edge cases remain unverified.
 
 A paired private-room stream probe now confirms that a member's previously valid signed message token is rejected on a fresh socket after their membership is removed. The member's login and heartbeat remain valid, a remaining member can still use the same token, unsigned room-ID subscriptions are rejected, and `Turbo::StreamsChannel` rejects the room token both before and after removal. This covers subscription decisions for one room type and membership transition; broader authorization and delivery states remain open.

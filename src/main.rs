@@ -10874,16 +10874,15 @@ async fn autocomplete(
     let db = pool(&s)?;
     let room_id = q
         .get("room_id")
-        .map(|id| id.parse::<i64>().map_err(|_| StatusCode::BAD_REQUEST))
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| path_record_id(id))
         .transpose()?;
     if let Some(rid) = room_id {
         room_for(&s, u.id, rid)?;
     }
-    let query = q
-        .get("q")
-        .or_else(|| q.get("query"))
-        .cloned()
-        .unwrap_or_default();
+    let query = q.get("query").cloned().or_else(|| {
+        q.get("query[]").map(|value| format!("[\"{value}\"]"))
+    }).unwrap_or_default();
     let mut st=db.prepare("SELECT u.id,u.name,u.updated_at FROM users u WHERE u.status=0 AND u.name LIKE ?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.room_id=?2)) ORDER BY lower(u.name) LIMIT 20").map_err(db_err)?;
     let users = st
         .query_map(params![format!("%{query}%"), room_id], |r| {
@@ -10936,7 +10935,7 @@ async fn autocomplete(
             };
             Ok(json!({
                 "value": id,
-                "name": esc(&name),
+                "name": esc(&name).replace("&#x2F;", "/"),
                 "avatar_url": format!("{base_url}{}", entry.avatar_path),
                 "sgid": entry.sgid,
             }))
@@ -10945,7 +10944,7 @@ async fn autocomplete(
     if !uncached.is_empty() {
         s.autocomplete_cache.write().unwrap().extend(uncached);
     }
-    Ok(Json(rows).into_response())
+    Ok(([(header::CONTENT_TYPE, "application/json; charset=utf-8")], Json(rows)).into_response())
 }
 async fn bots_get(State(s): State<Arc<AppState>>, headers: HeaderMap) -> AppResult {
     let u = user(&s, &headers)?;
