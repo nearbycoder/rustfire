@@ -2764,11 +2764,26 @@ async fn unfurl_url(input: &str) -> Option<Value> {
     };
     Some(json!({"title":title,"url":canonical,"description":description,"image":image}))
 }
-#[derive(Deserialize)]
-struct UnfurlInput {
-    url: String,
+#[derive(Debug, PartialEq, Eq)]
+enum UnfurlUrlParam {
+    Scalar(String),
+    Other,
 }
-fn unfurl_input(headers: &HeaderMap, body: &[u8]) -> Result<String, StatusCode> {
+fn unfurl_form_url(raw: &[u8]) -> Result<Option<UnfurlUrlParam>, StatusCode> {
+    let mut value = None;
+    for (key, item) in form_urlencoded::parse(raw) {
+        if key == "url" {
+            value = Some(UnfurlUrlParam::Scalar(item.into_owned()));
+        } else if key.starts_with("url[") && key.ends_with(']') {
+            if matches!(value, Some(UnfurlUrlParam::Scalar(_))) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            value = Some(UnfurlUrlParam::Other);
+        }
+    }
+    Ok(value)
+}
+fn unfurl_input(headers: &HeaderMap, query: &[u8], body: &[u8]) -> Result<UnfurlUrlParam, StatusCode> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -2777,20 +2792,26 @@ fn unfurl_input(headers: &HeaderMap, body: &[u8]) -> Result<String, StatusCode> 
         .next()
         .unwrap_or("")
         .trim();
-    let url = match content_type {
-        "application/json" => serde_json::from_slice::<UnfurlInput>(body)
-            .map_err(|_| StatusCode::BAD_REQUEST)?
-            .url,
-        "application/x-www-form-urlencoded" => form_urlencoded::parse(body)
-            .find(|(key, _)| key == "url")
-            .map(|(_, value)| value.into_owned())
-            .ok_or(StatusCode::BAD_REQUEST)?,
-        _ => return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    let query_url = unfurl_form_url(query)?;
+    let body_url = match content_type {
+        "application/json" => {
+            let json: Value = serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+            match json.get("url") {
+                Some(Value::String(url)) => Some(UnfurlUrlParam::Scalar(url.clone())),
+                Some(Value::Null) | None => None,
+                Some(Value::Array(values)) if values.is_empty() => None,
+                Some(Value::Object(values)) if values.is_empty() => None,
+                Some(_) => Some(UnfurlUrlParam::Other),
+            }
+        }
+        "application/x-www-form-urlencoded" => unfurl_form_url(body)?,
+        _ => None,
     };
-    if url.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+    let url = query_url.or(body_url).ok_or(StatusCode::BAD_REQUEST)?;
+    match &url {
+        UnfurlUrlParam::Scalar(value) if value.trim().is_empty() => Err(StatusCode::BAD_REQUEST),
+        _ => Ok(url),
     }
-    Ok(url)
 }
 async fn unfurl_link(
     State(s): State<Arc<AppState>>,
@@ -2799,10 +2820,13 @@ async fn unfurl_link(
     body: axum::body::Bytes,
 ) -> AppResult {
     let _ = user(&s, &headers)?;
-    let url = match unfurl_input(&headers, &body) {
+    let url = match unfurl_input(&headers, uri.query().unwrap_or("").as_bytes(), &body) {
         Ok(url) => url,
-        Err(StatusCode::BAD_REQUEST) => return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri)),
+        Err(StatusCode::BAD_REQUEST) => return Ok(rails_exception_400_response(&headers, &uri)),
         Err(error) => return Err(error),
+    };
+    let UnfurlUrlParam::Scalar(url) = url else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
     };
     match unfurl_url(&url).await {
         Some(value) => Ok(Json(value).into_response()),
@@ -13993,10 +14017,10 @@ mod tests {
     fn unfurl_link_accepts_editor_json_and_form_posts() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::CONTENT_TYPE, "application/json".parse().unwrap());
-        assert_eq!(super::unfurl_input(&headers, br#"{"url":"https://example.com/a"}"#).unwrap(), "https://example.com/a");
+        assert_eq!(super::unfurl_input(&headers, b"", br#"{"url":"https://example.com/a"}"#).unwrap(), super::UnfurlUrlParam::Scalar("https://example.com/a".to_string()));
         headers.insert(axum::http::header::CONTENT_TYPE, "application/x-www-form-urlencoded; charset=UTF-8".parse().unwrap());
-        assert_eq!(super::unfurl_input(&headers, b"url=https%3A%2F%2Fexample.com%2Fa").unwrap(), "https://example.com/a");
-        assert_eq!(super::unfurl_input(&headers, b"url=").unwrap_err(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(super::unfurl_input(&headers, b"", b"url=https%3A%2F%2Fexample.com%2Fa").unwrap(), super::UnfurlUrlParam::Scalar("https://example.com/a".to_string()));
+        assert_eq!(super::unfurl_input(&headers, b"", b"url=").unwrap_err(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]
