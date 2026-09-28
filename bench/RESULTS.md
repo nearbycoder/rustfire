@@ -137,6 +137,8 @@ The paired latest-page reads ran with Campfire at 22 Puma workers and one Rustfi
 
 This corpus makes the source room page much slower than the simpler imported 40-message fixture above; the large ratio is specific to this content and configuration. The timed requests did not compare entire body bytes, and the workloads had no writes, sockets, inline media, or separate load host. They do not establish whole-app speed, sustained throughput, or maximum capacity at complete feature parity.
 
+An untimed `--full-sweep` run expanded the corpus from 66 to all 227 rich-filter cases. All imported IDs, saved ActionText bodies, search rows, and individual parsed presentations matched. The complete parsed latest page and five older pages matched, with each older page containing the expected message IDs. The existing timed reports above remain 66-message fixtures; the full sweep did not measure throughput.
+
 ## Imported 41-message paging boundary
 
 `python bench/paired_import_roundtrip.py --extra-messages 39 --sample-dir /tmp/rustfire-import-41` imported 41 real Campfire messages to cross the 40-message room-page boundary. Both apps rendered the latest 40 messages in matching parsed room heads and bodies (148 and 7,499 tokens). The `before=` request returned the same single older message (179 parsed body tokens), and the `after=` request returned matching content (7,022 parsed body tokens). A request before the oldest message returned HTTP 204 in both apps. The source-signed bot avatar and message attachment paths and original bytes also matched after import.

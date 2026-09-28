@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
@@ -30,17 +31,14 @@ EXTRA_NAMES = {
     "sweep-cr-title-attribute", "sweep-cr-link-attribute", "sweep-comment-fake-link",
     "sweep-script-fake-link", "sweep-textarea-fake-link", "sweep-unicode-0",
 }
-CORPUS = CASES + [case for case in sweep_cases() if case[0] in EXTRA_NAMES]
-
-
-def message_rows(database, campfire):
+def message_rows(database, campfire, corpus):
     with sqlite3.connect(database) as db:
         ids = {
             client_id.removeprefix("paired-rich-filter-"): message_id
             for message_id, client_id in db.execute("SELECT id,client_message_id FROM messages")
             if client_id.startswith("paired-rich-filter-")
         }
-        assert set(ids) == {name for name, _ in CORPUS}, (len(ids), len(CORPUS))
+        assert set(ids) == {name for name, _ in corpus}, (len(ids), len(corpus))
         search = {
             name: db.execute("SELECT body FROM message_search_index WHERE rowid=?", [message_id]).fetchone()
             for name, message_id in ids.items()
@@ -64,17 +62,32 @@ def presentation(port, cookie, name, message_id):
         connection.close()
 
 
+def older_pages(port, cookie, ids):
+    ordered = sorted(ids.values())
+    pages = []
+    for index in range(40, len(ordered), 40):
+        path = f"/rooms/1/messages?before={ordered[-index]}"
+        payload = get_room(port, cookie, path)
+        actual = sorted(int(value) for value in re.findall(rb'data-message-id=["\'](\d+)', payload))
+        expected = ordered[max(0, len(ordered) - index - 40):len(ordered) - index]
+        assert actual == expected, (path, actual, expected)
+        pages.append(payload)
+    return pages
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--read-clients", type=int, nargs="*", default=[])
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--campfire-workers", type=int, default=22)
+    parser.add_argument("--full-sweep", action="store_true", help="post every rich-filter sweep case and compare every imported page")
     parser.add_argument("--report", type=pathlib.Path)
     args = parser.parse_args()
     if any(clients < 1 for clients in args.read_clients) or args.seconds <= 0 or args.campfire_workers < 1:
         parser.error("positive client counts, seconds, and Campfire worker count are required")
     if args.report and not args.read_clients:
         parser.error("--report requires --read-clients")
+    corpus = CASES + (sweep_cases() if args.full_sweep else [case for case in sweep_cases() if case[0] in EXTRA_NAMES])
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-import-rich-corpus-") as scratch:
         temp = pathlib.Path(scratch)
@@ -93,13 +106,12 @@ def main():
                 try:
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
-                    for case in CORPUS:
+                    for case in corpus:
                         post(camp_port, cookie, csrf, case)
-                    source_ids, source_search, source_bodies = message_rows(camp_db, True)
+                    source_ids, source_search, source_bodies = message_rows(camp_db, True, corpus)
                     source_presentations = {name: presentation(camp_port, cookie, name, message_id) for name, message_id in source_ids.items()}
-                    older_path = f"/rooms/1/messages?before={sorted(source_ids.values())[-40]}"
                     source_room = get_room(camp_port, cookie, "/rooms/1")
-                    source_older = get_room(camp_port, cookie, older_path)
+                    source_older = older_pages(camp_port, cookie, source_ids)
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -118,7 +130,7 @@ def main():
                                   capture_output=True, text=True, timeout=180)
         assert imported.returncode == 0, imported.stdout + imported.stderr
         counts = json.loads(imported.stdout)
-        target_ids, target_search, target_bodies = message_rows(rust_db, False)
+        target_ids, target_search, target_bodies = message_rows(rust_db, False, corpus)
         assert target_ids == source_ids, (target_ids, source_ids)
         assert target_search == source_search, {name: (target_search[name], source_search[name]) for name in source_ids if target_search[name] != source_search[name]}
         assert target_bodies == source_bodies, {name: (target_bodies[name], source_bodies[name]) for name in source_ids if target_bodies[name] != source_bodies[name]}
@@ -126,7 +138,7 @@ def main():
         try:
             target_presentations = {name: presentation(rust_port, cookie, name, message_id) for name, message_id in target_ids.items()}
             target_room = get_room(rust_port, cookie, "/rooms/1")
-            target_older = get_room(rust_port, cookie, older_path)
+            target_older = older_pages(rust_port, cookie, target_ids)
         finally:
             stop_server(rust)
         mismatches = {name: (target_presentations[name], source_presentations[name]) for name in source_ids if target_presentations[name] != source_presentations[name]}
@@ -135,8 +147,9 @@ def main():
                       "normalize_blob_paths": True, "normalize_text_origins": True}
         for part in ("head", "body"):
             assert section(source_room, part, **normalized) == section(target_room, part, **normalized), part
-        assert section(b"<body>" + source_older + b"</body>", "body", **normalized) == section(
-            b"<body>" + target_older + b"</body>", "body", **normalized), "older page"
+        for index, (source_page, target_page) in enumerate(zip(source_older, target_older), 1):
+            assert section(b"<body>" + source_page + b"</body>", "body", **normalized) == section(
+                b"<body>" + target_page + b"</body>", "body", **normalized), f"older page {index}"
         if args.read_clients:
             trials = measure_imported_reads(temp, REPOSITORY, RUBY, environment, camp_port, rust_db, rust_port,
                                             uploads, cookie, args.read_clients, args.seconds, args.campfire_workers, 40)
@@ -146,16 +159,17 @@ def main():
                     "date": "2026-09-28",
                     "campfire_commit": REVISION,
                     "rustfire_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                    "command": "python bench/paired_import_rich_corpus.py --read-clients " + " ".join(map(str, args.read_clients))
+                    "command": "python bench/paired_import_rich_corpus.py" + (" --full-sweep" if args.full_sweep else "") + " --read-clients " + " ".join(map(str, args.read_clients))
                                + f" --seconds {args.seconds:g} --campfire-workers {args.campfire_workers} --report {args.report}",
-                    "fixture": f"{len(CORPUS)} imported rich messages; latest 40-message room page",
+                    "fixture": f"{len(corpus)} imported rich messages; latest 40-message room page",
                     "latest_page_bytes": {"campfire": len(source_room), "rustfire": len(target_room)},
-                    "older_page_bytes": {"campfire": len(source_older), "rustfire": len(target_older)},
+                    "older_page_bytes": {"campfire": len(source_older[0]), "rustfire": len(target_older[0])},
+                    "all_older_page_bytes": {"campfire": [len(page) for page in source_older], "rustfire": [len(page) for page in target_older]},
                     "seconds": args.seconds,
                     "campfire_workers": args.campfire_workers,
                     "trials": trials,
                 }, indent=2) + "\n")
-    print(f"PASS {len(CORPUS)} imported rich messages preserve IDs, saved ActionText source, FTS text, individual presentations, and parsed latest/older pages; latest bytes {len(source_room)}/{len(target_room)} Campfire/Rustfire; import: {counts}")
+    print(f"PASS {len(corpus)} imported rich messages preserve IDs, saved ActionText source, FTS text, individual presentations, and parsed latest/{len(source_older)} older pages; latest bytes {len(source_room)}/{len(target_room)} Campfire/Rustfire; import: {counts}")
 
 
 if __name__ == "__main__":
