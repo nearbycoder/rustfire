@@ -3880,20 +3880,24 @@ fn transfer_link(state: &AppState, uid: i64) -> Result<String, StatusCode> {
     let token = transfer_token(key, uid, Utc::now() + Duration::hours(4)).map_err(db_err)?;
     Ok(format!("/session/transfers/{token}"))
 }
-async fn transfer_show(State(s): State<Arc<AppState>>, Path(token): Path<String>) -> AppResult {
+async fn transfer_show(State(s): State<Arc<AppState>>, headers: HeaderMap, Path(token): Path<String>) -> AppResult {
     let updated_at: Option<String> = pool(&s)?
         .query_row("SELECT updated_at FROM accounts LIMIT 1", [], |row| row.get(0))
         .optional()
         .map_err(db_err)?;
     let logo_version = updated_at.map(|value| value.chars().filter(char::is_ascii_digit).take(14).collect::<String>());
-    Ok(render_unauth(
-        "Sign in on this device",
-        &format!(
-            "<form data-controller='auto-submit' method='post' action='/session/transfers/{}'><input type='hidden' name='_method' value='put'></form>",
-            esc(&token)
-        ),
-        logo_version.as_deref(),
-    ))
+    let body = format!(
+        "<form data-controller='auto-submit' method='post' action='/session/transfers/{}'><input type='hidden' name='_method' value='put'></form>",
+        esc(&token)
+    );
+    match user(&s, &headers) {
+        Ok(current) => {
+            let csrf = current.csrf_token.as_deref().unwrap_or("");
+            Ok(render_source_page("Sign in on this device", &csrf_forms(&body, csrf), "", Some(&current), csrf))
+        }
+        Err(StatusCode::UNAUTHORIZED) => Ok(render_unauth("Sign in on this device", &body, logo_version.as_deref())),
+        Err(status) => Err(status),
+    }
 }
 async fn transfer_update(
     State(s): State<Arc<AppState>>,
@@ -3931,8 +3935,19 @@ async fn transfer_update(
         return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, media)], "").into_response());
     };
     drop(db);
-    let mut response = create_session(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()))?;
-    *response.status_mut() = StatusCode::FOUND;
+    let destination = cookie(&headers, "return_to")
+        .and_then(|encoded| safe_return_path(&encoded))
+        .unwrap_or_else(|| "/".to_string());
+    let mut response = create_session_to(&s, uid, client_ip(&s.trusted_proxies, &headers, addr.ip()), &destination)?;
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        format!(
+            "return_to=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
+            secure_cookie_suffix()
+        )
+        .parse()
+        .unwrap(),
+    );
     Ok(response)
 }
 fn first_run_needed(state: &AppState) -> Result<bool, StatusCode> {
