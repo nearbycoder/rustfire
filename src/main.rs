@@ -11683,17 +11683,23 @@ async fn bot_messages_post(
             String::new()
         } else {
             let raw = captured.lock().unwrap().take().unwrap_or_default();
-            String::from_utf8(raw).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?
+            match String::from_utf8(raw) {
+                Ok(body) => body,
+                Err(_) => return Ok(rails_exception_400_response(&headers, &uri)),
+            }
         };
         (body, attachment)
     } else {
-        let bytes = axum::body::to_bytes(req.into_body(), 25 * 1024 * 1024)
-            .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
-        (
-            String::from_utf8(bytes.to_vec()).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?,
-            None,
-        )
+        let mut stream = req.into_body().into_data_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.map_err(|_| StatusCode::BAD_REQUEST)?);
+        }
+        let body = match String::from_utf8(bytes) {
+            Ok(body) => body,
+            Err(_) => return Ok(rails_exception_500_response(&headers, &uri)),
+        };
+        (body, None)
     };
     if body.trim().is_empty() && attachment.is_none() && !blank_query_attachment {
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "text/html")]).into_response());
