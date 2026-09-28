@@ -21,9 +21,13 @@ from paired_bot_admin import request
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 
 
-def capture(port, cookie):
+def capture(port, cookie, observe_ms=0):
+    command = ["node", "bench/capture_revoked_socket.mjs", "--base", f"http://127.0.0.1:{port}",
+               "--cookie", cookie, "--browser-channels", "true"]
+    if observe_ms:
+        command.extend(("--observe-ms", str(observe_ms)))
     process = subprocess.Popen(
-        ["node", "bench/capture_revoked_socket.mjs", "--base", f"http://127.0.0.1:{port}", "--cookie", cookie],
+        command,
         cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     ready = process.stdout.readline().strip()
@@ -31,6 +35,14 @@ def capture(port, cookie):
         output, error = process.communicate(timeout=10)
         raise AssertionError(f"Revocation capture did not subscribe: {ready}\n{output}\n{error}")
     return process
+
+
+def captured(process):
+    output, error = process.communicate(timeout=18)
+    assert process.returncode == 0, (output, error)
+    observed = json.loads(output.strip().splitlines()[-1])
+    assert observed["ready"], observed
+    return observed
 
 
 def reconnect_status(port, cookie):
@@ -58,10 +70,11 @@ def rejected_reconnect(port, cookie):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, action):
+def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, other_cookie, action):
     with sqlite3.connect(database) as db:
         initial_sessions = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=2").fetchone()[0]
-    process = capture(port, member_cookie)
+    processes = [capture(port, cookie) for cookie in (member_cookie, other_cookie)]
+    admin_monitor = capture(port, admin_cookie, observe_ms=2500)
     try:
         # Action Cable installs its remote-disconnect subscriber asynchronously.
         time.sleep(0.5)
@@ -80,10 +93,14 @@ def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, ac
                                                  body, "application/x-www-form-urlencoded")
             expected = "/rooms/1"
         assert status == 302 and urllib.parse.urlsplit(location).path == expected, (status, location, response[:200])
-        output, error = process.communicate(timeout=18)
-        assert process.returncode == 0, (output, error)
-        observed = json.loads(output.strip().splitlines()[-1])
-        assert observed["ready"], observed
+        observed = {"member_sockets": [captured(process) for process in processes]}
+        assert captured(admin_monitor)["monitor_passed"], "Unrevoked administrator socket closed"
+        assert observed["member_sockets"][0] == observed["member_sockets"][1], observed
+        reconnect = action in ("signout", "membership")
+        for socket in observed["member_sockets"]:
+            assert socket["subscribed_channels"] == 4 and socket["messages"] == [
+                {"type": "disconnect", "reason": "remote", "reconnect": reconnect}
+            ] and socket["close_code"] == 1000 and socket["close_reason"] == "" and socket["tcp_ended"] and socket["socket_error"] is None, socket
         with sqlite3.connect(database) as db:
             saved_status = db.execute("SELECT status FROM users WHERE id=2").fetchone()[0]
             sessions = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=2").fetchone()[0]
@@ -93,13 +110,17 @@ def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, ac
         if action == "membership":
             with sqlite3.connect(database) as db:
                 assert db.execute("SELECT COUNT(*) FROM memberships WHERE room_id=1 AND user_id=2").fetchone()[0] == 0
-        observed["reconnect"] = ({"http_status": reconnect_status(port, member_cookie)}
-                                 if action == "membership" else rejected_reconnect(port, member_cookie))
+        observed["reconnect"] = [({"http_status": reconnect_status(port, cookie)}
+                                  if action == "membership" or (action == "signout" and cookie == other_cookie)
+                                  else rejected_reconnect(port, cookie))
+                                 for cookie in (member_cookie, other_cookie)]
+        observed["admin_stayed_connected"] = True
         return observed
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.communicate()
+        for process in (*processes, admin_monitor):
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
 
 def paired_action(action):
@@ -111,6 +132,7 @@ def paired_action(action):
         seed_rustfire(rust_db, rust_port, [])
         with sqlite3.connect(rust_db) as db:
             db.execute("INSERT INTO sessions(user_id,token,csrf_token,ip_address,created_at,last_active_at) VALUES(2,'paired-member-session','paired-member-csrf','203.0.113.10','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
+            db.execute("INSERT INTO sessions(user_id,token,csrf_token,ip_address,created_at,last_active_at) VALUES(2,'paired-other-session','paired-other-csrf','203.0.113.11','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
         camp_env = seed_campfire(checkout, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
         camp_env["WEB_CONCURRENCY"] = "1"
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
@@ -122,7 +144,8 @@ def paired_action(action):
         rust = start_server(rust_db, rust_port)
         try:
             rust_observed = run(rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf",
-                                "session_token=paired-member-session", "paired-member-csrf", action)
+                                "session_token=paired-member-session", "paired-member-csrf",
+                                "session_token=paired-other-session", action)
         finally:
             stop_server(rust)
 
@@ -134,10 +157,12 @@ def paired_action(action):
                                     cwd=checkout, env=camp_env, stdout=log, stderr=log)
             wait_for_server(camp_port, camp)
             member_cookie, member_csrf = login_campfire(camp_port, "member@example.invalid")
+            other_cookie, _ = login_campfire(camp_port, "member@example.invalid")
             with sqlite3.connect(camp_db) as db:
                 db.execute("UPDATE sessions SET ip_address='203.0.113.10' WHERE user_id=2")
             admin_cookie, admin_csrf = login_campfire(camp_port)
-            camp_observed = run(camp_port, camp_db, admin_cookie, admin_csrf, member_cookie, member_csrf, action)
+            camp_observed = run(camp_port, camp_db, admin_cookie, admin_csrf, member_cookie, member_csrf,
+                                other_cookie, action)
         finally:
             if camp is not None:
                 stop_server(camp)

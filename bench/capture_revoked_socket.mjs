@@ -10,8 +10,16 @@ const args = Object.fromEntries(entries.reduce((pairs, value, index) => {
 const base = new URL(args.base);
 const cookie = args.cookie;
 const unauthorized = args.unauthorized === 'true';
+const browserChannels = args['browser-channels'] === 'true';
+const observeMs = Number(args['observe-ms'] ?? 0);
 if (base.protocol !== 'http:' || !cookie) throw new Error('Use --base http://host:port --cookie name=value');
-const identifier = JSON.stringify({ channel: 'HeartbeatChannel' });
+const identifiers = (browserChannels ? [
+  { channel: 'HeartbeatChannel' },
+  { channel: 'UnreadRoomsChannel' },
+  { channel: 'ReadRoomsChannel' },
+  { channel: 'PresenceChannel', room_id: 1 },
+] : [{ channel: 'HeartbeatChannel' }]).map(value => JSON.stringify(value));
+const confirmed = new Set();
 const socket = net.createConnection({ host: base.hostname, port: Number(base.port) });
 const messages = [];
 let buffer = Buffer.alloc(0);
@@ -21,6 +29,8 @@ let httpStatus = null;
 let closeCode = null;
 let closeReason = '';
 let tcpEnded = false;
+let socketError = null;
+let clientInitiated = false;
 const timeout = setTimeout(() => {
   console.error('Timed out waiting for revocation close');
   process.exitCode = 2;
@@ -44,12 +54,13 @@ socket.on('connect', () => {
   const key = crypto.randomBytes(16).toString('base64');
   socket.write(`GET /cable HTTP/1.1\r\nHost: ${base.host}\r\nOrigin: ${base.origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Protocol: actioncable-v1-json\r\nCookie: ${cookie}\r\n\r\n`);
 });
-socket.on('error', error => { console.error(error); process.exit(1); });
+socket.on('error', error => { socketError = error.code ?? error.message; });
 socket.on('end', () => { tcpEnded = true; });
 socket.on('close', () => {
   clearTimeout(timeout);
-  console.log(JSON.stringify({ ready, http_status: httpStatus, messages, close_code: closeCode, close_reason: closeReason, tcp_ended: tcpEnded }));
-  if (!ready && !unauthorized) process.exitCode = 1;
+  const monitorPassed = observeMs > 0 ? clientInitiated && ready && !messages.length && closeCode === null : null;
+  console.log(JSON.stringify({ ready, subscribed_channels: confirmed.size, http_status: httpStatus, messages, close_code: closeCode, close_reason: closeReason, tcp_ended: tcpEnded, socket_error: socketError, monitor_passed: monitorPassed }));
+  if ((!ready && !unauthorized) || (observeMs > 0 && !monitorPassed)) process.exitCode = 1;
 });
 socket.on('data', chunk => {
   buffer = Buffer.concat([buffer, chunk]);
@@ -81,11 +92,16 @@ socket.on('data', chunk => {
       socket.end(frame(body, 8));
     } else if (opcode === 1) {
       const event = JSON.parse(body.toString());
-      if (event.type === 'welcome' && !unauthorized) socket.write(frame(JSON.stringify({ command: 'subscribe', identifier })));
-      else if (event.type === 'confirm_subscription' && event.identifier === identifier) {
-        ready = true;
-        console.log('READY');
-      } else if (event.type !== 'ping') messages.push(event);
+      if (event.type === 'welcome' && !unauthorized) {
+        for (const identifier of identifiers) socket.write(frame(JSON.stringify({ command: 'subscribe', identifier })));
+      } else if (event.type === 'confirm_subscription' && identifiers.includes(event.identifier)) {
+        confirmed.add(event.identifier);
+        if (!ready && confirmed.size === identifiers.length) {
+          ready = true;
+          console.log('READY');
+          if (observeMs > 0) setTimeout(() => { clientInitiated = true; socket.destroy(); }, observeMs);
+        }
+      } else if (event.type !== 'ping' && !event.identifier) messages.push(event);
     }
   }
 });

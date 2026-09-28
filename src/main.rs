@@ -12850,6 +12850,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     }
     let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut presence_subscriptions: HashMap<String, (i64, bool)> = HashMap::new();
+    let mut sent_close = false;
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(3),
         std::time::Duration::from_secs(3),
@@ -12863,6 +12864,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     if uid==u.id {
                         let _=sender.send(WsMessage::Text(json!({"type":"disconnect","reason":"remote","reconnect":reconnect}).to_string().into())).await;
                         let _=sender.send(WsMessage::Close(Some(CloseFrame {code:1000,reason:"".into()}))).await;
+                        sent_close = true;
                         break;
                     }
                 }
@@ -12926,6 +12928,15 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                 }
             },
             event=event_rx.recv()=>{if let Some((identifier,rid,payload,turbo))=event{if rid==0 || payload.accessible(&s,u.id,rid){if let Some(frame)=payload.frame(identifier,turbo){if sender.send(frame).await.is_err(){break}}}}}
+        }
+    }
+    if sent_close {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match tokio::time::timeout_at(deadline, receiver.next()).await {
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) | Ok(Some(Err(_))) | Err(_) => break,
+                Ok(Some(Ok(_))) => continue,
+            }
         }
     }
     for (_, task) in subscriptions {
