@@ -1897,3 +1897,12 @@ The shared signup parser returned an empty 400 for a nonblank scalar or array `u
 ## Rich-text carriage-return normalization
 
 An expanded `python bench/paired_rich_filters.py --sweep` exposed numeric references for carriage return (`&#13;` and hexadecimal forms): Campfire renders and indexes them as line feeds, while Rustfire had retained carriage returns in presentation. Campfire also saves those references and literal carriage returns as line feeds in ActionText source. Rustfire now normalizes them for presentation, search, and the saved source on create and edit. The release build passed **224/224** paired rich-text presentation and search cases, four blank creates, and three edits; selected saved ActionText source values matched as well. The original 57-case probe, 13-case ActionText fallback probe, and all **52** Rust unit tests passed afterward. This covers the sampled HTML and stored-source cases; other ActionText serialization and media behavior remain open.
+
+Commit `4257663` then ran a checked ten-second mixed rich-message workload in both server orders: four rooms, four users, 32 readers, 80 scheduled rich posts, and 100 browser-channel sockets per room. Campfire used 22 Puma workers; Rustfire used one release process. Each app saved all 80 posts, met the writer deadline, delivered all 8,000 expected message appends and 8,000 unread events, had zero checked read errors, and matched 320 sampled append structures. The [paired reports](results/actiontext-cr-rich-mix-10s.json) retain the full command and per-app measurements:
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Campfire / Rustfire write p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Campfire first | 1,408.0 | 2,768.3 | 1.97× | 188.19 / 19.86 ms |
+| Rustfire first | 1,362.5 | 2,839.2 | 2.08× | 132.10 / 19.50 ms |
+
+The servers and load generator shared one host; socket setup was outside the measured interval. This verifies a current-build point after the ActionText change, not maximum connection scale, sustained capacity, or whole-app superiority.
