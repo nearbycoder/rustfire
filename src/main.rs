@@ -3663,6 +3663,30 @@ async fn reject_banned_ip(
             _ => {}
         }
         let path = request.uri().path().to_string();
+        if request.method() == Method::POST
+            && request.extensions().get::<MatchedPath>()
+                .is_some_and(|route| route.as_str() == "/session/transfers/{token}")
+        {
+            let (parts, body) = request.into_parts();
+            let bytes = match to_bytes(body, 128 * 1024 * 1024).await {
+                Ok(bytes) => bytes,
+                Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            };
+            let content_type = parts.headers.get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()).unwrap_or("");
+            let form_method = content_type.starts_with("application/x-www-form-urlencoded")
+                .then(|| form_urlencoded::parse(&bytes)
+                    .find(|(key, _)| key == "_method")
+                    .map(|(_, value)| value.into_owned()))
+                .flatten();
+            let tunneled = form_method.as_deref().or_else(|| parts.headers
+                .get("x-http-method-override").and_then(|value| value.to_str().ok()))
+                .is_some_and(|method| method.eq_ignore_ascii_case("patch") || method.eq_ignore_ascii_case("put"));
+            if !tunneled {
+                return rails_error_response(StatusCode::NOT_FOUND, &parts.headers, &parts.uri);
+            }
+            request = Request::from_parts(parts, Body::from(bytes));
+        }
         if request.extensions().get::<MatchedPath>()
             .is_some_and(|route| source_missing_write_action(route.as_str(), request.method())) {
             return rails_error_response(StatusCode::NOT_FOUND, request.headers(), request.uri());
@@ -3745,7 +3769,7 @@ async fn reject_banned_ip(
             && request.method() == Method::POST
             && session_token(&s, request.headers()).is_none();
         let session_post_preauth = if path == "/session" && request.method() == Method::POST {
-            match user(&s, request.headers()) {
+            match user_without_activity_refresh(&s, request.headers()) {
                 Ok(_) => false,
                 Err(StatusCode::UNAUTHORIZED) => true,
                 Err(code) => return code.into_response(),
@@ -3753,11 +3777,19 @@ async fn reject_banned_ip(
         } else {
             false
         };
-        let preauth_route = (path == "/first_run"
+        let preauth_route_candidate = path == "/first_run"
             || session_post_preauth
             || path.starts_with("/join/")
-            || path.starts_with("/session/transfers/"))
-            && !matches!(user(&s, request.headers()), Ok(_));
+            || path.starts_with("/session/transfers/");
+        let preauth_route = preauth_route_candidate
+            && !matches!(
+                if path.starts_with("/join/") {
+                    user(&s, request.headers())
+                } else {
+                    user_without_activity_refresh(&s, request.headers())
+                },
+                Ok(_)
+            );
         let csrf = if path.starts_with("/rails/active_storage/disk/") && request.method() == Method::PUT {
             None
         } else if anonymous_direct_upload {
@@ -3820,7 +3852,12 @@ async fn reject_banned_ip(
                         false
                     };
                     if !form_valid {
-                        if !anonymous_direct_upload && !path.starts_with("/rails/active_storage/") {
+                        let source_restores_authentication = !anonymous_direct_upload
+                            && !path.starts_with("/rails/active_storage/")
+                            && !(path == "/session" && parts.method == Method::POST)
+                            && path != "/first_run"
+                            && !path.starts_with("/session/transfers/");
+                        if source_restores_authentication {
                             match user(&s, &parts.headers) {
                                 Ok(_) | Err(StatusCode::UNAUTHORIZED) => {}
                                 Err(error) => return error.into_response(),

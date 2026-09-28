@@ -19,6 +19,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_bot_admin import request
 from paired_direct_upload import PAYLOAD, path_from_url, raw_request
 from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
+from paired_profile import transfer_path
 
 
 REPOSITORY = pathlib.Path("/tmp/once-campfire-reference")
@@ -166,6 +167,66 @@ def rejected_csrf_activity(port, database, session_id, cookie):
     return saved != original
 
 
+def signed_in_relogin(port, database, session_id, cookie):
+    status, _, page = request(port, "GET", "/account/edit", cookie, "")
+    assert status == 200, status
+    csrf = re.search(rb'<meta name=[\'\"]csrf-token[\'\"] content=[\'\"]([^\'\"]+)', page)
+    assert csrf, "signed-in CSRF token missing"
+    original = set_metadata(database, session_id, timedelta(hours=2))
+    with sqlite3.connect(database) as db:
+        before_count = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=1").fetchone()[0]
+    fields = urllib.parse.urlencode({
+        "email_address": "benchmark@example.invalid", "password": "benchmark-password",
+        "authenticity_token": csrf.group(1).decode(),
+    }).encode()
+    status, location, _ = request(
+        port, "POST", "/session", cookie, csrf.group(1).decode(), fields,
+        "application/x-www-form-urlencoded", {"User-Agent": NEW_AGENT, "X-Forwarded-For": NEW_IP},
+    )
+    assert status == 302, (status, location)
+    with sqlite3.connect(database) as db:
+        after_count = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=1").fetchone()[0]
+    assert after_count == before_count + 1, (before_count, after_count)
+    return metadata(database, session_id) != original
+
+
+def public_route_activity(port, database, session_id, cookie):
+    status, _, page = request(port, "GET", "/account/edit", cookie, "")
+    assert status == 200, status
+    csrf = re.search(rb'<meta name=[\'\"]csrf-token[\'\"] content=[\'\"]([^\'\"]+)', page)
+    assert csrf, "signed-in CSRF token missing"
+    profile_status, _, profile = request(port, "GET", "/users/me/profile", cookie, "")
+    assert profile_status == 200, profile_status
+    valid_transfer = transfer_path(profile)
+    with sqlite3.connect(database) as db:
+        join_code = db.execute("SELECT join_code FROM accounts WHERE id=1").fetchone()[0]
+    cases = (
+        ("repeat setup", "POST", "/first_run", csrf.group(1).decode(), b"", {}),
+        ("bad transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"", {}),
+        ("put override transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"_method=put", {}),
+        ("patch override transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"_method=patch", {}),
+        ("header override transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"", {"X-HTTP-Method-Override": "PUT"}),
+        ("valid transfer override", "POST", valid_transfer, csrf.group(1).decode(), b"_method=put", {}),
+        ("bad login CSRF", "POST", "/session", "incorrect-csrf",
+         b"email_address=benchmark%40example.invalid&password=benchmark-password", {}),
+        ("signed-in join", "GET", f"/join/{join_code}", "", b"", {}),
+    )
+    observations = {}
+    for name, method, path, token, body, additional_headers in cases:
+        original = set_metadata(database, session_id, timedelta(hours=2))
+        with sqlite3.connect(database) as db:
+            before_count = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=1").fetchone()[0]
+        status, location, _ = request(
+            port, method, path, cookie, token, body,
+            "application/x-www-form-urlencoded" if method == "POST" else None,
+            {"User-Agent": NEW_AGENT, "X-Forwarded-For": NEW_IP, **additional_headers},
+        )
+        with sqlite3.connect(database) as db:
+            after_count = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=1").fetchone()[0]
+        observations[name] = status, urllib.parse.urlsplit(location).path if location else None, metadata(database, session_id) != original, after_count - before_count
+    return observations
+
+
 def main():
     revision = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=REPOSITORY, text=True).strip()
     assert revision == REVISION, revision
@@ -186,6 +247,8 @@ def main():
             rust_result = exercise(rust_port, rust_db, rust_session, rust_cookie)
             rust_storage = active_storage_without_refresh(rust_port, rust_db, rust_session, rust_cookie)
             rust_rejected = rejected_csrf_activity(rust_port, rust_db, rust_session, rust_cookie)
+            rust_relogin = signed_in_relogin(rust_port, rust_db, rust_session, rust_cookie)
+            rust_public = public_route_activity(rust_port, rust_db, rust_session, rust_cookie)
         finally:
             stop_server(rust_process)
         with (temp / "puma.log").open("w+") as log:
@@ -199,6 +262,8 @@ def main():
                 camp_result = exercise(camp_port, camp_db, camp_session, cookie)
                 camp_storage = active_storage_without_refresh(camp_port, camp_db, camp_session, cookie)
                 camp_rejected = rejected_csrf_activity(camp_port, camp_db, camp_session, cookie)
+                camp_relogin = signed_in_relogin(camp_port, camp_db, camp_session, cookie)
+                camp_public = public_route_activity(camp_port, camp_db, camp_session, cookie)
             except Exception:
                 log.flush()
                 log.seek(0)
@@ -206,9 +271,11 @@ def main():
                 raise
             finally:
                 stop_server(camp_process)
-    assert rust_result == camp_result and rust_storage == camp_storage and rust_rejected == camp_rejected, (rust_rejected, camp_rejected)
+    assert rust_result == camp_result and rust_storage == camp_storage and rust_rejected == camp_rejected and rust_relogin == camp_relogin and rust_public == camp_public, (rust_rejected, camp_rejected, rust_relogin, camp_relogin, rust_public, camp_public)
     print("PASS paired session creation and resume:", rust_result, ";", rust_storage,
-          "; rejected CSRF refreshed session:", rust_rejected)
+          "; rejected CSRF refreshed session:", rust_rejected,
+          "; signed-in relogin refreshed old session:", rust_relogin,
+          "; public-route activity:", rust_public)
 
 
 if __name__ == "__main__":
