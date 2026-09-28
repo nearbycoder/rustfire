@@ -2856,19 +2856,6 @@ fn public_url(headers: &HeaderMap, path: &str) -> String {
     };
     format!("{scheme}://{host}{path}")
 }
-fn valid_webhook_url(url: &str) -> bool {
-    if url.is_empty() {
-        return true;
-    }
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    url.len() <= 2048
-        && (parsed.scheme() == "http" || parsed.scheme() == "https")
-        && parsed.host().is_some()
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-}
 fn valid_push_endpoint(endpoint: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
@@ -11144,19 +11131,13 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, Original
     if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
-    let name = permitted_form_value(&f, "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if name.trim().is_empty() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let webhook_url = permitted_form_value(&f, "user[webhook_url]")
-        .unwrap_or("")
-        .trim();
-    if !valid_webhook_url(webhook_url) {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let Some(name) = permitted_form_value(&f, "user[name]") else {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    };
+    let webhook_url = permitted_form_value(&f, "user[webhook_url]");
     let db = pool(&s)?;
     let t = now();
-    db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,2,0,NULL,?2,?2)",params![name.trim(),t]).map_err(db_err)?;
+    db.execute("INSERT INTO users(id,name,role,status,bot_token,created_at,updated_at) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM users))+1 FROM id_sequences WHERE name='users'),?1,2,0,NULL,?2,?2)",params![name,t]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     let bot_token = generate_bot_token()?;
     db.execute(
@@ -11164,7 +11145,7 @@ async fn bot_create(State(s): State<Arc<AppState>>, headers: HeaderMap, Original
         params![bot_token, id],
     )
     .map_err(db_err)?;
-    if !webhook_url.is_empty() {
+    if let Some(webhook_url) = webhook_url {
         db.execute(
             "INSERT INTO webhooks(user_id,url) VALUES(?1,?2)",
             params![id, webhook_url],
@@ -11249,23 +11230,16 @@ async fn bot_update(
     }
     active_bot(&s, id)?;
     let (f, avatar) = bot_fields(&s, &headers, req).await?;
-    let name = permitted_form_value(&f, "user[name]").ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if name.trim().is_empty() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    let webhook_url = permitted_form_value(&f, "user[webhook_url]").map(str::trim);
-    if webhook_url.is_some_and(|url| !valid_webhook_url(url)) {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let name = permitted_form_value(&f, "user[name]");
+    let webhook_url = permitted_form_value(&f, "user[webhook_url]");
     let db = pool(&s)?;
-    let changed = db.execute(
-        "UPDATE users SET name=?1,updated_at=?2 WHERE id=?3 AND role=2 AND status=0 AND bot_token IS NOT NULL",
-        params![name.trim(),now(),id],
-    ).map_err(db_err)?;
-    if changed == 0 {
-        return Err(StatusCode::NOT_FOUND);
+    if let Some(name) = name {
+        db.execute(
+            "UPDATE users SET name=?1,updated_at=?2 WHERE id=?3 AND role=2 AND status=0 AND bot_token IS NOT NULL",
+            params![name,now(),id],
+        ).map_err(db_err)?;
     }
-    if let Some(url) = webhook_url.filter(|url| !url.is_empty()) {
+    if let Some(url) = webhook_url.filter(|url| !url.trim().is_empty()) {
         db.execute("INSERT INTO webhooks(user_id,url) VALUES(?1,?2) ON CONFLICT(user_id) DO UPDATE SET url=excluded.url",params![id,url]).map_err(db_err)?;
     } else {
         db.execute("DELETE FROM webhooks WHERE user_id=?1", [id])
