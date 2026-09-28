@@ -120,6 +120,11 @@ def room_state(database, room_id):
         ).fetchone()[0]
 
 
+def membership_updated_at(database, room_id):
+    with sqlite3.connect(database) as db:
+        return db.execute("SELECT updated_at FROM memberships WHERE room_id=? AND user_id=1", (room_id,)).fetchone()[0]
+
+
 def workflow(port, cookie, csrf, database):
     observations = []
     for room_id, kind, levels in (
@@ -151,11 +156,20 @@ def workflow(port, cookie, csrf, database):
                     rejected.append((label, invalid_status, room_state(database, room_id)))
                 assert rejected == [("plain-post", 404, current), ("delete-override", 404, current)], rejected
                 observations.append(("rejected", rejected))
+                unchanged_at = membership_updated_at(database, room_id)
+                same_body = urllib.parse.urlencode({"_method": "put", "authenticity_token": csrf}).encode()
+                same_status, _, _ = request(port, "POST", f"{path}?involvement={current}", cookie, csrf, body=same_body)
+                same_touched = membership_updated_at(database, room_id) != unchanged_at
+                assert same_status == 302 and not same_touched, (same_status, same_touched)
+                observations.append(("unchanged involvement", same_status, same_touched))
+            previous_at = membership_updated_at(database, room_id)
             body = urllib.parse.urlencode({"_method": "put", "authenticity_token": csrf}).encode()
             status, location, _ = request(port, "POST", action, cookie, csrf, body=body)
             assert status == 302 and urllib.parse.urlsplit(location).path == path, (status, location)
             assert room_state(database, room_id) == following
-            observations.append((room_id, current, following, events))
+            changed_touched = membership_updated_at(database, room_id) != previous_at
+            assert changed_touched, (room_id, current, following)
+            observations.append((room_id, current, following, events, changed_touched))
     return observations
 
 

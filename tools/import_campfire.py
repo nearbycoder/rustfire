@@ -146,8 +146,8 @@ def import_data(source, target, source_files, uploads):
             target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name=?", (high_water[0], table))
     counts["memberships"] = copy_table(
         source, target, "memberships",
-        ("id", "room_id", "user_id", "involvement", "unread_at", "created_at"),
-        "SELECT id,room_id,user_id,COALESCE(involvement,'mentions'),unread_at,created_at FROM memberships",
+        ("id", "room_id", "user_id", "involvement", "unread_at", "created_at", "updated_at"),
+        "SELECT id,room_id,user_id,COALESCE(involvement,'mentions'),unread_at,created_at,updated_at FROM memberships",
     )
     counts["webhooks"] = copy_table(
         source, target, "webhooks", ("user_id", "url"),

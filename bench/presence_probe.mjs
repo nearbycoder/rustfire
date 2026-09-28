@@ -16,7 +16,7 @@ function sql(statement, parameters = []) {
   const program = 'import json,sqlite3,sys;db=sqlite3.connect(sys.argv[1]);statement=sys.argv[2];parameters=json.loads(sys.argv[3]);cursor=db.execute(statement,parameters);row=cursor.fetchone() if statement.lower().startswith("select") else None;db.commit();print(json.dumps(row))';
   return JSON.parse(execFileSync('python', ['-c', program, database, statement, JSON.stringify(parameters)], { encoding: 'utf8' }));
 }
-const state = () => sql('select connections,connected_at,unread_at from memberships where room_id=1 and user_id=1');
+const state = () => sql('select connections,connected_at,unread_at,updated_at from memberships where room_id=1 and user_id=1');
 async function until(check, description) {
   for (let index = 0; index < 100; index++) {
     if (check()) return;
@@ -116,13 +116,15 @@ try {
         const current = state();
         return current[0] === expectedConnections && (name !== 'refresh' || current[1] !== previous[1]);
       }, `${name} action`);
-      const [connections, connectedAt, unreadAt] = state();
-      stages.push([name, connections, connectedAt !== null, unreadAt === null]);
+      const [connections, connectedAt, unreadAt, updatedAt] = state();
+      stages.push([name, connections, connectedAt !== null, unreadAt === null, updatedAt !== previous[3]]);
     };
+    const beforeSubscribe = state()[3];
     send({ command: 'subscribe', identifier: first });
     await confirm(first);
     await readEvent();
     await until(() => state()[0] === 1, 'initial presence');
+    const initialPresentTouched = state()[3] !== beforeSubscribe;
     sql('update memberships set unread_at=? where room_id=1 and user_id=1', ['2025-01-01 00:00:00']);
     await action('present', 2);
     await readEvent();
@@ -137,7 +139,7 @@ try {
     const [connections, connectedAt] = state();
     const unexpectedReadEvents = frames.filter(frame => frame.identifier === read && frame.message?.room_id === 1).length;
     if (unexpectedReadEvents) throw new Error(`Unexpected read events after refresh/absent: ${unexpectedReadEvents}`);
-    console.log(JSON.stringify({ stages, final: [connections, connectedAt !== null], extraReadEvents: 1 }));
+    console.log(JSON.stringify({ initialPresentTouched, stages, final: [connections, connectedAt !== null], extraReadEvents: 1 }));
   } else if (args.mode === 'stale') {
     const staleTime = '2020-01-01 00:00:00';
     const marker = '2025-01-01 00:00:00';

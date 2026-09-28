@@ -3553,10 +3553,10 @@ fn presence_update(s: &AppState, uid: i64, rid: i64, action: &str) -> Result<(),
             db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN connections+1 ELSE 1 END,connected_at=?2,unread_at=NULL WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         "refresh" => {
-            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN connections ELSE 1 END,connected_at=?2 WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
+            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN connections ELSE 1 END,connected_at=?2,updated_at=?2 WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         "absent" => {
-            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN MAX(0,connections-1) ELSE 0 END,connected_at=CASE WHEN connected_at>=?1 AND connections>1 THEN connected_at ELSE NULL END WHERE room_id=?2 AND user_id=?3",params![cutoff,rid,uid]).map_err(db_err)?;
+            db.execute("UPDATE memberships SET connections=CASE WHEN connected_at>=?1 THEN MAX(0,connections-1) ELSE 0 END,connected_at=CASE WHEN connected_at>=?1 AND connections>1 THEN connected_at ELSE NULL END,updated_at=?2 WHERE room_id=?3 AND user_id=?4",params![cutoff,current,rid,uid]).map_err(db_err)?;
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     }
@@ -6024,8 +6024,8 @@ async fn involvement_post(
         )
         .map_err(db_err)?;
     tx.execute(
-        "UPDATE memberships SET involvement=?1 WHERE room_id=?2 AND user_id=?3",
-        params![involvement, rid, u.id],
+        "UPDATE memberships SET involvement=?1,updated_at=CASE WHEN involvement IS ?1 THEN updated_at ELSE ?4 END WHERE room_id=?2 AND user_id=?3",
+        params![involvement, rid, u.id, now()],
     )
     .map_err(db_err)?;
     tx.commit().map_err(db_err)?;
@@ -6624,7 +6624,7 @@ fn insert_message(
         }
     }
     let cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
-    db.execute("UPDATE memberships SET unread_at=?1 WHERE room_id=?2 AND user_id!=?3 AND involvement!='invisible' AND (connected_at IS NULL OR connected_at<?4)", params![t, rid, u.id, cutoff]).map_err(db_err)?;
+    db.execute("UPDATE memberships SET unread_at=?1,updated_at=?5 WHERE room_id=?2 AND user_id!=?3 AND involvement!='invisible' AND (connected_at IS NULL OR connected_at<?4)", params![t, rid, u.id, cutoff, now()]).map_err(db_err)?;
     let mut attachment_processing_failed = false;
     let attachment = if let Some(file) = upload {
         let dir = env::var("RUSTFIRE_UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".into());
@@ -13276,7 +13276,7 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS failed_webhook_jobs(job_id INTEGER PRIMARY KEY,bot_id INTEGER NOT NULL,message_id INTEGER NOT NULL,error TEXT NOT NULL,created_at TEXT NOT NULL,failed_at TEXT NOT NULL,retried_at TEXT);
         CREATE TABLE IF NOT EXISTS session_transfers(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY,name TEXT,type TEXT NOT NULL,creator_id INTEGER NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,UNIQUE(room_id,user_id));
+        CREATE TABLE IF NOT EXISTS memberships(id INTEGER PRIMARY KEY,room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,involvement TEXT DEFAULT 'mentions',unread_at TEXT,created_at TEXT NOT NULL,updated_at TEXT,UNIQUE(room_id,user_id));
         CREATE TABLE IF NOT EXISTS direct_room_sets(room_id INTEGER PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,member_ids TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_direct_room_sets_members ON direct_room_sets(member_ids);
         CREATE INDEX IF NOT EXISTS idx_rooms_type ON rooms(type);
@@ -13450,6 +13450,19 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
             END;")?;
         tx.commit()?;
     }
+    let has_membership_updated_at: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memberships') WHERE name='updated_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_membership_updated_at {
+        conn.execute("ALTER TABLE memberships ADD COLUMN updated_at TEXT", [])?;
+        conn.execute("UPDATE memberships SET updated_at=created_at WHERE updated_at IS NULL", [])?;
+    }
+    conn.execute_batch("CREATE TRIGGER IF NOT EXISTS membership_insert_updated_at AFTER INSERT ON memberships
+        WHEN new.updated_at IS NULL BEGIN
+            UPDATE memberships SET updated_at=new.created_at WHERE id=new.id;
+        END;")?;
     let has_body_html: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='body_html')",
         [],
@@ -13727,7 +13740,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let presence_cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
-    db.get()?.execute("UPDATE memberships SET connections=0,connected_at=NULL WHERE connected_at>=?1", [presence_cutoff])?;
+    db.get()?.execute("UPDATE memberships SET connections=0,connected_at=NULL,updated_at=?2 WHERE julianday(connected_at)>=julianday(?1)", params![presence_cutoff,now()])?;
     let custom_styles: Option<String> = db
         .get()?
         .query_row("SELECT custom_styles FROM accounts LIMIT 1", [], |row| row.get(0))
@@ -14518,12 +14531,12 @@ mod tests {
         }
         super::init_db(&db).unwrap();
         let conn = db.get().unwrap();
-        let preserved: (i64, String, i64) = conn.query_row(
-            "SELECT id,involvement,connections FROM memberships WHERE room_id=1 AND user_id=1",
+        let preserved: (i64, String, i64, String) = conn.query_row(
+            "SELECT id,involvement,connections,updated_at FROM memberships WHERE room_id=1 AND user_id=1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ).unwrap();
-        assert_eq!(preserved, (7, "everything".to_string(), 0));
+        assert_eq!(preserved, (7, "everything".to_string(), 0, "2026-01-01".to_string()));
         conn.execute("UPDATE memberships SET involvement=NULL WHERE id=7", []).unwrap();
         let involvement: Option<String> = conn.query_row("SELECT involvement FROM memberships WHERE id=7", [], |r| r.get(0)).unwrap();
         assert_eq!(involvement, None);

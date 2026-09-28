@@ -33,6 +33,11 @@ def membership_state(database):
         return db.execute("SELECT connections,connected_at FROM memberships WHERE room_id=1 AND user_id=1").fetchone()
 
 
+def membership_updated_at(database):
+    with sqlite3.connect(database) as db:
+        return db.execute("SELECT updated_at FROM memberships WHERE room_id=1 AND user_id=1").fetchone()[0]
+
+
 def capture(port, cookie, database, mode=None):
     command = [
         "node", "bench/presence_probe.mjs", "--base", f"http://127.0.0.1:{port}",
@@ -61,11 +66,13 @@ def main():
         camp_env["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         seed_active_membership(rust_db, False)
         seed_active_membership(camp_db, True)
+        rust_before_start = membership_updated_at(rust_db)
+        camp_before_start = membership_updated_at(camp_db)
         redis, redis_log = start_redis(temp, redis_port)
         try:
             rust = start_server(rust_db, rust_port)
             try:
-                rust_startup = membership_state(rust_db)
+                rust_startup = membership_state(rust_db), membership_updated_at(rust_db) != rust_before_start
                 reset_membership(rust_db)
                 rust_result = capture(rust_port, "session_token=benchmark-session", rust_db)
                 rust_stale = capture(rust_port, "session_token=benchmark-session", rust_db, "stale")
@@ -79,7 +86,7 @@ def main():
                 )
                 try:
                     wait_for_server(camp_port, camp)
-                    camp_startup = membership_state(camp_db)
+                    camp_startup = membership_state(camp_db), membership_updated_at(camp_db) != camp_before_start
                     reset_membership(camp_db)
                     cookie, _ = login_campfire(camp_port)
                     camp_result = capture(camp_port, cookie, camp_db)

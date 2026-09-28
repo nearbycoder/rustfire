@@ -170,7 +170,7 @@ def post(port, cookie, csrf, index):
 
 def member_state(database):
     with sqlite3.connect(database) as db:
-        return db.execute("SELECT unread_at FROM memberships WHERE room_id=1 AND user_id=2").fetchone()[0]
+        return db.execute("SELECT unread_at,updated_at FROM memberships WHERE room_id=1 AND user_id=2").fetchone()
 
 
 def set_member(database, campfire, involvement, connection):
@@ -211,13 +211,17 @@ def exercise(port, database, cookies, csrf, campfire):
             for involvement, connection, expected_unread in cases:
                 index += 1
                 set_member(database, campfire, involvement, connection)
+                before_updated_at = member_state(database)[1]
                 post(port, cookies[0], csrf, index)
                 author_event, member_event = sockets[0].unread(), sockets[1].unread()
                 assert author_event == member_event == {"roomId": 1}, (author_event, member_event)
                 sockets[2].assert_no_unread()
-                saved = member_state(database) is not None
+                unread_at, updated_at = member_state(database)
+                saved = unread_at is not None
+                touched = updated_at != before_updated_at
                 assert saved == expected_unread, (kind, index, saved)
-                results.append({"room_kind": kind, "member_connection": connection, "involvement": involvement, "unread_saved": saved, "member_events": 2, "outsider_events": 0})
+                assert touched == expected_unread, (kind, index, touched)
+                results.append({"room_kind": kind, "member_connection": connection, "involvement": involvement, "unread_saved": saved, "membership_touched": touched, "member_events": 2, "outsider_events": 0})
         return results
     finally:
         for client in sockets:
