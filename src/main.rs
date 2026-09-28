@@ -3118,7 +3118,10 @@ async fn unfurl_url(input: &str) -> Option<Value> {
     } else {
         None
     };
-    Some(json!({"title":title,"url":canonical,"description":description,"image":image}))
+    // Rendering the ActiveModel instance in Campfire also serializes these
+    // validation fields into every successful preview response.
+    Some(json!({"title":title,"url":canonical,"description":description,"image":image,
+        "context_for_validation":{"context":null},"errors":{}}))
 }
 #[derive(Debug, PartialEq, Eq)]
 enum UnfurlUrlParam {
