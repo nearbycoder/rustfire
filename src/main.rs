@@ -4100,9 +4100,12 @@ async fn session_post(
     OriginalUri(uri): OriginalUri,
     RawForm(raw): RawForm,
 ) -> AppResult {
-    let values = fields(&raw).0;
+    let mut values = fields(&raw).0;
     if values.get("_method").map(String::as_str) == Some("delete") {
         return logout(State(s), headers, raw).await;
+    }
+    if let Some(query) = uri.query() {
+        values.extend(fields(query.as_bytes()).0);
     }
     let email_address = values
         .get("email_address")
