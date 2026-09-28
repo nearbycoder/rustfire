@@ -228,6 +228,8 @@ A paired 30-second repeat at seven JPEG uploads/s subscribed each of 100 sockets
 
 A paired generic-file composer benchmark warmed each client connection, then checked every response and stored file in 8 MiB upload bursts at 4, 16, and 64 clients in both server orders. Rustfire completed 11.23–25.99× as many uploads per second in these short trials. A separate 16-client run authenticated only by the hidden multipart CSRF field measured 14.71–16.74× Rustfire throughput in both server orders, and a one-client 129 MiB form-only upload passed both apps' response and file checks. No sockets subscribed, and the bursts do not establish sustained upload capacity or full side-effect parity; see `bench/RESULTS.md` for the measurements and limits.
 
+A separate bot API benchmark verified every 8 MiB generic-file upload and saved SHA-256 at 32 and 64 concurrent clients in both server orders. Rustfire completed **6.65–10.38×** as many uploads per second at 32 clients and **9.79–10.22×** at 64 clients, with lower p95 latency and sampled peak PSS. The [paired reports](../bench/RESULTS.md#paired-bot-file-upload-bursts) cover this one-bot, one-room burst; they do not establish sustained or whole-app capacity.
+
 ## Checks
 
 ```sh

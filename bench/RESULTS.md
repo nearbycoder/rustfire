@@ -2027,3 +2027,16 @@ On commit `c17cac1`, `python bench/paired_login_capacity.py` ran checked sign-in
 | 64 / 240 | Rustfire first | 109.00 | 150.91 | 1.38× | 1,107.07 / 623.59 ms |
 
 Full reports: [32 clients, Campfire first](results/login-capacity-32x128-camp-first.json), [32 clients, Rustfire first](results/login-capacity-32x128-rust-first.json), [64 clients, Campfire first](results/login-capacity-64x240-camp-first.json), and [64 clients, Rustfire first](results/login-capacity-64x240-rust-first.json). Before commit `c17cac1`, the 8-client/32-login pilot passed, but a 32-client/128-login run timed out on one Rustfire POST after 30 seconds. The sign-in handler then released its pooled database connection before bcrypt verification and moved the rate-limit transaction and bcrypt work to blocking threads. The failing pre-change attempt produced no complete paired report and is not a quantified speed comparison. These measured intervals lasted 1.00–2.20 seconds per app, with server startup excluded and the load clients sharing the host. The results establish checked burst throughput for this sign-in path, not a sustained or whole-app capacity advantage.
+
+## Paired bot file-upload bursts
+
+`python bench/paired_bot_upload_capacity.py` sent the same 8 MiB `application/octet-stream` multipart file through one bot key to one room. Each persistent client warmed once, then sent eight timed uploads. Every response was HTTP 201 with a distinct message ID, and every saved original file in both apps matched the source payload SHA-256. Campfire ran 22 Puma workers plus isolated Redis; Rustfire ran one release process. Both ran serially in each server order on the same 32-logical-CPU host and `/tmp` filesystem. Server PSS includes Campfire's worker tree and Redis or Rustfire's process, excluding the load client.
+
+| Clients | Server order | Timed uploads | Campfire uploads/s | Rustfire uploads/s | Rustfire / Campfire | p95 ms, Campfire / Rustfire | Sampled peak PSS MiB, Campfire / Rustfire |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | Campfire first | 256 | 67.76 | 703.60 | 10.38× | 933.39 / 89.58 | 4,509 / 895 |
+| 32 | Rustfire first | 256 | 78.37 | 521.46 | 6.65× | 911.86 / 81.34 | 4,114 / 842 |
+| 64 | Campfire first | 512 | 84.16 | 823.73 | 9.79× | 1,530.16 / 162.39 | 5,989 / 1,483 |
+| 64 | Rustfire first | 512 | 81.72 | 835.20 | 10.22× | 1,468.11 / 163.69 | 5,442 / 1,311 |
+
+The [32-client Campfire-first](results/bot-upload-32c8m-camp-first.json), [32-client Rustfire-first](results/bot-upload-32c8m-rust-first.json), [64-client Campfire-first](results/bot-upload-64c8m-camp-first.json), and [64-client Rustfire-first](results/bot-upload-64c8m-rust-first.json) reports retain exact elapsed time, bytes/s, CPU time, PSS samples, and response latencies. These were short bursts: Rustfire's timed intervals lasted 0.36–0.62 seconds and Campfire's 3.27–6.27 seconds, with warmup and server startup excluded. This demonstrates higher checked throughput at these client counts for generic bot files on this host, not a sustained maximum, performance with image analysis, webhook or socket load, separate load hosts, or a whole-app advantage at complete parity.
