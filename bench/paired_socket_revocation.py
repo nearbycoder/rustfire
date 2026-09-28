@@ -70,6 +70,12 @@ def rejected_reconnect(port, cookie):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def presence_state(database):
+    with sqlite3.connect(database) as db:
+        row = db.execute("SELECT connections,connected_at FROM memberships WHERE room_id=1 AND user_id=2").fetchone()
+    return None if row is None else (row[0], row[1] is None)
+
+
 def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, other_cookie, action):
     with sqlite3.connect(database) as db:
         initial_sessions = db.execute("SELECT COUNT(*) FROM sessions WHERE user_id=2").fetchone()[0]
@@ -78,6 +84,7 @@ def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, ot
     try:
         # Action Cable installs its remote-disconnect subscriber asynchronously.
         time.sleep(0.5)
+        assert presence_state(database) == (2, False), (action, presence_state(database))
         if action == "ban":
             status, location, response = request(port, "POST", "/users/2/ban", admin_cookie, admin_csrf)
             expected = "/users/2"
@@ -110,6 +117,12 @@ def run(port, database, admin_cookie, admin_csrf, member_cookie, member_csrf, ot
         if action == "membership":
             with sqlite3.connect(database) as db:
                 assert db.execute("SELECT COUNT(*) FROM memberships WHERE room_id=1 AND user_id=2").fetchone()[0] == 0
+        expected_presence = None if action in ("deactivate", "membership") else (0, True)
+        deadline = time.monotonic() + 2
+        while presence_state(database) != expected_presence and time.monotonic() < deadline:
+            time.sleep(0.02)
+        observed["presence_after"] = presence_state(database)
+        assert observed["presence_after"] == expected_presence, (action, observed["presence_after"])
         observed["reconnect"] = [({"http_status": reconnect_status(port, cookie)}
                                   if action == "membership" or (action == "signout" and cookie == other_cookie)
                                   else rejected_reconnect(port, cookie))
@@ -178,8 +191,10 @@ def main():
     assert revision == REVISION, revision
     for action in ("ban", "deactivate", "signout", "membership"):
         rust, camp = paired_action(action)
-        print(action, json.dumps({"rustfire": rust, "campfire": camp}, sort_keys=True))
+        if rust != camp:
+            print(action, json.dumps({"rustfire": rust, "campfire": camp}, sort_keys=True))
         assert rust == camp, f"{action} socket revocation differs"
+        print(f"{action}: two four-channel sockets closed cleanly; administrator stayed connected; presence={rust['presence_after']}")
     print("PASS paired ban, deactivate, sign-out, and membership Action Cable revocation")
 
 
