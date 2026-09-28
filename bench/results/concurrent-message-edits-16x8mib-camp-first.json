@@ -1,0 +1,24 @@
+{
+  "campfire": {
+    "edit_and_purge_s": 3.402,
+    "edits": 16,
+    "edits_per_s": 25.81,
+    "elapsed_s": 0.62,
+    "median_ms": 537.15,
+    "p95_ms": 618.12,
+    "purge_drain_s": 2.782
+  },
+  "campfire_workers": 22,
+  "clients": 16,
+  "file_mib": 8,
+  "rustfire": {
+    "edit_and_purge_s": 0.904,
+    "edits": 16,
+    "edits_per_s": 454.84,
+    "elapsed_s": 0.035,
+    "median_ms": 25.3,
+    "p95_ms": 33.43,
+    "purge_drain_s": 0.869
+  },
+  "rustfire_first": false
+}

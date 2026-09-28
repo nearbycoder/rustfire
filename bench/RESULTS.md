@@ -1790,3 +1790,18 @@ Rustfire now stores a replaced attachment record and durable SQLite jobs, preser
 A 129 MiB plus one byte multipart text-file replacement exposed Rustfire's 128 MiB default body limit on message edit routes: Campfire returned 302 and saved the original bytes, while Rustfire returned 400 and retained the old attachment. Rustfire now streams those edit bodies under the route without that limit. Its CSRF middleware also lets the edit handler validate a form token as the attachment streams, matching the existing message-create path.
 
 `python bench/paired_message_parameter_edges.py --edit-large` and `--edit-large --large-post` now match the pinned source in response, saved attachment name/type/SHA-256, unchanged message text, and updated timestamp. Both forms also match with `--form-csrf-only`, without an `X-CSRF-Token` header. With `--invalid-form-csrf`, both match Campfire's rejection and retain the old attachment and timestamp. The direct PATCH case matches the parsed replacement stream with `--edit-stream`. The 7/7 ordinary multipart PATCH and 5/5 POST edit-stream probes, 52 Rust unit tests, and smoke suite passed after the change. These are single-upload fixtures on the same host; they do not establish concurrent large-upload capacity, larger file limits, or sustained performance.
+
+## Concurrent attachment replacements and purge
+
+`python bench/paired_concurrent_message_edits.py` seeded a separate text attachment for every client on disposable, aligned Campfire and Rustfire accounts. Each client sent a multipart PATCH for a different message at the same start signal. Campfire used 22 Puma workers plus one live Resque worker; Rustfire used one release process and its background job loop. The probe checked every 302 response, saved original-file SHA-256, unique new blob IDs, removal of every old file after the purge queues drained, and complete parsed message presentation after signed URL normalization. All cases passed in both server orders. The response burst excludes setup and later purge; the lifecycle column includes the time until all old files were removed.
+
+| Workload | Order | Rustfire response burst | Campfire response burst | Rustfire edit + purge | Campfire edit + purge |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 4 × 8 MiB | Campfire first | 0.009 s | 0.316 s | 0.824 s | 1.075 s |
+| 4 × 8 MiB | Rustfire first | 0.010 s | 0.246 s | 0.822 s | 1.053 s |
+| 16 × 8 MiB | Campfire first | 0.035 s | 0.620 s | 0.904 s | 3.402 s |
+| 16 × 8 MiB | Rustfire first | 0.045 s | 0.589 s | 0.910 s | 3.266 s |
+| 4 × 129 MiB | Campfire first | 0.078 s | 0.794 s | 0.691 s | 1.655 s |
+| 4 × 129 MiB | Rustfire first | 0.056 s | 0.811 s | 0.721 s | 1.621 s |
+
+The [16-client Campfire-first](results/concurrent-message-edits-16x8mib-camp-first.json), [16-client Rustfire-first](results/concurrent-message-edits-16x8mib-rust-first.json), [large-file Campfire-first](results/concurrent-message-edits-4x129mib-camp-first.json), and [large-file Rustfire-first](results/concurrent-message-edits-4x129mib-rust-first.json) reports retain response rates, median/p95 latency, and purge-drain times. The 4-client 8 MiB reports are saved alongside them. These are short, same-host, memory-cached bursts without WebSocket subscribers, mixed traffic, or resource sampling. They show an advantage for the tested concurrent edit lifecycle, not a sustained throughput or whole-app capacity limit.
