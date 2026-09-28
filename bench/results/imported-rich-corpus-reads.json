@@ -1,0 +1,131 @@
+{
+  "date": "2026-09-28",
+  "campfire_commit": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "rustfire_commit": "7923f05b3c3745c68629bf839dd79c5e51ebcfb7",
+  "command": "python bench/paired_import_rich_corpus.py --read-clients 32 128 --seconds 5 --campfire-workers 22 --report bench/results/imported-rich-corpus-reads.json",
+  "fixture": "66 imported rich messages; latest 40-message room page",
+  "seconds": 5.0,
+  "campfire_workers": 22,
+  "trials": [
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 5.551685936,
+      "successes": 287,
+      "errors": 0,
+      "rps": 51.69600789895979,
+      "median_ms": 399.061235,
+      "p95_ms": 1342.617454,
+      "p99_ms": 1825.237325
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 5.005214555,
+      "successes": 12165,
+      "errors": 0,
+      "rps": 2430.4652410649755,
+      "median_ms": 14.096043,
+      "p95_ms": 19.388384,
+      "p99_ms": 20.873203
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 5.009416142,
+      "successes": 11713,
+      "errors": 0,
+      "rps": 2338.1966416796045,
+      "median_ms": 14.476472,
+      "p95_ms": 20.472663,
+      "p99_ms": 22.270492
+    },
+    {
+      "clients": 32,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 5.338342212,
+      "successes": 268,
+      "errors": 0,
+      "rps": 50.202851251754865,
+      "median_ms": 617.919873,
+      "p95_ms": 1041.526107,
+      "p99_ms": 1128.573577
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Campfire",
+      "seconds": 7.832949711,
+      "successes": 348,
+      "errors": 0,
+      "rps": 44.427707675857434,
+      "median_ms": 2054.683602,
+      "p95_ms": 4242.78384,
+      "p99_ms": 5266.852615
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Campfire",
+        "Rustfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 5.044533255,
+      "successes": 13329,
+      "errors": 0,
+      "rps": 2642.2662566033573,
+      "median_ms": 47.256738,
+      "p95_ms": 76.496724,
+      "p99_ms": 92.488803
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Rustfire",
+      "seconds": 5.04322636,
+      "successes": 13366,
+      "errors": 0,
+      "rps": 2650.2875433098743,
+      "median_ms": 47.727064,
+      "p95_ms": 74.330394,
+      "p99_ms": 89.876756
+    },
+    {
+      "clients": 128,
+      "order": [
+        "Rustfire",
+        "Campfire"
+      ],
+      "app": "Campfire",
+      "seconds": 8.40400739,
+      "successes": 358,
+      "errors": 0,
+      "rps": 42.59872503515254,
+      "median_ms": 2077.236266,
+      "p95_ms": 4423.08459,
+      "p99_ms": 6422.178173
+    }
+  ]
+}

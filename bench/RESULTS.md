@@ -123,6 +123,20 @@ The parity check ran before the timed reads. One Rustfire release process and Ca
 
 The [raw report](results/imported-room-40-reads.json) preserves per-order counts and latencies. The 32-client Campfire rate varied substantially by server order; the ranges retain that variation. These trials show a speed advantage for this imported, fully populated room-page workload. They do not establish a maximum user count, hours-long stability, equal raw HTML bytes, or a whole-app advantage at full feature parity.
 
+## Imported rich-text history reads
+
+`python bench/paired_import_rich_corpus.py` posted 66 sanitizer, formatting, Unicode, entity, carriage-return, and malformed-HTML cases through pinned Campfire, then imported its stopped database. All 66 message IDs, saved ActionText bodies, and search-index rows matched. Each individual message presentation and the complete parsed head and body of the latest 40-message page and older 26-message page matched after generated-value normalization. The untimed single-client fixture's latest raw pages measured 414,463 bytes for Campfire and 369,573 for Rustfire; its older pages measured 245,479 and 235,754 bytes. Parsed parity does not mean byte-identical HTML.
+
+The paired latest-page reads ran with Campfire at 22 Puma workers and one Rustfire release process, serially in both orders on the same 32-logical-CPU host as the Go keep-alive load client. Every timed response was checked for HTTP 200, HTML media type, and 40 message roots. All 12 trials had zero checked errors. Each trial requested five seconds, but the 128-client Campfire trials took 7.83–8.40 seconds to drain; throughput uses actual elapsed time. The one-client point was a separate repeat of the fixture. The [one-client report](results/imported-rich-corpus-reads-1c.json) and [32/128-client report](results/imported-rich-corpus-reads.json) retain both orders and all counts.
+
+| Clients | Rustfire reads/s | Campfire reads/s | Rustfire / Campfire | Rustfire p95 | Campfire p95 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 347–353 | 6.0–6.3 | 55.9–58.2× | 3.75–3.78 ms | 213–225 ms |
+| 32 | 2,338–2,430 | 50.2–51.7 | 46.6–47.0× | 19.4–20.5 ms | 1,042–1,343 ms |
+| 128 | 2,642–2,650 | 42.6–44.4 | 59.5–62.2× | 74.3–76.5 ms | 4,243–4,423 ms |
+
+This corpus makes the source room page much slower than the simpler imported 40-message fixture above; the large ratio is specific to this content and configuration. The timed requests did not compare entire body bytes, and the workloads had no writes, sockets, inline media, or separate load host. They do not establish whole-app speed, sustained throughput, or maximum capacity at complete feature parity.
+
 ## Imported 41-message paging boundary
 
 `python bench/paired_import_roundtrip.py --extra-messages 39 --sample-dir /tmp/rustfire-import-41` imported 41 real Campfire messages to cross the 40-message room-page boundary. Both apps rendered the latest 40 messages in matching parsed room heads and bodies (148 and 7,499 tokens). The `before=` request returned the same single older message (179 parsed body tokens), and the `after=` request returned matching content (7,022 parsed body tokens). A request before the oldest message returned HTTP 204 in both apps. The source-signed bot avatar and message attachment paths and original bytes also matched after import.
