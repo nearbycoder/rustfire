@@ -3887,15 +3887,17 @@ async fn transfer_show(State(s): State<Arc<AppState>>, headers: HeaderMap, Path(
         .map_err(db_err)?;
     let logo_version = updated_at.map(|value| value.chars().filter(char::is_ascii_digit).take(14).collect::<String>());
     let body = format!(
-        "<form data-controller='auto-submit' method='post' action='/session/transfers/{}'><input type='hidden' name='_method' value='put'></form>",
+        "<form data-controller='auto-submit' method='post' action='/session/transfers/{}' accept-charset='UTF-8'><input type='hidden' name='_method' value='put'>",
         esc(&token)
     );
     match user(&s, &headers) {
         Ok(current) => {
             let csrf = current.csrf_token.as_deref().unwrap_or("");
-            Ok(render_source_page("Sign in on this device", &csrf_forms(&body, csrf), "", Some(&current), csrf))
+            Ok(render_source_page_sections_with_logo(
+                "Rustfire", &body, "", "", "", "", "", "", "", None, csrf, logo_version.as_deref()
+            ))
         }
-        Err(StatusCode::UNAUTHORIZED) => Ok(render_unauth("Sign in on this device", &body, logo_version.as_deref())),
+        Err(StatusCode::UNAUTHORIZED) => Ok(render_unauth("Rustfire", &body, logo_version.as_deref())),
         Err(status) => Err(status),
     }
 }

@@ -3,6 +3,7 @@
 import http.cookiejar
 import pathlib
 import re
+import sqlite3
 import subprocess
 import tempfile
 import urllib.error
@@ -13,6 +14,7 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_profile import transfer_path
+from paired_room_shell import section
 
 
 PATHS = ("/users/me/profile?from=transfer", "/rooms/1?focus=messages")
@@ -21,6 +23,13 @@ PATHS = ("/users/me/profile?from=transfer", "/rooms/1?focus=messages")
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, destination):
         return None
+
+
+def transfer_markup(page, part):
+    normalized = re.sub(rb"/session/transfers/[A-Za-z0-9_-]+--[0-9a-f]{64}", b"/session/transfers/<token>", page)
+    # The Rustfire disposable account generates a VAPID key; Campfire's source fixture is keyless.
+    normalized = re.sub(rb'<meta name="vapid-public-key" content="[^"]+">', b'<meta name="vapid-public-key">', normalized)
+    return section(normalized, part)
 
 
 def request(opener, base, path, method="GET", data=None, headers=None):
@@ -58,7 +67,11 @@ def run(port, link, path):
     second_match = re.search(rb'<meta name=["\']csrf-token["\'] content=["\']([^"\']+)', second_show)
     assert second_match, "Missing second transfer-page CSRF token"
     repeated = request(opener, base, link, "PUT", b"", {"X-CSRF-Token": second_match.group(1).decode()})
-    return (result[0], result[1]), (repeated[0], repeated[1])
+    return ((result[0], result[1]), (repeated[0], repeated[1])), (
+        transfer_markup(show, "main-content"), transfer_markup(second_show, "main-content")
+    ), (transfer_markup(show, "head"), transfer_markup(second_show, "head")), (
+        transfer_markup(show, "body"), transfer_markup(second_show, "body")
+    )
 
 
 def main():
@@ -69,6 +82,8 @@ def main():
         rust_port, camp_port, redis_port = free_port(), free_port(), free_port()
         seed_rustfire(rust_db, rust_port, [])
         environment = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3", camp_db, [], camp_port, temp)
+        with sqlite3.connect(camp_db) as source, sqlite3.connect(rust_db) as target:
+            target.execute("UPDATE users SET name=? WHERE id=1", source.execute("SELECT name FROM users WHERE id=1").fetchone())
         environment["REDIS_URL"] = f"redis://127.0.0.1:{redis_port}"
         redis, redis_log = start_redis(temp, redis_port)
         try:
@@ -103,9 +118,12 @@ def main():
             redis_log.close()
     for path, rust, camp in results:
         if rust != camp:
-            print(f"{path}: Rustfire={rust}, Campfire={camp}")
-    assert all(rust == camp and rust == ((302, path), (302, "/")) for path, rust, camp in results)
-    print(f"PASS {len(results)} device-transfer return destinations match Campfire")
+            for label, actual, expected in (("redirects", rust[0], camp[0]), ("anonymous main", rust[1][0], camp[1][0]), ("signed-in main", rust[1][1], camp[1][1]), ("anonymous head", rust[2][0], camp[2][0]), ("signed-in head", rust[2][1], camp[2][1]), ("anonymous body", rust[3][0], camp[3][0]), ("signed-in body", rust[3][1], camp[3][1])):
+                if actual != expected:
+                    first = next((index for index, pair in enumerate(zip(actual, expected)) if pair[0] != pair[1]), min(len(actual), len(expected)))
+                    print(f"{path} {label} token {first}: Rustfire={actual[first:first + 2]}, Campfire={expected[first:first + 2]}")
+    assert all(rust == camp and rust[0] == ((302, path), (302, "/")) for path, rust, camp in results)
+    print(f"PASS {len(results)} device-transfer return destinations and parsed heads/bodies match Campfire")
 
 
 if __name__ == "__main__":
