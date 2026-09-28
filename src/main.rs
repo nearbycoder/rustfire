@@ -106,7 +106,6 @@ struct AppState {
     push_queue_slots: Arc<Semaphore>,
     has_push_subscriptions: AtomicBool,
     push_delivery_enabled: bool,
-    login_attempts: Mutex<HashMap<IpAddr, VecDeque<std::time::Instant>>>,
     variant_slots: Arc<Semaphore>,
 }
 #[derive(Clone)]
@@ -4277,6 +4276,24 @@ struct Login {
     email_address: String,
     password: String,
 }
+fn login_rate_limited(s: &AppState, ip: IpAddr) -> Result<bool, StatusCode> {
+    let mut db = pool(s)?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    let current_ms = Utc::now().timestamp_millis();
+    tx.execute("DELETE FROM login_rate_limits WHERE expires_at_ms<=?1", [current_ms]).map_err(db_err)?;
+    tx.execute(
+        "INSERT INTO login_rate_limits(ip_address,attempts,expires_at_ms) VALUES(?1,1,?2) \
+         ON CONFLICT(ip_address) DO UPDATE SET attempts=attempts+1",
+        params![ip.to_string(), current_ms + 180_000],
+    ).map_err(db_err)?;
+    let count: i64 = tx.query_row(
+        "SELECT attempts FROM login_rate_limits WHERE ip_address=?1",
+        [ip.to_string()],
+        |row| row.get(0),
+    ).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    Ok(count > 10)
+}
 async fn login_post(
     State(s): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -4284,28 +4301,8 @@ async fn login_post(
     Form(f): Form<Login>,
 ) -> AppResult {
     let ip = client_ip(&s.trusted_proxies, &headers, addr.ip());
-    let moment = std::time::Instant::now();
-    {
-        let mut attempts = s.login_attempts.lock().unwrap();
-        if attempts.len() > 10_000 {
-            attempts.retain(|_, times| {
-                times.retain(|time| {
-                    moment.duration_since(*time) < std::time::Duration::from_secs(180)
-                });
-                !times.is_empty()
-            });
-        }
-        let times = attempts.entry(ip).or_default();
-        while times
-            .front()
-            .is_some_and(|time| moment.duration_since(*time) >= std::time::Duration::from_secs(180))
-        {
-            times.pop_front();
-        }
-        if times.len() >= 10 {
-            return login_page(&s, &headers, &f.email_address, Some(StatusCode::TOO_MANY_REQUESTS));
-        }
-        times.push_back(moment);
+    if login_rate_limited(&s, ip)? {
+        return login_page(&s, &headers, &f.email_address, Some(StatusCode::TOO_MANY_REQUESTS));
     }
     let db = pool(&s)?;
     let row: Option<(i64, Option<String>)> = db
@@ -13209,6 +13206,8 @@ fn init_db(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS webhooks(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,url TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS push_subscriptions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,endpoint TEXT NOT NULL,p256dh_key TEXT NOT NULL,auth_key TEXT NOT NULL,user_agent TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,token TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,last_active_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS login_rate_limits(ip_address TEXT PRIMARY KEY,attempts INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_login_rate_limits_expiry ON login_rate_limits(expires_at_ms);
         CREATE TABLE IF NOT EXISTS bans(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,ip_address TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(ip_address);
         CREATE TABLE IF NOT EXISTS background_jobs(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TEXT NOT NULL);
@@ -13741,7 +13740,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         has_push_subscriptions: AtomicBool::new(has_push_subscriptions),
         push_delivery_enabled: !env::var("RUSTFIRE_DISABLE_PUSH")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
-        login_attempts: Mutex::new(HashMap::new()),
         variant_slots: Arc::new(Semaphore::new(4)),
     });
     tokio::spawn(run_background_jobs(state.clone()));
