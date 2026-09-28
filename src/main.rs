@@ -5149,16 +5149,25 @@ fn reject_turbo_only_format(headers: &HeaderMap, uri: &Uri) -> Option<Response> 
     (!accept.contains("text/vnd.turbo-stream.html") && !accept.contains("*/*"))
         .then(|| not_acceptable_format(accept))
 }
-#[derive(Deserialize)]
-struct RefreshQuery {
-    since: Option<String>,
+fn ruby_integer_prefix(value: &str) -> i64 {
+    let value = value.trim_start();
+    let sign_len = usize::from(value.starts_with('+') || value.starts_with('-'));
+    let digit_len = value.as_bytes()[sign_len..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digit_len == 0 {
+        return 0;
+    }
+    value[..sign_len + digit_len]
+        .parse()
+        .unwrap_or(if value.starts_with('-') { i64::MIN } else { i64::MAX })
 }
 async fn room_refresh(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Path(room_id): Path<String>,
-    Query(q): Query<RefreshQuery>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let rid = path_record_id(&room_id)?;
@@ -5166,11 +5175,26 @@ async fn room_refresh(
     if let Some(response) = reject_turbo_only_format(&headers, &uri) {
         return Ok(response);
     }
-    let since = q.since.as_deref().and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+    let mut since = None;
+    let mut structured_since = false;
+    for (key, value) in form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()) {
+        if key == "since" {
+            since = Some(value.into_owned());
+            structured_since = false;
+        } else if key.starts_with("since[") && key.ends_with(']') {
+            if since.is_some() {
+                return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], "").into_response());
+            }
+            structured_since = true;
+        }
+    }
+    if structured_since {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
+    let since = since.as_deref().map(ruby_integer_prefix).unwrap_or(0);
     let cutoff_ns = chrono::DateTime::<Utc>::from_timestamp_millis(since)
-        .ok_or(StatusCode::BAD_REQUEST)?
-        .timestamp_nanos_opt()
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .and_then(|time| time.timestamp_nanos_opt())
+        .unwrap_or(if since < 0 { i64::MIN } else { i64::MAX });
     let new_messages = messages_since(&s, rid, cutoff_ns, false)?;
     let updated_messages = messages_since(&s, rid, cutoff_ns, true)?;
     let mut html = String::new();

@@ -223,6 +223,12 @@ def main():
             with sqlite3.connect(camp_db) as db:
                 db.execute("""INSERT INTO push_subscriptions(user_id,endpoint,p256dh_key,auth_key,user_agent,created_at,updated_at)
                     VALUES(1,'https://push.example.test/import','test-p256dh','test-auth','test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""")
+                live_max = db.execute("SELECT MAX(id) FROM active_storage_blobs").fetchone()[0]
+                source_highwater = live_max + 7
+                db.execute("""INSERT INTO active_storage_blobs(id,byte_size,created_at,filename,key,service_name)
+                    VALUES(?,0,CURRENT_TIMESTAMP,'deleted.txt','paired-import-deleted-blob','local')""", (source_highwater,))
+                db.execute("DELETE FROM active_storage_blobs WHERE id=?", (source_highwater,))
+                assert db.execute("SELECT seq FROM sqlite_sequence WHERE name='active_storage_blobs'").fetchone()[0] == source_highwater
             importer_env = dict(os.environ, RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE=env["SECRET_KEY_BASE"],
                 RUSTFIRE_CAMPFIRE_VAPID_PUBLIC_KEY=vapid_public, RUSTFIRE_CAMPFIRE_VAPID_PRIVATE_KEY=vapid_private)
             command = (sys.executable, "tools/import_campfire.py", "--source-db", str(camp_db),
@@ -230,6 +236,10 @@ def main():
                 "--target-uploads", str(uploads), "--rustfire-bin", "target/release/rustfire")
             result = subprocess.run(command, env=importer_env, check=True, capture_output=True, text=True)
             print("import:", result.stdout.strip())
+            with sqlite3.connect(rust_db) as db:
+                imported_highwater = db.execute("SELECT last_id FROM id_sequences WHERE name='attachments'").fetchone()[0]
+            assert imported_highwater == source_highwater, (imported_highwater, source_highwater)
+            print("imported deleted-blob ID high-water mark matches")
             rust_process = start_server(rust_db, rust_port, {
                 "RUSTFIRE_UPLOAD_DIR": str(uploads),
                 "RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"],

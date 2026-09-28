@@ -6,6 +6,7 @@ The script starts isolated Redis for Campfire and uses disposable databases.
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import http.client
 import pathlib
 import re
@@ -14,6 +15,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+import urllib.parse
 
 from direct_lookup import ROOT, free_port, p95, start_server, stop_server
 from message_markup import check_message_markup
@@ -102,9 +104,42 @@ def measure(port, cookie, iterations):
     return statistics.median(samples), p95(samples), len(body.encode()), body
 
 
+def since_edge_signatures(port, cookie):
+    values = (None, "", "abc", str(CUTOFF), f"+{CUTOFF}", f"{CUTOFF}tail", f" {CUTOFF} ", f"{CUTOFF}.9", "-1", "99999999999999999999", "-99999999999999999999")
+    cases = [(value, None if value is None else urllib.parse.urlencode({"since": value})) for value in values]
+    cases += [
+        ("duplicate since", f"since=0&since={CUTOFF}"),
+        ("array since", "since%5B%5D=1"),
+        ("hash since", "since%5Bvalue%5D=1"),
+        ("scalar then array", "since=0&since%5B%5D=1"),
+        ("array then scalar", "since%5B%5D=1&since=0"),
+    ]
+    signatures = {}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        for value, query in cases:
+            path = "/rooms/1/refresh"
+            if query is not None:
+                path += "?" + query
+            connection.request("GET", path, headers={"Cookie": cookie, "Accept": "text/vnd.turbo-stream.html"})
+            response = connection.getresponse()
+            body = response.read().decode()
+            streams = re.findall(r"<turbo-stream\b([^>]*)>(.*?)</turbo-stream>", body, re.S)
+            signature = tuple((
+                re.search(r"\baction=['\"]([^'\"]+)['\"]", attributes).group(1),
+                tuple(re.findall(r"data-message-id=['\"](\d+)", fragment)),
+            ) for attributes, fragment in streams)
+            error_body = (len(body.encode()), hashlib.sha256(body.encode()).hexdigest()) if response.status >= 400 else None
+            signatures[value] = (response.status, response.getheader("Content-Type", "").split(";", 1)[0], signature, error_body)
+    finally:
+        connection.close()
+    return signatures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iterations", type=int, default=30)
+    parser.add_argument("--since-edges", action="store_true", help="compare Ruby integer coercion in refresh timestamps")
     parser.add_argument("--sample-dir", type=pathlib.Path, help="save each app's first Turbo refresh response")
     parser.add_argument("--campfire-repo", type=pathlib.Path, default=pathlib.Path("/tmp/once-campfire-reference"))
     parser.add_argument("--ruby", type=pathlib.Path, default=pathlib.Path("/tmp/rustfire-baseline/local/bin/ruby"))
@@ -134,6 +169,7 @@ def main():
         rust = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": camp_env["SECRET_KEY_BASE"]})
         try:
             rust_result = measure(rust_port, "session_token=benchmark-session", args.iterations)
+            rust_edges = since_edge_signatures(rust_port, "session_token=benchmark-session") if args.since_edges else None
         finally:
             stop_server(rust)
         try:
@@ -143,6 +179,7 @@ def main():
                     wait_for_server(camp_port, camp)
                     cookie, _ = login_campfire(camp_port)
                     camp_result = measure(camp_port, cookie, args.iterations)
+                    camp_edges = since_edge_signatures(camp_port, cookie) if args.since_edges else None
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -159,6 +196,9 @@ def main():
             (args.sample_dir / "rustfire-refresh.html").write_text(rust_result[3])
             (args.sample_dir / "campfire-refresh.html").write_text(camp_result[3])
         check_message_markup(camp_result[3].encode(), rust_result[3].encode(), 2)
+        if args.since_edges:
+            assert rust_edges == camp_edges, (rust_edges, camp_edges)
+            print(f"PASS {len(rust_edges)} refresh timestamp edges")
         print("PASS paired reconnect selection and parsed Turbo response markup")
         print(f"rustfire median/p95_ms={rust_result[0]:.3f}/{rust_result[1]:.3f} bytes={rust_result[2]}")
         print(f"campfire median/p95_ms={camp_result[0]:.3f}/{camp_result[1]:.3f} bytes={camp_result[2]}")
