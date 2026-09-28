@@ -4,8 +4,9 @@ Example:
   python bench/paired_direct_lookup.py --rooms 1000 --iterations 10
 
 Both servers use disposable SQLite fixtures with the same users, room memberships,
-selected participants, and one keep-alive HTTP client. Campfire's direct-room broadcast
-still does more rendering work, so this is a core-path comparison until parity.
+selected participants, and one keep-alive HTTP client. Both servers now render
+and publish the direct-room sidebar prepend, but this benchmark has no subscribed
+sockets; use paired_direct_reuse.py for live event parity.
 """
 
 import argparse
