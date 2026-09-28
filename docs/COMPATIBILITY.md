@@ -159,7 +159,7 @@ The transfer page also matches Campfire's parsed head and body in anonymous and 
 
 ## Remaining parity work
 
-`python bench/paired_session_resume.py` now checks the pinned source's one-hour authenticated-session refresh rule against Rustfire: a fresh session stays untouched, a stale session saves the current browser agent and trusted client IP plus new activity and update times, and an immediate second request leaves the row unchanged. The request also supplies a spoofed internal IP header to confirm Rustfire discards it. Session creation, timeout boundaries, and broader authentication flows still need paired coverage.
+`python bench/paired_session_resume.py` now checks signed-in session creation and the pinned source's one-hour refresh rule against Rustfire: the login request saves its browser agent and trusted client IP with creation, update, and activity timestamps; a fresh session stays untouched; a stale session saves the new browser agent and IP plus new activity and update times; and an immediate second request leaves the row unchanged. The refresh request also supplies a spoofed internal IP header to confirm Rustfire discards it. Other session entry paths, timeout boundaries, and broader authentication flows still need paired coverage.
 
 A twelve-case paired autocomplete input probe now matches Campfire's room access, query-key behavior, empty and malformed room IDs, JSON media type, and escaping of names containing markup. The existing large-user probe still checks signed IDs and avatar paths separately. Other parameter shapes and browser editor interactions remain to be tested.
 

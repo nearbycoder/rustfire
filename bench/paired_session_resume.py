@@ -5,14 +5,18 @@ The probe uses disposable databases and never changes a real account.
 """
 
 from datetime import datetime, timedelta, timezone
+import http.cookiejar
 import pathlib
+import re
 import sqlite3
 import subprocess
 import tempfile
+import urllib.parse
+import urllib.request
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_bot_admin import request
-from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
+from paired_direct_lookup import seed_campfire, seed_rustfire, wait_for_server
 
 
 REPOSITORY = pathlib.Path("/tmp/once-campfire-reference")
@@ -23,6 +27,8 @@ OLD_IP = "203.0.113.7"
 NEW_IP = "8.8.8.8"
 OLD_AGENT = "Before refresh"
 NEW_AGENT = "Paired session resume"
+LOGIN_AGENT = "Paired session creation"
+LOGIN_IP = "8.8.4.4"
 
 
 def metadata(database, session_id):
@@ -36,6 +42,44 @@ def metadata(database, session_id):
 def timestamp(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def sign_in(port, database):
+    with sqlite3.connect(database) as db:
+        prior = db.execute("SELECT COALESCE(MAX(id),0) FROM sessions WHERE user_id=1").fetchone()[0]
+    cookies = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+    origin = f"http://127.0.0.1:{port}"
+    with opener.open(origin + "/session/new") as response:
+        body = response.read()
+        assert response.status == 200, response.status
+    csrf = re.search(rb'<meta name=[\'\"]csrf-token[\'\"] content=[\'\"]([^\'\"]+)', body)
+    assert csrf, "sign-in CSRF token missing"
+    fields = urllib.parse.urlencode({
+        "email_address": "benchmark@example.invalid", "password": "benchmark-password",
+        "authenticity_token": csrf.group(1).decode(),
+    }).encode()
+    request = urllib.request.Request(origin + "/session", data=fields, headers={
+        "Content-Type": "application/x-www-form-urlencoded", "User-Agent": LOGIN_AGENT,
+        "X-Forwarded-For": LOGIN_IP, "X-CSRF-Token": csrf.group(1).decode(),
+    })
+    before = datetime.now(timezone.utc)
+    with opener.open(request) as response:
+        response.read()
+        assert response.status == 200 and urllib.parse.urlsplit(response.url).path in ("/", "/rooms/1"), (response.status, response.url)
+    after = datetime.now(timezone.utc)
+    with sqlite3.connect(database) as db:
+        rows = db.execute(
+            "SELECT id,user_agent,ip_address,created_at,updated_at,last_active_at FROM sessions WHERE user_id=1 AND id>?",
+            (prior,),
+        ).fetchall()
+    assert len(rows) == 1, rows
+    session_id, agent, ip, *times = rows[0]
+    assert (agent, ip) == (LOGIN_AGENT, LOGIN_IP), rows[0]
+    for value in times:
+        assert before - timedelta(seconds=2) <= timestamp(value) <= after + timedelta(seconds=2), rows[0]
+    cookie = "; ".join(f"{item.name}={item.value}" for item in cookies)
+    return session_id, cookie
 
 
 def set_metadata(database, session_id, age):
@@ -90,11 +134,14 @@ def main():
         seed_rustfire(rust_db, rust_port, [])
         env = seed_campfire(REPOSITORY, RUBY, BUNDLE, REPOSITORY / "storage/db/production.sqlite3",
                             camp_db, [], camp_port, temp)
+        with sqlite3.connect(camp_db) as db:
+            digest = db.execute("SELECT password_digest FROM users WHERE id=1").fetchone()[0]
+        with sqlite3.connect(rust_db) as db:
+            db.execute("UPDATE users SET email_address='benchmark@example.invalid',password_digest=? WHERE id=1", (digest,))
         rust_process = start_server(rust_db, rust_port, {"RUSTFIRE_TRUSTED_PROXY_IPS": "127.0.0.1"})
         try:
-            with sqlite3.connect(rust_db) as db:
-                rust_session = db.execute("SELECT id FROM sessions WHERE token='benchmark-session'").fetchone()[0]
-            rust_result = exercise(rust_port, rust_db, rust_session, "session_token=benchmark-session")
+            rust_session, rust_cookie = sign_in(rust_port, rust_db)
+            rust_result = exercise(rust_port, rust_db, rust_session, rust_cookie)
         finally:
             stop_server(rust_process)
         with (temp / "puma.log").open("w+") as log:
@@ -104,9 +151,7 @@ def main():
             )
             try:
                 wait_for_server(camp_port, camp_process)
-                cookie, _ = login_campfire(camp_port)
-                with sqlite3.connect(camp_db) as db:
-                    camp_session = db.execute("SELECT id FROM sessions WHERE user_id=1 ORDER BY id DESC LIMIT 1").fetchone()[0]
+                camp_session, cookie = sign_in(camp_port, camp_db)
                 camp_result = exercise(camp_port, camp_db, camp_session, cookie)
             except Exception:
                 log.flush()
@@ -116,7 +161,7 @@ def main():
             finally:
                 stop_server(camp_process)
     assert rust_result == camp_result
-    print("PASS paired session resume:", rust_result)
+    print("PASS paired session creation and resume:", rust_result)
 
 
 if __name__ == "__main__":
