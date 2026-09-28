@@ -769,8 +769,62 @@ fn malformed_action_text_sgid(input: &str) -> Option<MalformedActionTextSgid> {
     }
     None
 }
+fn normalize_numeric_carriage_returns(input: &str) -> std::borrow::Cow<'_, str> {
+    // Nokogiri turns character references for U+000D into line feeds while
+    // parsing ActionText HTML. Literal carriage returns use the HTML parser's
+    // ordinary input normalization and must not be changed here.
+    if !input.contains("&#") {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    let mut output = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(relative) = input[search..].find("&#") {
+        let start = search + relative;
+        let mut end = start + 2;
+        let radix = if matches!(bytes.get(end), Some(b'x' | b'X')) {
+            end += 1;
+            16
+        } else {
+            10
+        };
+        let digit_start = end;
+        while bytes.get(end).is_some_and(|byte| if radix == 16 { byte.is_ascii_hexdigit() } else { byte.is_ascii_digit() }) {
+            end += 1;
+        }
+        let is_cr = end > digit_start
+            && u32::from_str_radix(&input[digit_start..end], radix).ok() == Some(13);
+        if is_cr {
+            output.push_str(&input[copied..start]);
+            output.push('\n');
+            if bytes.get(end) == Some(&b';') {
+                end += 1;
+            }
+            copied = end;
+            search = end;
+        } else {
+            search = start + 2;
+        }
+    }
+    if copied == 0 {
+        std::borrow::Cow::Borrowed(input)
+    } else {
+        output.push_str(&input[copied..]);
+        std::borrow::Cow::Owned(output)
+    }
+}
+fn normalize_action_text_source(input: &str) -> std::borrow::Cow<'_, str> {
+    let numeric = normalize_numeric_carriage_returns(input);
+    if numeric.contains('\r') {
+        std::borrow::Cow::Owned(numeric.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        numeric
+    }
+}
 fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String) {
-    let canonical = action_text_webhook_html(input);
+    let normalized = normalize_numeric_carriage_returns(input);
+    let canonical = action_text_webhook_html(&normalized);
     let (display_input, blank_display) = replace_unsigned_action_text_attachments(&canonical, true);
     let display_input = replace_preview_attachments(&display_input, request_host, true);
     let html = ammonia::Builder::default()
@@ -885,7 +939,8 @@ fn action_text_plain_node(node: ego_tree::NodeRef<'_, HtmlNode>) -> String {
     }
 }
 fn action_text_plain(input: &str) -> String {
-    let document = ParsedHtml::parse_fragment(input);
+    let normalized = normalize_numeric_carriage_returns(input);
+    let document = ParsedHtml::parse_fragment(&normalized);
     trim_plain_newlines(&action_text_plain_node(document.tree.root())).to_string()
 }
 fn action_text_plain_body(input: &str) -> String {
@@ -6329,10 +6384,16 @@ fn insert_message(
         .timestamp_nanos_opt()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    db.execute("INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,if rich && !body.trim().is_empty() {Some(body)} else {None},cid,t,created_at_ns]).map_err(db_err)?;
+    let body_source = if rich && !body.trim().is_empty() {
+        Some(normalize_action_text_source(body))
+    } else {
+        None
+    };
+    db.execute("INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,body_source.as_deref(),cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     if rich {
-        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(body));
+        let source = normalize_action_text_source(body);
+        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(&source));
         let cleaned = strip_disallowed_rich_tags(&normalized);
         let inline_input = cleaned.as_deref().unwrap_or(&normalized);
         if !link_uploaded_inline_blobs(&db, id, inline_input, &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?.is_empty() {
@@ -7435,7 +7496,8 @@ fn message_update_values(
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let mut newly_linked = Vec::new();
     let (plain, body_html, body_source, used_inline) = if rich {
-        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(body));
+        let source = normalize_action_text_source(body);
+        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(&source));
         let cleaned = strip_disallowed_rich_tags(&normalized);
         newly_linked = link_uploaded_inline_blobs(&db, mid, cleaned.as_deref().unwrap_or(&normalized), &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?;
         let blob_key = s.imported_blob_signing_key.as_deref().unwrap_or(&s.blob_signing_key);

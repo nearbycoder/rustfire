@@ -106,6 +106,8 @@ def sweep_cases():
         "data:image/svg+xml,%3Csvg%3E", "data:text/html,%3Cscript%3E",
     ]
     cases = [(f"sweep-tag-{tag}", f"<div>A<{tag}>B</{tag}>C</div>") for tag in tags]
+    pasted_widgets = ["audio", "button", "details", "form", "math", "noscript", "object", "picture", "ruby", "select", "svg", "template", "textarea", "title", "video"]
+    cases.extend((f"sweep-pasted-widget-{tag}", f"<div>A<{tag}>B</{tag}>C</div>") for tag in pasted_widgets)
     cases.extend((f"sweep-attr-{key.replace(':', '-')}", f'<div><span {key}="{value}">X</span></div>') for key, value in attributes.items())
     cases.extend([
         ("sweep-a-hreflang", "<div><a href='/x' hreflang='en'>X</a></div>"),
@@ -113,9 +115,29 @@ def sweep_cases():
         ("sweep-hr-size", "<div>Before<hr size='3'>After</div>"),
         ("sweep-span-unsafe-href", "<div><span href='javascript:alert(1)'>X</span></div>"),
     ])
+    pasted_link_attributes = {
+        "aria-label": "Read more", "data-action": "click->malicious#run", "data-turbo-frame": "_top",
+        "download": "file.txt", "id": "copied", "ping": "https://example.com/ping",
+        "referrerpolicy": "no-referrer", "rel": "noopener", "target": "_blank",
+    }
+    cases.extend((f"sweep-link-attr-{name}", f'<div><a href="/x" {name}="{value}">X</a></div>') for name, value in pasted_link_attributes.items())
     cases.extend((f"sweep-uri-{scheme}", f'<div><a href="{scheme}:value">X</a><span src="{scheme}:value">Y</span></div>') for scheme in schemes)
     cases.extend((f"sweep-data-{index}", f'<div><a href="{value}">X</a><span src="{value}">Y</span></div>') for index, value in enumerate(data_urls))
     cases.extend((f"sweep-obfuscated-{index}", f'<div><a href="{value}">X</a><span src="{value}">Y</span></div>') for index, value in enumerate(obfuscated_urls))
+    entities = [
+        "&nbsp;", "&NewLine;", "&Tab;", "&ZeroWidthSpace;", "&shy;", "&apos;",
+        "&notanentity;", "&#0;", "&#9;", "&#10;", "&#13;", "&#x7f;",
+        "&#x85;", "&#x200b;", "&#x2028;", "&#x2029;", "&#x1f468;",
+    ]
+    cases.extend((f"sweep-entity-{index}", f"<div>Before{entity}After</div>") for index, entity in enumerate(entities))
+    unicode_text = ["e\u0301", "👨‍👩‍👧‍👦", "🇺🇸", "a\u200bb", "a\u2060b", "a\ufeffb", "a\u202eb", "a\u00a0b"]
+    cases.extend((f"sweep-unicode-{index}", f"<div>Before {value} After</div>") for index, value in enumerate(unicode_text))
+    carriage_returns = ["&#xD;", "&#00013;", "&#x000D;", "\r", "\r\n", "&#13;&#13;", "A&#13;B", "&#13", "&#XD;", "&#xD"]
+    cases.extend((f"sweep-carriage-return-{index}", f"<div>Before{value}After</div>") for index, value in enumerate(carriage_returns))
+    cases.extend([
+        ("sweep-cr-title-attribute", "<div><span title='Before&#13;After'>X</span></div>"),
+        ("sweep-cr-link-attribute", "<div><a href='https://example.com/a&#13;b'>X</a></div>"),
+    ])
     return cases
 
 
@@ -179,6 +201,17 @@ def indexed_texts(database, cases):
         }
 
 
+def stored_rich_source(database, name, campfire):
+    with sqlite3.connect(database) as db:
+        client_id = f"paired-rich-filter-{name}"
+        if campfire:
+            return db.execute(
+                "SELECT body FROM action_text_rich_texts WHERE record_type='Message' AND name='body' AND record_id=(SELECT id FROM messages WHERE client_message_id=?)",
+                (client_id,),
+            ).fetchone()
+        return db.execute("SELECT body_source FROM messages WHERE client_message_id=?", (client_id,)).fetchone()
+
+
 def edit_message(port, cookie, csrf, database, name, body):
     with sqlite3.connect(database) as db:
         message_id = db.execute("SELECT id FROM messages WHERE client_message_id=?", (f"paired-rich-filter-{name}",)).fetchone()[0]
@@ -227,9 +260,13 @@ def main():
                 rust_results = [post(rust_port, "session_token=benchmark-session", "benchmark-csrf", case) for case in cases]
                 rust_blank = {name: post_blank(rust_port, "session_token=benchmark-session", "benchmark-csrf", name, body) for name, body in blank_cases}
                 rust_plain = indexed_texts(rust_db, cases)
+                source_cases = ("sweep-entity-10", "sweep-carriage-return-3", "sweep-carriage-return-4") if args.sweep else ()
+                rust_cr_sources = {name: stored_rich_source(rust_db, name, False) for name in source_cases}
                 rust_blank_plain = indexed_texts(rust_db, blank_cases)
                 rust_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "table", "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>")
                 rust_blank_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "spaces-only-div", "<div></div>")
+                rust_cr_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "sweep-entity-10", "<div>Edited&#13;Again</div>") if args.sweep else None
+                rust_cr_edit_source = stored_rich_source(rust_db, "sweep-entity-10", False) if args.sweep else None
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -240,9 +277,12 @@ def main():
                     camp_results = [post(camp_port, cookie, csrf, case) for case in cases]
                     camp_blank = {name: post_blank(camp_port, cookie, csrf, name, body) for name, body in blank_cases}
                     camp_plain = indexed_texts(camp_db, cases)
+                    camp_cr_sources = {name: stored_rich_source(camp_db, name, True) for name in source_cases}
                     camp_blank_plain = indexed_texts(camp_db, blank_cases)
                     camp_edit = edit_message(camp_port, cookie, csrf, camp_db, "table", "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>")
                     camp_blank_edit = edit_message(camp_port, cookie, csrf, camp_db, "spaces-only-div", "<div></div>")
+                    camp_cr_edit = edit_message(camp_port, cookie, csrf, camp_db, "sweep-entity-10", "<div>Edited&#13;Again</div>") if args.sweep else None
+                    camp_cr_edit_source = stored_rich_source(camp_db, "sweep-entity-10", True) if args.sweep else None
                 finally:
                     stop_server(camp)
         finally:
@@ -257,13 +297,17 @@ def main():
     assert not mismatches, mismatches
     plain_mismatches = {name: (rust_plain[name], camp_plain[name]) for name, _ in cases if rust_plain[name] != camp_plain[name]}
     assert not plain_mismatches, plain_mismatches
+    source_mismatches = {name: (rust_cr_sources[name], camp_cr_sources[name]) for name in source_cases if rust_cr_sources[name] != camp_cr_sources[name]}
+    assert not source_mismatches, source_mismatches
     assert rust_blank == camp_blank, (rust_blank, camp_blank)
     assert all(status == 200 for status, _ in rust_blank.values()), rust_blank
     assert rust_blank_plain == camp_blank_plain, (rust_blank_plain, camp_blank_plain)
     assert rust_edit == camp_edit == (302, "/rooms/1/messages/2", ("EditedCellEnd",)), (rust_edit, camp_edit)
     assert rust_blank_edit == camp_blank_edit, (rust_blank_edit, camp_blank_edit)
     assert rust_blank_edit[0] == 302 and rust_blank_edit[2] == ("",), rust_blank_edit
-    print(f"PASS {len(cases)} paired rich-text presentations and search-index bodies, four blank creates, and two edits")
+    assert rust_cr_edit == camp_cr_edit, (rust_cr_edit, camp_cr_edit)
+    assert rust_cr_edit_source == camp_cr_edit_source, (rust_cr_edit_source, camp_cr_edit_source)
+    print(f"PASS {len(cases)} paired rich-text presentations and search-index bodies, four blank creates, and {'three' if args.sweep else 'two'} edits")
 
 
 if __name__ == "__main__":
