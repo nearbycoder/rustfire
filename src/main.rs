@@ -6991,7 +6991,7 @@ async fn message_create(
         let mut body = String::new();
         let mut client_id = None;
         let mut upload = ParsedMessageUpload::None;
-        let mut rich = true;
+        let rich = true;
         let mut message_seen = false;
         let mut form_csrf = None;
         while let Some(mut field) = multipart
@@ -7035,8 +7035,6 @@ async fn message_create(
                 body = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
             } else if name == "message[client_message_id]" {
                 client_id = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
-            } else if name == "message[format]" {
-                rich = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)? == "html";
             } else if name == "authenticity_token" {
                 form_csrf = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
@@ -7057,7 +7055,7 @@ async fn message_create(
                 query_fields.get("message[body]").cloned().unwrap_or_default(),
                 query_fields.get("message[client_message_id]").cloned(),
                 None,
-                matches!(query_fields.get("message[format]").map(String::as_str), None | Some("html")),
+                true,
                 nested,
             )
         } else {
@@ -7087,7 +7085,7 @@ async fn message_create(
             f.get("message[body]").cloned().unwrap_or_default(),
             f.get("message[client_message_id]").cloned(),
             None,
-            matches!(f.get("message[format]").map(String::as_str), None | Some("html")),
+            true,
             f.keys().any(|name| name.starts_with("message[") && name.ends_with(']')),
         )
     };
@@ -7412,7 +7410,9 @@ fn message_update_values(
         return message_update_response(&s, &headers, &uri, rid, mid, unchanged);
     }
     let body = body.unwrap();
-    let rich = matches!(form_value(&f, "format", "message[format]"), None | Some("html"));
+    // Campfire permits only :body, :attachment, and :client_message_id.
+    // An extra message[format] field has no effect on ActionText processing.
+    let rich = true;
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let mut newly_linked = Vec::new();
     let (plain, body_html, body_source, used_inline) = if rich {
