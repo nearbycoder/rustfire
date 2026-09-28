@@ -1906,3 +1906,7 @@ Commit `4257663` then ran a checked ten-second mixed rich-message workload in bo
 | Rustfire first | 1,362.5 | 2,839.2 | 2.08× | 132.10 / 19.50 ms |
 
 The servers and load generator shared one host; socket setup was outside the measured interval. This verifies a current-build point after the ActionText change, not maximum connection scale, sustained capacity, or whole-app superiority.
+
+## ActionText saved-source serialization
+
+The expanded rich-text sweep initially found 55 saved ActionText source differences across 224 paired create cases, even when presentation and search text matched. Parsing the submitted fragment with the same HTML normalization used for display reduced that to eight cases; preserving submitted attribute order after normalization resolved those remaining cases. `python bench/paired_rich_filters.py --sweep --source-audit` now passes **227/227** paired presentation, saved-source, and search comparisons, plus four blank creates and three edits. The added cases exercise fake tags in comments, scripts, and textareas. The signed-mention, 13-case attachment-fallback, and inline-upload probes also passed after this change; the release build and all **52** Rust unit tests passed. These finite fixtures do not establish serialization parity for every possible HTML input.

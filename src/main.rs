@@ -822,6 +822,147 @@ fn normalize_action_text_source(input: &str) -> std::borrow::Cow<'_, str> {
         numeric
     }
 }
+struct HtmlStartTag {
+    start: usize,
+    end: usize,
+    name: String,
+    attributes: Vec<(String, String)>,
+    self_closing: bool,
+}
+fn html_start_tags(input: &str) -> Vec<HtmlStartTag> {
+    let bytes = input.as_bytes();
+    let mut tags = Vec::new();
+    let mut offset = 0;
+    while offset + 1 < bytes.len() {
+        if bytes[offset..].starts_with(b"<!--") {
+            offset = input[offset + 4..].find("-->").map_or(bytes.len(), |relative| offset + 4 + relative + 3);
+            continue;
+        }
+        if bytes[offset] != b'<' || !bytes[offset + 1].is_ascii_alphabetic() {
+            offset += 1;
+            continue;
+        }
+        let start = offset;
+        let mut cursor = start + 1;
+        while bytes.get(cursor).is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':')) {
+            cursor += 1;
+        }
+        let name = input[start + 1..cursor].to_ascii_lowercase();
+        let name_end = cursor;
+        let mut quote = None;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() && matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+            } else if quote.is_none() && byte == b'>' {
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            break;
+        }
+        let end = cursor + 1;
+        let mut attributes = Vec::new();
+        let mut field = name_end;
+        while field < cursor {
+            while field < cursor && (bytes[field].is_ascii_whitespace() || bytes[field] == b'/') {
+                field += 1;
+            }
+            if field == cursor {
+                break;
+            }
+            let field_start = field;
+            while field < cursor && !bytes[field].is_ascii_whitespace() && !matches!(bytes[field], b'=' | b'/' | b'>') {
+                field += 1;
+            }
+            if field == field_start {
+                field += 1;
+                continue;
+            }
+            let field_name = input[field_start..field].to_ascii_lowercase();
+            while field < cursor && bytes[field].is_ascii_whitespace() {
+                field += 1;
+            }
+            if bytes.get(field) == Some(&b'=') {
+                field += 1;
+                while field < cursor && bytes[field].is_ascii_whitespace() {
+                    field += 1;
+                }
+                if field < cursor && matches!(bytes[field], b'\'' | b'"') {
+                    let delimiter = bytes[field];
+                    field += 1;
+                    while field < cursor && bytes[field] != delimiter {
+                        field += 1;
+                    }
+                    if field < cursor {
+                        field += 1;
+                    }
+                } else {
+                    while field < cursor && !bytes[field].is_ascii_whitespace() && bytes[field] != b'>' {
+                        field += 1;
+                    }
+                }
+            }
+            attributes.push((field_name, input[field_start..field].trim().to_string()));
+        }
+        let self_closing = input[name_end..cursor].trim_end().ends_with('/');
+        let raw_text = matches!(name.as_str(), "script" | "style" | "textarea" | "title");
+        tags.push(HtmlStartTag { start, end, name: name.clone(), attributes, self_closing });
+        offset = if raw_text {
+            let closing = format!("</{name}");
+            input[end..].to_ascii_lowercase().find(&closing).map_or(bytes.len(), |relative| end + relative)
+        } else {
+            end
+        };
+    }
+    tags
+}
+fn preserve_action_text_attribute_order(original: &str, canonical: &str) -> String {
+    let mut order = HashMap::<String, VecDeque<Vec<String>>>::new();
+    for tag in html_start_tags(original) {
+        order.entry(tag.name).or_default().push_back(tag.attributes.into_iter().map(|(name, _)| name).collect());
+    }
+    let mut output = String::new();
+    let mut copied = 0;
+    for tag in html_start_tags(canonical) {
+        let Some(original_order) = order.get_mut(&tag.name).and_then(VecDeque::pop_front) else { continue };
+        if tag.attributes.len() < 2 || original_order.len() != tag.attributes.len() {
+            continue;
+        }
+        let mut attributes = tag.attributes;
+        let canonical_order = attributes.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+        if !attributes.iter().all(|(name, _)| original_order.iter().filter(|candidate| *candidate == name).count() == 1) {
+            continue;
+        }
+        attributes.sort_by_key(|(name, _)| original_order.iter().position(|candidate| candidate == name).unwrap());
+        if attributes.iter().map(|(name, _)| name).eq(canonical_order.iter()) {
+            continue;
+        }
+        output.push_str(&canonical[copied..tag.start]);
+        output.push('<');
+        output.push_str(&tag.name);
+        for (_, raw) in attributes {
+            output.push(' ');
+            output.push_str(&raw);
+        }
+        output.push_str(if tag.self_closing { "/>" } else { ">" });
+        copied = tag.end;
+    }
+    if copied == 0 {
+        canonical.to_string()
+    } else {
+        output.push_str(&canonical[copied..]);
+        output
+    }
+}
+fn canonical_action_text_source(input: &str) -> String {
+    let normalized = normalize_action_text_source(input);
+    let canonical = ParsedHtml::parse_fragment(&normalized).root_element().inner_html();
+    preserve_action_text_attribute_order(&normalized, &canonical)
+}
 fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String) {
     let normalized = normalize_numeric_carriage_returns(input);
     let canonical = action_text_webhook_html(&normalized);
@@ -6385,15 +6526,14 @@ fn insert_message(
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let cid = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let body_source = if rich && !body.trim().is_empty() {
-        Some(normalize_action_text_source(body))
+        Some(canonical_action_text_source(body))
     } else {
         None
     };
     db.execute("INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,?3,?4,?5,?6,?7,?8,?7,?8)",params![rid,u.id,plain,body_html,body_source.as_deref(),cid,t,created_at_ns]).map_err(db_err)?;
     let id = db.last_insert_rowid();
     if rich {
-        let source = normalize_action_text_source(body);
-        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(&source));
+        let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(body_source.as_deref().unwrap_or(body)));
         let cleaned = strip_disallowed_rich_tags(&normalized);
         let inline_input = cleaned.as_deref().unwrap_or(&normalized);
         if !link_uploaded_inline_blobs(&db, id, inline_input, &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?.is_empty() {
@@ -7496,7 +7636,7 @@ fn message_update_values(
     let old_inline = inline_blob_ids(&db, "SELECT blob_id FROM inline_embeds WHERE message_id=?1", mid)?;
     let mut newly_linked = Vec::new();
     let (plain, body_html, body_source, used_inline) = if rich {
-        let source = normalize_action_text_source(body);
+        let source = canonical_action_text_source(body);
         let normalized = canonicalize_attachment_galleries(&action_text_webhook_html(&source));
         let cleaned = strip_disallowed_rich_tags(&normalized);
         newly_linked = link_uploaded_inline_blobs(&db, mid, cleaned.as_deref().unwrap_or(&normalized), &s.mention_signing_key, s.imported_mention_signing_key.as_deref())?;

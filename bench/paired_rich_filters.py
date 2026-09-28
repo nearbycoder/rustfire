@@ -137,6 +137,9 @@ def sweep_cases():
     cases.extend([
         ("sweep-cr-title-attribute", "<div><span title='Before&#13;After'>X</span></div>"),
         ("sweep-cr-link-attribute", "<div><a href='https://example.com/a&#13;b'>X</a></div>"),
+        ("sweep-comment-fake-link", "<div><!-- <a title='fake' href='/fake'> --><a href='/real' title='Real'>X</a></div>"),
+        ("sweep-script-fake-link", "<div><script>const x = \"<a title='fake' href='/fake'>\";</script><a href='/real' title='Real'>X</a></div>"),
+        ("sweep-textarea-fake-link", "<div><textarea><a title='fake' href='/fake'></textarea><a href='/real' title='Real'>X</a></div>"),
     ])
     return cases
 
@@ -237,6 +240,7 @@ def edit_message(port, cookie, csrf, database, name, body):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep", action="store_true", help="include allowed-tag, attribute, and URL-scheme matrices")
+    parser.add_argument("--source-audit", action="store_true", help="summarize saved ActionText source differences for all cases")
     args = parser.parse_args()
     cases = CASES + (sweep_cases() if args.sweep else [])
     blank_cases = [("spaces-only-div", "<div>  </div>"), ("break-only-div", "<div><br></div>"), ("empty-div", "<div></div>"), ("empty-raw", "")]
@@ -260,8 +264,7 @@ def main():
                 rust_results = [post(rust_port, "session_token=benchmark-session", "benchmark-csrf", case) for case in cases]
                 rust_blank = {name: post_blank(rust_port, "session_token=benchmark-session", "benchmark-csrf", name, body) for name, body in blank_cases}
                 rust_plain = indexed_texts(rust_db, cases)
-                source_cases = ("sweep-entity-10", "sweep-carriage-return-3", "sweep-carriage-return-4") if args.sweep else ()
-                rust_cr_sources = {name: stored_rich_source(rust_db, name, False) for name in source_cases}
+                rust_sources = {name: stored_rich_source(rust_db, name, False) for name, _ in cases}
                 rust_blank_plain = indexed_texts(rust_db, blank_cases)
                 rust_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "table", "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>")
                 rust_blank_edit = edit_message(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, "spaces-only-div", "<div></div>")
@@ -277,7 +280,7 @@ def main():
                     camp_results = [post(camp_port, cookie, csrf, case) for case in cases]
                     camp_blank = {name: post_blank(camp_port, cookie, csrf, name, body) for name, body in blank_cases}
                     camp_plain = indexed_texts(camp_db, cases)
-                    camp_cr_sources = {name: stored_rich_source(camp_db, name, True) for name in source_cases}
+                    camp_sources = {name: stored_rich_source(camp_db, name, True) for name, _ in cases}
                     camp_blank_plain = indexed_texts(camp_db, blank_cases)
                     camp_edit = edit_message(camp_port, cookie, csrf, camp_db, "table", "<div>Edited<table><tr><td>Cell</td></tr></table>End</div>")
                     camp_blank_edit = edit_message(camp_port, cookie, csrf, camp_db, "spaces-only-div", "<div></div>")
@@ -297,8 +300,12 @@ def main():
     assert not mismatches, mismatches
     plain_mismatches = {name: (rust_plain[name], camp_plain[name]) for name, _ in cases if rust_plain[name] != camp_plain[name]}
     assert not plain_mismatches, plain_mismatches
-    source_mismatches = {name: (rust_cr_sources[name], camp_cr_sources[name]) for name in source_cases if rust_cr_sources[name] != camp_cr_sources[name]}
-    assert not source_mismatches, source_mismatches
+    source_differences = [(name, rust_sources[name], camp_sources[name]) for name, _ in cases if rust_sources[name] != camp_sources[name]]
+    if args.source_audit:
+        print(f"Saved ActionText source differs for {len(source_differences)}/{len(cases)} cases")
+        for name, rust, camp in source_differences[:20]:
+            print(f"{name}: Rustfire={rust!r}; Campfire={camp!r}")
+    assert not source_differences, source_differences[:20]
     assert rust_blank == camp_blank, (rust_blank, camp_blank)
     assert all(status == 200 for status, _ in rust_blank.values()), rust_blank
     assert rust_blank_plain == camp_blank_plain, (rust_blank_plain, camp_blank_plain)
@@ -307,7 +314,7 @@ def main():
     assert rust_blank_edit[0] == 302 and rust_blank_edit[2] == ("",), rust_blank_edit
     assert rust_cr_edit == camp_cr_edit, (rust_cr_edit, camp_cr_edit)
     assert rust_cr_edit_source == camp_cr_edit_source, (rust_cr_edit_source, camp_cr_edit_source)
-    print(f"PASS {len(cases)} paired rich-text presentations and search-index bodies, four blank creates, and {'three' if args.sweep else 'two'} edits")
+    print(f"PASS {len(cases)} paired rich-text presentations, saved sources, and search-index bodies, four blank creates, and {'three' if args.sweep else 'two'} edits")
 
 
 if __name__ == "__main__":
