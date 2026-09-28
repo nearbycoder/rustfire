@@ -10812,13 +10812,11 @@ async fn bot_update(
     if changed == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
-    if let Some(url) = webhook_url {
-        if url.is_empty() {
-            db.execute("DELETE FROM webhooks WHERE user_id=?1", [id])
-                .map_err(db_err)?;
-        } else {
-            db.execute("INSERT INTO webhooks(user_id,url) VALUES(?1,?2) ON CONFLICT(user_id) DO UPDATE SET url=excluded.url",params![id,url]).map_err(db_err)?;
-        }
+    if let Some(url) = webhook_url.filter(|url| !url.is_empty()) {
+        db.execute("INSERT INTO webhooks(user_id,url) VALUES(?1,?2) ON CONFLICT(user_id) DO UPDATE SET url=excluded.url",params![id,url]).map_err(db_err)?;
+    } else {
+        db.execute("DELETE FROM webhooks WHERE user_id=?1", [id])
+            .map_err(db_err)?;
     }
     if let Some((bytes, content_type, filename)) = avatar {
         save_avatar(&s, id, bytes, content_type)?;

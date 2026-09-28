@@ -61,9 +61,11 @@ def request(port, method, path, cookie, csrf, body=b"", content_type=None, extra
         connection.close()
 
 
-def multipart(name, webhook, avatar=True, method=None):
+def multipart(name, webhook, avatar=True, method=None, webhook_field="user[webhook_url]"):
     boundary = b"bot-admin-probe"
-    fields = [("user[name]", name.encode()), ("user[webhook_url]", webhook.encode())]
+    fields = [("user[name]", name.encode())]
+    if webhook_field:
+        fields.append((webhook_field, webhook.encode()))
     if method:
         fields.insert(0, ("_method", method.encode()))
     body = b"".join(
@@ -165,6 +167,29 @@ def run_workflow(port, cookie, csrf, database, campfire, storage_root):
     updated_status, updated_location, _ = request(port, "GET", urllib.parse.urlsplit(updated_preview.src).path, cookie, csrf)
     updated_disk_status, _, updated_bytes = request(port, "GET", urllib.parse.urlsplit(updated_location).path, cookie, csrf)
     statuses["updated_avatar_preview"] = (updated_preview.src != preview.src, updated_status, updated_disk_status, updated_bytes == PNG, len(updated_bytes))
+
+    for label, field, url, expected_url in (
+        ("blank_webhook", "user[webhook_url]", "", None),
+        ("restore_webhook", "user[webhook_url]", "https://example.com/restored", "https://example.com/restored"),
+        ("misspelled_webhook", "user[webook_url]", "https://example.com/ignored", None),
+        ("restore_before_omission", "user[webhook_url]", "https://example.com/restored", "https://example.com/restored"),
+    ):
+        body, content_type = multipart("Renamed Bot", url, avatar=False, webhook_field=field)
+        status, location, payload = request(port, "PUT", f"/account/bots/{bot_id}", cookie, csrf, body, content_type)
+        assert status == 302, (label, status, payload[:300])
+        with sqlite3.connect(database) as db:
+            webhook = db.execute("SELECT url FROM webhooks WHERE user_id=?", [bot_id]).fetchone()
+        saved_url = webhook[0] if webhook else None
+        assert saved_url == expected_url, (label, saved_url, expected_url)
+        statuses[label] = (status, urllib.parse.urlsplit(location).path, saved_url)
+
+    body, content_type = multipart("Renamed Bot", "", avatar=False, webhook_field=None)
+    status, location, payload = request(port, "PUT", f"/account/bots/{bot_id}", cookie, csrf, body, content_type)
+    assert status == 302, ("omitted_webhook", status, payload[:300])
+    with sqlite3.connect(database) as db:
+        webhook = db.execute("SELECT url FROM webhooks WHERE user_id=?", [bot_id]).fetchone()
+    assert webhook is None, ("omitted_webhook", webhook)
+    statuses["omitted_webhook"] = (status, urllib.parse.urlsplit(location).path, webhook[0] if webhook else None)
 
     status, location, _ = request(port, "POST", f"/account/bots/{bot_id}/key", cookie, csrf)
     with sqlite3.connect(database) as db:
