@@ -676,7 +676,7 @@ fn replace_unsigned_action_text_attachments(input: &str, display: bool) -> (Stri
             return capture[0].to_string();
         };
         let attributes = element.value();
-        if attributes.attr("sgid").is_some()
+        if attributes.attr("sgid").is_some_and(|sgid| !sgid.is_empty())
             || attributes.attr("content-type") == Some("application/vnd.actiontext.opengraph-embed")
         {
             return capture[0].to_string();
@@ -716,6 +716,58 @@ fn replace_unsigned_action_text_attachments(input: &str, display: bool) -> (Stri
         "☒".to_string()
     }).into_owned();
     (replaced, blank_display)
+}
+const UNRENDERABLE_ACTION_TEXT_BODY: &str = "<!-- rustfire: unrenderable ActionText attachment -->";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MalformedActionTextSgid {
+    DuringTrixConversion,
+    AfterMessageSave,
+}
+
+fn malformed_action_text_sgid(input: &str) -> Option<MalformedActionTextSgid> {
+    if !input.as_bytes().windows(4).any(|window| window.eq_ignore_ascii_case(b"sgid")) {
+        return None;
+    }
+    fn malformed(sgid: &str) -> bool {
+        // Campfire's ActionText override decodes the SGID payload even when the
+        // signature is invalid. An invalid signature alone is therefore valid.
+        let encoded = sgid.split("--").next().unwrap_or("");
+        if encoded.is_empty() {
+            return false;
+        }
+        let decoded = STANDARD.decode(encoded)
+            .or_else(|_| URL_SAFE.decode(encoded))
+            .or_else(|_| URL_SAFE_NO_PAD.decode(encoded));
+        match decoded {
+            Ok(payload) => !serde_json::from_slice::<Value>(&payload).is_ok_and(|value| value.is_object()),
+            Err(_) => true,
+        }
+    }
+    let document = ParsedHtml::parse_fragment(input);
+    let figures = Selector::parse("figure[data-trix-attachment]").unwrap();
+    for figure in document.select(&figures) {
+        let Some(value) = figure.value().attr("data-trix-attachment")
+            .and_then(|data| serde_json::from_str::<Value>(data).ok()) else { continue };
+        if value.get("contentType").and_then(Value::as_str)
+            .is_some_and(|kind| kind.contains("application/vnd.actiontext.opengraph-embed")) {
+            continue;
+        }
+        if value.get("sgid").and_then(Value::as_str).is_some_and(malformed) {
+            return Some(MalformedActionTextSgid::DuringTrixConversion);
+        }
+    }
+    let attachments = Selector::parse("action-text-attachment[sgid]").unwrap();
+    for attachment in document.select(&attachments) {
+        if attachment.value().attr("content-type")
+            .is_some_and(|kind| kind.contains("application/vnd.actiontext.opengraph-embed")) {
+            continue;
+        }
+        if attachment.value().attr("sgid").is_some_and(malformed) {
+            return Some(MalformedActionTextSgid::AfterMessageSave);
+        }
+    }
+    None
 }
 fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String) {
     let canonical = action_text_webhook_html(input);
@@ -4785,6 +4837,9 @@ fn boost_area_html(s: &AppState, m: &ChatMessage) -> String {
     )
 }
 fn message_html(s: &AppState, m: &ChatMessage, request_headers: Option<&HeaderMap>) -> String {
+    if m.body_html.as_deref() == Some(UNRENDERABLE_ACTION_TEXT_BODY) {
+        return "\n<div class=\"message message--formatted message--failed center\">\n  <div class=\"message__body\">\n    <div class=\"message__body-content txt-align-center\">\n      Failed to load message content\n    </div>\n  </div>\n</div>\n".to_string();
+    }
     let fallback_headers = HeaderMap::new();
     let request_headers = request_headers.unwrap_or(&fallback_headers);
     let copy_url = html_escape::encode_single_quoted_attribute(&public_url(
@@ -6155,6 +6210,29 @@ fn clear_message_attachment(db: &mut rusqlite::Connection, mid: i64, t: &str) ->
     tx.commit().map_err(db_err)?;
     Ok(())
 }
+fn save_unrenderable_action_text_message(
+    s: &AppState,
+    u: &User,
+    rid: i64,
+    body: &str,
+    client_id: Option<String>,
+) -> Result<(), StatusCode> {
+    let db = pool(s)?;
+    let created = Utc::now();
+    let timestamp = created.to_rfc3339();
+    let created_at_ns = created.timestamp_nanos_opt().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let client_id = client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    db.execute(
+        "INSERT INTO messages(id,room_id,creator_id,body,body_html,body_source,client_message_id,created_at,created_at_ns,updated_at,updated_at_ns) VALUES((SELECT MAX(last_id,(SELECT COALESCE(MAX(id),0) FROM messages))+1 FROM id_sequences WHERE name='messages'),?1,?2,'',?3,?4,?5,?6,?7,?6,?7)",
+        params![rid,u.id,UNRENDERABLE_ACTION_TEXT_BODY,body,client_id,timestamp,created_at_ns],
+    ).map_err(db_err)?;
+    let id = db.last_insert_rowid();
+    // The saved source message fails during its after-commit search callback.
+    db.execute("DELETE FROM message_search_index WHERE rowid=?1", [id]).map_err(db_err)?;
+    touch_room(&db, rid)?;
+    Ok(())
+}
+
 fn insert_message(
     s: &Arc<AppState>,
     u: &User,
@@ -7016,6 +7094,18 @@ async fn message_create(
     if !message_seen {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
+    if rich {
+        match malformed_action_text_sgid(&body) {
+            Some(MalformedActionTextSgid::DuringTrixConversion) => {
+                return Ok(rails_exception_500_response(&headers, &uri));
+            }
+            Some(MalformedActionTextSgid::AfterMessageSave) => {
+                save_unrenderable_action_text_message(&s, &u, rid, &body, client_id)?;
+                return Ok(rails_exception_500_response(&headers, &uri));
+            }
+            None => {}
+        }
+    }
     let m = match insert_message(&s, &u, rid, &body, client_id, upload, rich, Some(&headers), true) {
         Ok(message) => message,
         Err(StatusCode::NOT_FOUND) => return missing_message_room_response(&s, &headers, &uri, &u),
@@ -7115,20 +7205,23 @@ async fn message_edit(
     let mid = path_record_id(&message_id)?;
     room_for(&s, u.id, rid)?;
     let db = pool(&s)?;
-    let row: Option<(i64, String, Option<String>, String)> = db
+    let row: Option<(i64, String, Option<String>, String, Option<String>)> = db
         .query_row(
-            "SELECT creator_id,body,body_source,client_message_id FROM messages WHERE id=?1 AND room_id=?2",
+            "SELECT creator_id,body,body_source,client_message_id,body_html FROM messages WHERE id=?1 AND room_id=?2",
             params![mid, rid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()
         .map_err(db_err)?;
-    let (creator, body, body_source, client_id) = row.ok_or(StatusCode::NOT_FOUND)?;
+    let (creator, body, body_source, client_id, body_html) = row.ok_or(StatusCode::NOT_FOUND)?;
     if !is_admin(&u) && creator != u.id {
         return Err(StatusCode::FORBIDDEN);
     }
     if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
+    }
+    if body_html.as_deref() == Some(UNRENDERABLE_ACTION_TEXT_BODY) {
+        return Ok(rails_exception_500_response(&headers, &uri));
     }
     let source = esc(&body_source.unwrap_or(body));
     let client_id = esc(&client_id);

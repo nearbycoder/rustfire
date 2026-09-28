@@ -1,22 +1,24 @@
-"""Compare unsigned ActionText attachment fallbacks on disposable apps.
+"""Compare ActionText attachment fallbacks and malformed IDs on disposable apps.
 
 Run after ``cargo build --release`` with the pinned Campfire checkout and bundle.
 """
 
-import argparse
+import hashlib
 import html
+import http.client
 import pathlib
 import sqlite3
 import subprocess
 import tempfile
+import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
-from paired_rich_filters import indexed_texts, post_blank
+from paired_rich_filters import Presentation, indexed_texts
 
 
-CASES = [
+FALLBACK_CASES = [
     ("missing-empty", "<div>A<action-text-attachment></action-text-attachment>Z</div>"),
     ("missing-filename", "<div>A<action-text-attachment filename='notes.txt'></action-text-attachment>Z</div>"),
     ("missing-caption", "<div>A<action-text-attachment caption='A caption'></action-text-attachment>Z</div>"),
@@ -26,27 +28,79 @@ CASES = [
     ("remote-image-caption", "<div>A<action-text-attachment content-type='image/png' url='https://example.com/picture.png' caption='Picture'></action-text-attachment>Z</div>"),
     ("content-html", "<div>A<action-text-attachment content-type='text/html' content='&lt;strong&gt;Hello&lt;/strong&gt;'></action-text-attachment>Z</div>"),
     ("trix-missing", "<div>A<figure data-trix-attachment='{" + html.escape('"filename":"notes.txt"', quote=True) + "}'>notes.txt</figure>Z</div>"),
+    ("empty-sgid", "<div>A<action-text-attachment sgid='' filename='notes.txt'></action-text-attachment>Z</div>"),
+    ("preview-invalid-sgid", "<div>A<action-text-attachment sgid='invalid' content-type='application/vnd.actiontext.opengraph-embed' href='https://example.com/article' url='https://example.com/picture.png' filename='Example'></action-text-attachment>Z</div>"),
 ]
 
 MALFORMED_CASES = [
     ("invalid-sgid", "<div>A<action-text-attachment sgid='invalid' filename='notes.txt'></action-text-attachment>Z</div>"),
     ("invalid-trix-sgid", "<div>A<figure data-trix-attachment='{" + html.escape('"sgid":"invalid","filename":"notes.txt","contentType":"text/plain"', quote=True) + "}'>notes.txt</figure>Z</div>"),
 ]
+CASES = FALLBACK_CASES + MALFORMED_CASES
+
+
+def post_case(port, cookie, csrf, name, body):
+    fields = urllib.parse.urlencode({
+        "message[body]": body,
+        "message[client_message_id]": f"paired-rich-filter-{name}",
+        "authenticity_token": csrf,
+    })
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("POST", "/rooms/1/messages", fields, {
+            "Cookie": cookie,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/vnd.turbo-stream.html, text/html",
+        })
+        response = connection.getresponse()
+        payload = response.read()
+        presentation = Presentation(f"paired-rich-filter-{name}")
+        presentation.feed(payload.decode())
+        error = (response.getheader("Content-Type"), hashlib.sha256(payload).hexdigest()) if response.status == 500 else None
+        return response.status, presentation.structure, error
+    finally:
+        connection.close()
+
+
+def failed_message_count(port, cookie):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("GET", "/rooms/1/messages", headers={"Cookie": cookie, "Accept": "text/html"})
+        response = connection.getresponse()
+        payload = response.read().decode()
+        assert response.status == 200, response.status
+        return payload.count('class="message message--formatted message--failed center"')
+    finally:
+        connection.close()
+
+
+def malformed_message_reads(port, cookie, message_id):
+    results = {}
+    for action in ("", "/edit"):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        try:
+            connection.request("GET", f"/rooms/1/messages/{message_id}{action}", headers={"Cookie": cookie, "Accept": "text/html"})
+            response = connection.getresponse()
+            payload = response.read()
+            error = (response.getheader("Content-Type"), hashlib.sha256(payload).hexdigest()) if response.status == 500 else None
+            results[action or "show"] = (response.status, error, payload.count(b"Failed to load message content"))
+        finally:
+            connection.close()
+    return results
 
 
 def run(port, cookie, csrf, database, cases):
-    presentations = {name: post_blank(port, cookie, csrf, name, body) for name, body in cases}
+    presentations = {name: post_case(port, cookie, csrf, name, body) for name, body in cases}
     search = indexed_texts(database, cases)
     with sqlite3.connect(database) as db:
         saved = {name: db.execute("SELECT COUNT(*) FROM messages WHERE client_message_id=?", [f"paired-rich-filter-{name}"]).fetchone()[0] for name, _ in cases}
-    return presentations, search, saved
+        malformed_id = db.execute("SELECT id FROM messages WHERE client_message_id='paired-rich-filter-invalid-sgid'").fetchone()[0]
+    failed = failed_message_count(port, cookie)
+    reads = malformed_message_reads(port, cookie, malformed_id)
+    return presentations, search, saved, failed, reads
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--include-malformed", action="store_true", help="include two known failing malformed-SGID cases")
-    args = parser.parse_args()
-    cases = CASES + (MALFORMED_CASES if args.include_malformed else [])
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-action-text-fallbacks-") as scratch:
         temp = pathlib.Path(scratch)
@@ -64,7 +118,7 @@ def main():
         try:
             rust_process = start_server(rust_db, rust_port, {"RUSTFIRE_CAMPFIRE_SECRET_KEY_BASE": env["SECRET_KEY_BASE"]})
             try:
-                rust = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, cases)
+                rust = run(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, CASES)
             finally:
                 stop_server(rust_process)
             with (temp / "puma.log").open("w+") as log:
@@ -72,7 +126,7 @@ def main():
                 try:
                     wait_for_server(camp_port, camp_process)
                     cookie, csrf = login_campfire(camp_port)
-                    camp = run(camp_port, cookie, csrf, camp_db, cases)
+                    camp = run(camp_port, cookie, csrf, camp_db, CASES)
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -85,7 +139,7 @@ def main():
             redis.wait(timeout=10)
             redis_log.close()
     mismatches = []
-    for name, _ in cases:
+    for name, _ in CASES:
         rust_response, camp_response = rust[0][name], camp[0][name]
         rust_search, camp_search = rust[1][name], camp[1][name]
         rust_saved, camp_saved = rust[2][name], camp[2][name]
@@ -95,8 +149,10 @@ def main():
         else:
             assert rust_response[0] == (500 if name.startswith("invalid-") else 200), (name, rust_response[0])
             print(f"{name}: matched response and search text")
+    assert rust[3] == camp[3] == 1, ("saved malformed message fallback", rust[3], camp[3])
+    assert rust[4] == camp[4], ("saved malformed message reads", rust[4], camp[4])
     assert not mismatches, f"{len(mismatches)} ActionText fallback cases differ"
-    print(f"PASS {len(cases)} ActionText fallback cases")
+    print(f"PASS {len(CASES)} ActionText fallback cases")
 
 
 if __name__ == "__main__":
