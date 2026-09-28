@@ -9437,7 +9437,7 @@ async fn profile_post(
             .map_err(|_| StatusCode::BAD_REQUEST)?
         {
             let field_name = field.name().unwrap_or("").to_string();
-            if matches!(field_name.as_str(), "user[avatar]" | "avatar") {
+            if field_name == "user[avatar]" {
                 let content_type = field
                     .content_type()
                     .unwrap_or("application/octet-stream")
@@ -9447,18 +9447,13 @@ async fn profile_post(
                     return Err(StatusCode::UNPROCESSABLE_ENTITY);
                 }
                 avatar = Some((bytes.to_vec(), content_type));
-            } else if matches!(
-                field_name.as_str(),
-                "name"
-                    | "user[name]"
-                    | "email_address"
-                    | "user[email_address]"
-                    | "password"
-                    | "user[password]"
-                    | "bio"
-                    | "user[bio]"
-                    | "_method"
-            ) {
+            } else if field_name == "avatar" {
+                let _ = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                values.insert(field_name, String::new());
+            } else if field_name == "user"
+                || field_name == "_method"
+                || (field_name.starts_with("user[") && field_name.ends_with(']'))
+            {
                 values.insert(
                     field_name,
                     field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?,
@@ -9475,6 +9470,12 @@ async fn profile_post(
     if f.is_empty() && avatar.is_none() {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
+    if f.contains_key("user") || f.contains_key("user[]") {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
+    if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
+        return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], "").into_response());
+    }
     let name = form_value(&f, "name", "user[name]").unwrap_or(&u.name);
     let email = form_value(&f, "email_address", "user[email_address]");
     let password = match form_value(&f, "password", "user[password]") {
@@ -9485,7 +9486,7 @@ async fn profile_post(
     let bio = form_value(&f, "bio", "user[bio]");
     if pool(&s)?
         .execute(
-            "UPDATE users SET name=?1,email_address=COALESCE(?2,email_address),bio=COALESCE(?3,bio),password_digest=COALESCE(?4,password_digest),updated_at=?5 WHERE id=?6",
+            "UPDATE users SET name=?1,email_address=COALESCE(?2,email_address),bio=COALESCE(?3,bio),password_digest=COALESCE(?4,password_digest),updated_at=?5 WHERE id=?6 AND (name IS NOT ?1 OR email_address IS NOT COALESCE(?2,email_address) OR bio IS NOT COALESCE(?3,bio) OR ?4 IS NOT NULL)",
             params![name,email,bio,password,now(),u.id],
         )
         .is_err()

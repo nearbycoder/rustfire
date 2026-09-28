@@ -173,6 +173,9 @@ def main():
         with sqlite3.connect(camp_base) as source, sqlite3.connect(rust_base) as target:
             source_name = source.execute("SELECT name FROM rooms WHERE id=1").fetchone()[0]
             target.execute("UPDATE rooms SET name=? WHERE id=1", [source_name])
+            source_message_sequence = source.execute("SELECT seq FROM sqlite_sequence WHERE name='messages'").fetchone()
+            if source_message_sequence:
+                target.execute("UPDATE id_sequences SET last_id=MAX(last_id,?) WHERE name='messages'", source_message_sequence)
         if args.role == "member":
             with sqlite3.connect(rust_base) as db:
                 db.execute("DELETE FROM sessions")

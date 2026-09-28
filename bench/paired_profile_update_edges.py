@@ -25,12 +25,17 @@ CASES = (
     ("blank name", {"user[name]": ""}),
     ("blank email", {"user[email_address]": ""}),
     ("duplicate email", {"user[email_address]": "collision@example.invalid"}),
+    ("method only", {}),
+    ("unknown top-level", {"foo": "bar"}),
+    ("unknown user field", {"user[unknown]": "bar"}),
+    ("scalar user", {"user": "bar"}),
+    ("array user", {"user[]": "bar"}),
 )
 
 
 def profile_row(database):
     with sqlite3.connect(database) as db:
-        return db.execute("SELECT name,email_address,bio,password_digest FROM users WHERE id=1").fetchone()
+        return db.execute("SELECT name,email_address,bio,password_digest,updated_at FROM users WHERE id=1").fetchone()
 
 
 def update(port, cookie, csrf, database, fields):
@@ -41,7 +46,7 @@ def update(port, cookie, csrf, database, fields):
     after = profile_row(database)
     response_body = (len(response), hashlib.sha256(response).hexdigest()) if response else None
     return (status, urllib.parse.urlsplit(location).path if location else None,
-            response_body, after[:3], after[3] != before[3], after[3] is not None)
+            response_body, after[:3], after[3] != before[3], after[3] is not None, after[4] != before[4])
 
 
 def verify_short_password_sign_in(port):

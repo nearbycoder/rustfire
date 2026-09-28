@@ -10,6 +10,7 @@ import urllib.parse
 
 from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, isolated_campfire, start_redis
+from paired_bot_admin import PNG
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 
 
@@ -17,7 +18,11 @@ def multipart(fields):
     boundary = "rustfire-profile-method-check"
     pieces = []
     for name, value in fields:
-        pieces.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+        if isinstance(value, tuple):
+            filename, content_type, data = value
+            pieces.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'.encode() + data + b'\r\n')
+        else:
+            pieces.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
     pieces.append(f"--{boundary}--\r\n".encode())
     return b"".join(pieces), f"multipart/form-data; boundary={boundary}"
 
@@ -74,6 +79,11 @@ CASES = (
     ("urlencoded uppercase method", [("_method", "PATCH"), ("user[name]", "URL uppercase works")], True, "urlencoded"),
     ("header patch override", [("user[name]", "Header method works")], True, "urlencoded", "PATCH"),
     ("form method takes precedence", [("_method", "delete"), ("user[name]", "Header should not save")], True, "urlencoded", "PATCH"),
+    ("multipart missing user group", [("_method", "patch"), ("foo", "bar")], True, "multipart"),
+    ("multipart unknown nested user field", [("_method", "patch"), ("user[unknown]", "bar")], True, "multipart"),
+    ("multipart scalar user", [("_method", "patch"), ("user", "bar")], True, "multipart"),
+    ("multipart array user", [("_method", "patch"), ("user[]", "bar")], True, "multipart"),
+    ("multipart unscoped avatar", [("_method", "patch"), ("avatar", ("avatar.png", "image/png", PNG))], True, "multipart"),
 )
 
 
