@@ -3676,8 +3676,9 @@ async fn reject_banned_ip(
                 .and_then(|value| value.to_str().ok()).unwrap_or("");
             let form_method = content_type.starts_with("application/x-www-form-urlencoded")
                 .then(|| form_urlencoded::parse(&bytes)
-                    .find(|(key, _)| key == "_method")
-                    .map(|(_, value)| value.into_owned()))
+                    .filter(|(key, _)| key == "_method")
+                    .map(|(_, value)| value.into_owned())
+                    .last())
                 .flatten();
             let tunneled = form_method.as_deref().or_else(|| parts.headers
                 .get("x-http-method-override").and_then(|value| value.to_str().ok()))

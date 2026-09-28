@@ -206,6 +206,8 @@ def public_route_activity(port, database, session_id, cookie):
         ("put override transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"_method=put", {}),
         ("patch override transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"_method=patch", {}),
         ("header override transfer", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"", {"X-HTTP-Method-Override": "PUT"}),
+        ("duplicate override invalid first", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"_method=delete&_method=put", {}),
+        ("duplicate override valid first", "POST", "/session/transfers/invalid", csrf.group(1).decode(), b"_method=put&_method=delete", {}),
         ("valid transfer override", "POST", valid_transfer, csrf.group(1).decode(), b"_method=put", {}),
         ("bad login CSRF", "POST", "/session", "incorrect-csrf",
          b"email_address=benchmark%40example.invalid&password=benchmark-password", {}),
