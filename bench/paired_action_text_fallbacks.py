@@ -3,9 +3,11 @@
 Run after ``cargo build --release`` with the pinned Campfire checkout and bundle.
 """
 
+import base64
 import hashlib
 import html
 import http.client
+import json
 import pathlib
 import sqlite3
 import subprocess
@@ -16,6 +18,21 @@ from direct_lookup import free_port, start_server, stop_server
 from paired_banned_content import BUNDLE, REPOSITORY, REVISION, RUBY, start_redis
 from paired_direct_lookup import login_campfire, seed_campfire, seed_rustfire, wait_for_server
 from paired_rich_filters import Presentation, edit_message, indexed_texts
+
+
+def invalid_room_sgid():
+    # Rails 7 signed-ID envelope with the room's Marshal GID and an invalid
+    # signature. Room is not an ActionText attachable, unlike a User mention.
+    user_gid = base64.b64decode("BAhJIhpnaWQ6Ly9jYW1wZmlyZS9Vc2VyLzIGOgZFVA==")
+    room_gid = user_gid.replace(b"User/2", b"Room/1")
+    assert room_gid != user_gid
+    envelope = {"_rails": {"message": base64.b64encode(room_gid).decode(), "exp": None, "pur": "attachable"}}
+    return base64.b64encode(json.dumps(envelope).encode()).decode() + "--invalid"
+
+
+def invalid_current_room_sgid():
+    envelope = {"_rails": {"data": "gid://campfire/Rooms::Open/1?expires_in", "pur": "attachable"}}
+    return base64.b64encode(json.dumps(envelope).encode()).decode() + "--invalid"
 
 
 FALLBACK_CASES = [
@@ -30,6 +47,9 @@ FALLBACK_CASES = [
     ("trix-missing", "<div>A<figure data-trix-attachment='{" + html.escape('"filename":"notes.txt"', quote=True) + "}'>notes.txt</figure>Z</div>"),
     ("empty-sgid", "<div>A<action-text-attachment sgid='' filename='notes.txt'></action-text-attachment>Z</div>"),
     ("preview-invalid-sgid", "<div>A<action-text-attachment sgid='invalid' content-type='application/vnd.actiontext.opengraph-embed' href='https://example.com/article' url='https://example.com/picture.png' filename='Example'></action-text-attachment>Z</div>"),
+    ("preview-room-sgid", f"<div>A<action-text-attachment sgid='{invalid_current_room_sgid()}' content-type='application/vnd.actiontext.opengraph-embed' href='https://example.com/article' url='https://example.com/picture.png' filename='Example'></action-text-attachment>Z</div>"),
+    ("room-invalid-signature", f"<div>A<action-text-attachment sgid='{invalid_room_sgid()}' filename='room.txt'></action-text-attachment>Z</div>"),
+    ("room-current-invalid-signature", f"<div>A<action-text-attachment sgid='{invalid_current_room_sgid()}' filename='room.txt'></action-text-attachment>Z</div>"),
 ]
 
 MALFORMED_CASES = [

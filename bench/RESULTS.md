@@ -1919,3 +1919,9 @@ Commit `6e20cc0` then passed the same ten-second, four-room rich-message workloa
 | Rustfire first | 1,481.8 | 2,700.6 | 1.82× | 178.76 / 19.07 ms |
 
 Campfire used 22 Puma workers and Rustfire one release process. The load generator and both servers shared one host; socket setup was outside the measured interval. This sampled point does not establish maximum scale, sustained capacity, or a whole-app advantage at full parity.
+
+## Room signed IDs in ActionText attachments
+
+The pinned Campfire ActionText test exercises a room signed ID whose signature cannot verify. A new paired HTTP case found that Rustfire left its attachment tag in the message and indexed its filename, while Campfire displayed the missing-attachment marker and indexed no attachment text. Rustfire now recognizes room GlobalIDs in both Rails 7 and current signed-ID envelopes and applies that fallback. A separate paired case showed that a link-preview attachment still renders its card when it carries such an ID, so preview handling takes precedence. The expanded `python bench/paired_action_text_fallbacks.py` checks **16** cases; the signed-mention and inline-upload probes passed after the first room-ID fix. These cases cover selected signed-ID and preview shapes, not every ActionText attachable.
+
+An administrator sweep with `python bench/paired_valid_write_route_inventory.py --body foo=bar` also matched **80/80** valid-CSRF submitted-form method/path cases. It compares response shape, common table-count changes, and route-specific follow-up state on fresh disposable databases; it does not verify every meaningful form value.

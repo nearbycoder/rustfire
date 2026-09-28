@@ -662,6 +662,30 @@ fn campfire_safe_data_url(value: &str) -> bool {
     };
     matches!(media_type, "image/gif" | "image/jpeg" | "image/png" | "text/css" | "text/plain")
 }
+fn non_attachable_room_sgid(sgid: &str) -> bool {
+    if sgid.len() > 2048 {
+        return false;
+    }
+    let encoded = sgid.split_once("--").map_or(sgid, |(message, _)| message);
+    let Some(envelope) = STANDARD.decode(encoded)
+        .or_else(|_| URL_SAFE.decode(encoded))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(encoded))
+        .ok()
+        .and_then(|payload| serde_json::from_slice::<Value>(&payload).ok()) else {
+        return false;
+    };
+    let Some(rails) = envelope.get("_rails") else { return false };
+    let is_room = |gid: &[u8]| {
+        gid.windows(b"gid://campfire/Room/".len()).any(|part| part == b"gid://campfire/Room/")
+            || gid.windows(b"gid://campfire/Rooms::".len()).any(|part| part == b"gid://campfire/Rooms::")
+    };
+    if rails.get("data").and_then(Value::as_str).is_some_and(|data| is_room(data.as_bytes())) {
+        return true;
+    }
+    rails.get("message").and_then(Value::as_str)
+        .and_then(|message| STANDARD.decode(message).or_else(|_| URL_SAFE.decode(message)).or_else(|_| URL_SAFE_NO_PAD.decode(message)).ok())
+        .is_some_and(|marshaled| is_room(&marshaled))
+}
 fn replace_unsigned_action_text_attachments(input: &str, display: bool) -> (String, bool) {
     if !input.contains("action-text-attachment") {
         return (input.to_string(), false);
@@ -676,10 +700,15 @@ fn replace_unsigned_action_text_attachments(input: &str, display: bool) -> (Stri
             return capture[0].to_string();
         };
         let attributes = element.value();
-        if attributes.attr("sgid").is_some_and(|sgid| !sgid.is_empty())
-            || attributes.attr("content-type") == Some("application/vnd.actiontext.opengraph-embed")
-        {
+        if attributes.attr("content-type") == Some("application/vnd.actiontext.opengraph-embed") {
             return capture[0].to_string();
+        }
+        if let Some(sgid) = attributes.attr("sgid").filter(|sgid| !sgid.is_empty()) {
+            return if non_attachable_room_sgid(sgid) {
+                if display { "☒".to_string() } else { String::new() }
+            } else {
+                capture[0].to_string()
+            };
         }
         let content_type = attributes.attr("content-type").unwrap_or("");
         let caption = attributes.attr("caption");
@@ -14591,6 +14620,12 @@ mod tests {
         assert_eq!(super::mention_user_id_from_sgid(&[8u8; 32], None, &format!("{message}--invalid")), Some(42));
         let room = STANDARD.encode(serde_json::json!({"_rails":{"data":"gid://campfire/Room/42","pur":"attachable"}}).to_string());
         assert_eq!(super::mention_user_id_from_sgid(&key, None, &format!("{room}--invalid")), None);
+        assert!(super::non_attachable_room_sgid(&format!("{room}--invalid")));
+        let open_room = STANDARD.encode(serde_json::json!({"_rails":{"data":"gid://campfire/Rooms::Open/42?expires_in","pur":"attachable"}}).to_string());
+        assert!(super::non_attachable_room_sgid(&format!("{open_room}--invalid")));
+        assert!(!super::non_attachable_room_sgid(&format!("{message}--invalid")));
+        let blob = STANDARD.encode(serde_json::json!({"_rails":{"data":"gid://campfire/ActiveStorage::Blob/42?expires_in","pur":"attachable"}}).to_string());
+        assert!(!super::non_attachable_room_sgid(&format!("{blob}--invalid")));
         let legacy = STANDARD.encode(serde_json::json!({"_rails":{"message":"BAhJIhtnaWQ6Ly9jYW1wZmlyZS9Vc2VyLzQyBjoGRVQ=","exp":null,"pur":"attachable"}}).to_string());
         assert_eq!(super::mention_user_id_from_sgid(&key, None, &format!("{legacy}--invalid")), Some(42));
         assert_eq!(super::mention_user_id_from_sgid(&key, None, "invalid--invalid"), None);
