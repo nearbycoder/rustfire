@@ -69,6 +69,7 @@ def main():
                 reset_membership(rust_db)
                 rust_result = capture(rust_port, "session_token=benchmark-session", rust_db)
                 rust_stale = capture(rust_port, "session_token=benchmark-session", rust_db, "stale")
+                rust_actions = capture(rust_port, "session_token=benchmark-session", rust_db, "actions")
             finally:
                 stop_server(rust)
             with open(temp / "puma.log", "w+") as log:
@@ -83,6 +84,7 @@ def main():
                     cookie, _ = login_campfire(camp_port)
                     camp_result = capture(camp_port, cookie, camp_db)
                     camp_stale = capture(camp_port, cookie, camp_db, "stale")
+                    camp_actions = capture(camp_port, cookie, camp_db, "actions")
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -97,8 +99,9 @@ def main():
         assert rust_startup == camp_startup, (rust_startup, camp_startup)
         assert rust_result == camp_result, (rust_result, camp_result)
         assert rust_stale == camp_stale, (rust_stale, camp_stale)
-        print("PASS paired Action Cable startup reset, presence subscription, refresh, and stale connection behavior")
-        print(json.dumps({"startup": rust_startup, "fresh": rust_result, "stale": rust_stale}, sort_keys=True))
+        assert rust_actions == camp_actions, (rust_actions, camp_actions)
+        print("PASS paired Action Cable startup reset, presence subscription, refresh, stale connection, and explicit action behavior")
+        print(json.dumps({"startup": rust_startup, "fresh": rust_result, "stale": rust_stale, "actions": rust_actions}, sort_keys=True))
 
 
 if __name__ == "__main__":

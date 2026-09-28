@@ -12897,7 +12897,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
         return;
     }
     let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
-    let mut presence_subscriptions: HashMap<String, (i64, bool)> = HashMap::new();
+    let mut presence_subscriptions: HashMap<String, i64> = HashMap::new();
     let mut sent_close = false;
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(3),
@@ -12938,7 +12938,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     if accepted {
                         if channel=="PresenceChannel" {
                             if !presence_subscriptions.contains_key(ident) {
-                                presence_subscriptions.insert(ident.to_string(), (rid, true));
+                                presence_subscriptions.insert(ident.to_string(), rid);
                                 let _=presence_update(&s,u.id,rid,"present");
                             }
                         } else if let Some(hub)=hub { if let std::collections::hash_map::Entry::Vacant(entry)=subscriptions.entry(ident.to_string()) {
@@ -12955,7 +12955,7 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                 } else if action=="unsubscribe" {
                     if let Some(task)=subscriptions.remove(ident){task.abort();}
                     if channel=="PresenceChannel" {
-                        if let Some((room_id, true))=presence_subscriptions.remove(ident) {
+                        if let Some(room_id)=presence_subscriptions.remove(ident) {
                             let _=presence_update(&s,u.id,room_id,"absent");
                         }
                     }
@@ -12966,11 +12966,9 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
                     }
                 } else if action=="message" && channel=="PresenceChannel" && room_for(&s,u.id,rid).is_ok() {
                     let data=cmd.get("data").and_then(Value::as_str).and_then(|raw|serde_json::from_str::<Value>(raw).ok()).unwrap_or(Value::Null);
-                    if let (Some(action), Some((room_id, present)))=(data.get("action").and_then(Value::as_str),presence_subscriptions.get_mut(ident)) {
-                        if *room_id==rid {
-                            if action=="absent" && *present {*present=false;let _=presence_update(&s,u.id,rid,"absent");}
-                            else if action=="present" && !*present {*present=true;let _=presence_update(&s,u.id,rid,"present");}
-                            else if action=="refresh" && *present {let _=presence_update(&s,u.id,rid,"refresh");}
+                    if let (Some(action), Some(room_id))=(data.get("action").and_then(Value::as_str),presence_subscriptions.get(ident)) {
+                        if *room_id==rid && matches!(action,"present" | "absent" | "refresh") {
+                            let _=presence_update(&s,u.id,rid,action);
                         }
                     }
                 }
@@ -12990,10 +12988,8 @@ async fn ws_loop(s: Arc<AppState>, u: User, socket: WebSocket) {
     for (_, task) in subscriptions {
         task.abort();
     }
-    for (_, (rid, present)) in presence_subscriptions {
-        if present {
-            let _ = presence_update(&s, u.id, rid, "absent");
-        }
+    for (_, rid) in presence_subscriptions {
+        let _ = presence_update(&s, u.id, rid, "absent");
     }
 }
 async fn health(OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Response {

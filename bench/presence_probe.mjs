@@ -107,7 +107,38 @@ try {
   await waitFor(frame => frame.type === 'welcome', 'Action Cable welcome');
   send({ command: 'subscribe', identifier: read });
   await confirm(read);
-  if (args.mode === 'stale') {
+  if (args.mode === 'actions') {
+    const stages = [];
+    const action = async (name, expectedConnections) => {
+      const previous = state();
+      send({ command: 'message', identifier: first, data: JSON.stringify({ action: name }) });
+      await until(() => {
+        const current = state();
+        return current[0] === expectedConnections && (name !== 'refresh' || current[1] !== previous[1]);
+      }, `${name} action`);
+      const [connections, connectedAt, unreadAt] = state();
+      stages.push([name, connections, connectedAt !== null, unreadAt === null]);
+    };
+    send({ command: 'subscribe', identifier: first });
+    await confirm(first);
+    await readEvent();
+    await until(() => state()[0] === 1, 'initial presence');
+    sql('update memberships set unread_at=? where room_id=1 and user_id=1', ['2025-01-01 00:00:00']);
+    await action('present', 2);
+    await readEvent();
+    await action('absent', 1);
+    sql('update memberships set unread_at=? where room_id=1 and user_id=1', ['2025-01-01 00:00:00']);
+    await action('refresh', 1);
+    await action('absent', 0);
+    await action('refresh', 1);
+    await action('absent', 0);
+    send({ command: 'unsubscribe', identifier: first });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const [connections, connectedAt] = state();
+    const unexpectedReadEvents = frames.filter(frame => frame.identifier === read && frame.message?.room_id === 1).length;
+    if (unexpectedReadEvents) throw new Error(`Unexpected read events after refresh/absent: ${unexpectedReadEvents}`);
+    console.log(JSON.stringify({ stages, final: [connections, connectedAt !== null], extraReadEvents: 1 }));
+  } else if (args.mode === 'stale') {
     const staleTime = '2020-01-01 00:00:00';
     const marker = '2025-01-01 00:00:00';
     sql('update memberships set connections=3,connected_at=?,unread_at=? where room_id=1 and user_id=1', [staleTime, marker]);
