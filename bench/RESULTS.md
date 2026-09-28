@@ -1910,3 +1910,12 @@ The servers and load generator shared one host; socket setup was outside the mea
 ## ActionText saved-source serialization
 
 The expanded rich-text sweep initially found 55 saved ActionText source differences across 224 paired create cases, even when presentation and search text matched. Parsing the submitted fragment with the same HTML normalization used for display reduced that to eight cases; preserving submitted attribute order after normalization resolved those remaining cases. `python bench/paired_rich_filters.py --sweep --source-audit` now passes **227/227** paired presentation, saved-source, and search comparisons, plus four blank creates and three edits. The added cases exercise fake tags in comments, scripts, and textareas. The signed-mention, 13-case attachment-fallback, and inline-upload probes also passed after this change; the release build and all **52** Rust unit tests passed. These finite fixtures do not establish serialization parity for every possible HTML input.
+
+Commit `6e20cc0` then passed the same ten-second, four-room rich-message workload in both server orders. Each app saved all 80 posts within the writer deadline, delivered all 8,000 expected message appends and 8,000 unread events, had zero checked read errors, and matched 320 sampled append structures. The [paired report](results/actiontext-source-rich-mix-10s.json) contains the commands and per-app measurements:
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Campfire / Rustfire write p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Campfire first | 1,375.5 | 2,929.0 | 2.13× | 175.79 / 21.29 ms |
+| Rustfire first | 1,481.8 | 2,700.6 | 1.82× | 178.76 / 19.07 ms |
+
+Campfire used 22 Puma workers and Rustfire one release process. The load generator and both servers shared one host; socket setup was outside the measured interval. This sampled point does not establish maximum scale, sustained capacity, or a whole-app advantage at full parity.
