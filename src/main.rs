@@ -11258,6 +11258,9 @@ async fn bot_messages_get(
         }
     }
     let messages = message_list_with_room_name(&s, rid, 40, before, after, html_format)?;
+    if !html_format && messages.iter().any(|message| message.body_html.as_deref() == Some(UNRENDERABLE_ACTION_TEXT_BODY)) {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
     let db = pool(&s)?;
     let count: i64 = db
         .query_row(

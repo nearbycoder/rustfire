@@ -89,6 +89,17 @@ def malformed_message_reads(port, cookie, message_id):
     return results
 
 
+def malformed_bot_read(port):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("GET", "/rooms/1/3-abcdefgh1234/messages", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        payload = response.read()
+        return response.status, response.getheader("Content-Type"), hashlib.sha256(payload).hexdigest() if response.status == 500 else len(payload)
+    finally:
+        connection.close()
+
+
 def run(port, cookie, csrf, database, cases):
     presentations = {name: post_case(port, cookie, csrf, name, body) for name, body in cases}
     search = indexed_texts(database, cases)
@@ -97,7 +108,16 @@ def run(port, cookie, csrf, database, cases):
         malformed_id = db.execute("SELECT id FROM messages WHERE client_message_id='paired-rich-filter-invalid-sgid'").fetchone()[0]
     failed = failed_message_count(port, cookie)
     reads = malformed_message_reads(port, cookie, malformed_id)
-    return presentations, search, saved, failed, reads
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE users SET role=2,bot_token='abcdefgh1234' WHERE id=3")
+        stamp = "2026-01-01T00:00:00Z"
+        columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
+        if "updated_at" in columns:
+            db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at,updated_at) VALUES(1,3,'mentions',?,?)", (stamp, stamp))
+        else:
+            db.execute("INSERT INTO memberships(room_id,user_id,involvement,created_at) VALUES(1,3,'mentions',?)", (stamp,))
+    bot_read = malformed_bot_read(port)
+    return presentations, search, saved, failed, reads, bot_read
 
 
 def main():
@@ -151,6 +171,7 @@ def main():
             print(f"{name}: matched response and search text")
     assert rust[3] == camp[3] == 1, ("saved malformed message fallback", rust[3], camp[3])
     assert rust[4] == camp[4], ("saved malformed message reads", rust[4], camp[4])
+    assert rust[5] == camp[5], ("saved malformed message bot JSON", rust[5], camp[5])
     assert not mismatches, f"{len(mismatches)} ActionText fallback cases differ"
     print(f"PASS {len(CASES)} ActionText fallback cases")
 
