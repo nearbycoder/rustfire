@@ -157,6 +157,7 @@ def run_case(case, index, temp, rust_base, camp_base, checkout, base_env, redis_
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all-accepts", action="store_true")
+    parser.add_argument("--accept", choices=("text/html", "application/json", "text/vnd.turbo-stream.html", "*/*"), help="test one Accept header")
     parser.add_argument("--filter", help="regular expression for METHOD PATH")
     parser.add_argument("--limit", type=int, help="maximum number of selected cases")
     parser.add_argument("--show-source-log", action="store_true", help="print the Campfire server log for mismatches")
@@ -190,7 +191,7 @@ def main():
         routes = inventory(checkout, base_env)
         if args.filter:
             routes = [(method, path) for method, path in routes if re.search(args.filter, f"{method} {path}")]
-        accepts = ("text/html", "application/json", "text/vnd.turbo-stream.html", "*/*") if args.all_accepts else ("text/html",)
+        accepts = (args.accept,) if args.accept else (("text/html", "application/json", "text/vnd.turbo-stream.html", "*/*") if args.all_accepts else ("text/html",))
         cases = [(method, path, accept) for method, path in routes for accept in accepts]
         if args.limit:
             cases = cases[:args.limit]

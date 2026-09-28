@@ -32,26 +32,43 @@ CASES = (
     ("blank account group", {"account": ""}),
     ("scalar account group", {"account": "unexpected"}),
     ("missing account", {}),
+    ("query account name only", {}, {"account[name]": "Query Account"}),
+    ("query overrides body name", {"account[name]": "Body Account"}, {"account[name]": "Query Account"}),
+    ("query scalar account", {"account[name]": "Body Account"}, {"account": "scalar"}),
+    ("body scalar with query group", {"account": "scalar"}, {"account[name]": "Query Account"}),
+    ("query unknown account field", {"account[name]": "Body Account"}, {"account[unknown]": "bar"}),
+    ("query setting overrides body", {SETTING: "false"}, {SETTING: "true"}),
+    ("unknown setting", {"account[settings][future_setting]": "hello"}),
+    ("query unknown setting", {"account[name]": "Body Account"}, {"account[settings][future_setting]": "hello"}),
+    ("scalar settings", {"account[settings]": "bogus"}),
+    ("blank settings", {"account[settings]": ""}),
+    ("scalar logo", {"account[logo]": "bogus"}),
+    ("blank logo", {"account[logo]": ""}),
+    ("query scalar logo", {"account[name]": "Body Account"}, {"account[logo]": "bogus"}),
+    ("query blank logo", {"account[name]": "Body Account"}, {"account[logo]": ""}),
 )
 
 
 def state(database, campfire):
     with sqlite3.connect(database) as db:
-        name = db.execute("SELECT name FROM accounts WHERE id=1").fetchone()[0]
+        name, updated_at = db.execute("SELECT name,updated_at FROM accounts WHERE id=1").fetchone()
         if campfire:
             settings = json.loads(db.execute("SELECT settings FROM accounts WHERE id=1").fetchone()[0])
             restriction = bool(settings.get("restrict_room_creation_to_administrators", False))
         else:
             restriction = bool(db.execute("SELECT restrict_room_creation FROM account_settings WHERE id=1").fetchone()[0])
-    return name, restriction
+    return name, restriction, updated_at
 
 
-def update(port, cookie, csrf, database, campfire, fields):
+def update(port, cookie, csrf, database, campfire, fields, query=None):
+    before = state(database, campfire)
     body = urllib.parse.urlencode(fields).encode()
-    status, location, response = request(port, "PATCH", "/account", cookie, csrf, body,
+    path = "/account" + ("?" + urllib.parse.urlencode(query) if query else "")
+    status, location, response = request(port, "PATCH", path, cookie, csrf, body,
                                          "application/x-www-form-urlencoded")
     response_body = (len(response), hashlib.sha256(response).hexdigest()) if response else None
-    return status, urllib.parse.urlsplit(location).path if location else None, response_body, state(database, campfire)
+    after = state(database, campfire)
+    return status, urllib.parse.urlsplit(location).path if location else None, response_body, after[:2], after[2] != before[2]
 
 
 def main():
@@ -76,9 +93,9 @@ def main():
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
                     results = []
-                    for label, fields in CASES:
-                        rust_result = update(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False, fields)
-                        camp_result = update(camp_port, cookie, csrf, camp_db, True, fields)
+                    for label, fields, *query in CASES:
+                        rust_result = update(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, False, fields, query[0] if query else None)
+                        camp_result = update(camp_port, cookie, csrf, camp_db, True, fields, query[0] if query else None)
                         results.append((label, rust_result, camp_result))
                 except Exception:
                     log.flush()

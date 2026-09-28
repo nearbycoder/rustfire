@@ -2248,6 +2248,7 @@ fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> R
     let media = error_media_type(headers, uri);
     let json = media.as_bytes().starts_with(b"application/json");
     let body = match (status, json) {
+        (StatusCode::BAD_REQUEST, true) => r#"{"status":400,"error":"Bad Request"}"#,
         (StatusCode::NOT_FOUND, true) => r#"{"status":404,"error":"Not Found"}"#,
         (StatusCode::NOT_FOUND, false) => include_str!("../static/errors/404.html"),
         (StatusCode::UNPROCESSABLE_ENTITY, true) => r#"{"status":422,"error":"Unprocessable Content"}"#,
@@ -8482,7 +8483,7 @@ async fn account_update(
     let tunneled_post =
         req.method() == Method::POST && matches!(req.uri().path(), "/account" | "/account.1");
     let mut logo = None;
-    let f = if headers
+    let mut f = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
@@ -8537,9 +8538,21 @@ async fn account_update(
     if tunneled_post && !matches!(f.get("_method").map(String::as_str), Some("patch" | "put")) {
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
+    if let Some(query) = uri.query().filter(|query| parameter_group_present(query.as_bytes(), "account")) {
+        f = fields(query.as_bytes()).0;
+        logo = None;
+    }
     if f.get("account").is_some_and(|value| !value.is_empty())
         && !f.keys().any(|key| key.starts_with("account["))
     {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
+    if f.keys().any(|key| key.starts_with("account[settings][")
+        && key != "account[settings][restrict_room_creation_to_administrators]")
+    {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
+    if f.get("account[logo]").is_some_and(|value| !value.is_empty()) {
         return Ok(rails_exception_500_response(&headers, &uri));
     }
     let name = form_value(&f, "name", "account[name]");
@@ -8576,20 +8589,22 @@ async fn account_update(
     };
     let result = (|| -> Result<Option<String>, StatusCode> {
         let tx = db.transaction().map_err(db_err)?;
-        if let Some(name) = name {
+        let current_name: String = tx.query_row("SELECT name FROM accounts WHERE id=1", [], |row| row.get(0)).map_err(db_err)?;
+        let current_restricted: bool = tx.query_row("SELECT restrict_room_creation FROM account_settings WHERE id=1", [], |row| row.get(0)).map_err(db_err)?;
+        let new_restricted = restricted.map(|value| !matches!(value, "" | "0" | "false" | "FALSE" | "f" | "F" | "off" | "OFF"));
+        let name_changed = name.is_some_and(|value| value != current_name);
+        let setting_changed = new_restricted.is_some_and(|value| value != current_restricted);
+        if name_changed || setting_changed || new_logo.is_some() {
             tx.execute(
-                "UPDATE accounts SET name=?1,updated_at=?2",
+                "UPDATE accounts SET name=COALESCE(?1,name),updated_at=?2 WHERE id=1",
                 params![name, now()],
             )
             .map_err(db_err)?;
-        } else if new_logo.is_some() || restricted.is_some() {
-            tx.execute("UPDATE accounts SET updated_at=?1", [now()])
-                .map_err(db_err)?;
         }
-        if let Some(restricted) = restricted {
+        if let Some(restricted) = new_restricted.filter(|_| setting_changed) {
             tx.execute(
                 "UPDATE account_settings SET restrict_room_creation=?1 WHERE id=1",
-                [!matches!(restricted, "" | "0" | "false" | "FALSE" | "f" | "F" | "off" | "OFF")],
+                [restricted],
             )
             .map_err(db_err)?;
         }

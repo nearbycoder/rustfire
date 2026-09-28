@@ -141,6 +141,23 @@ def workflow(port, cookie, csrf, database, campfire, jpeg, bmp, sample_dir, clie
             restricted = bool(db.execute("SELECT restrict_room_creation FROM account_settings WHERE id=1").fetchone()[0])
             count = db.execute("SELECT COUNT(*) FROM account_logos WHERE id=1").fetchone()[0]
         result["persisted"] = name, restricted, count
+        if campfire:
+            logo_identity = db.execute("""SELECT blob_id FROM active_storage_attachments
+                WHERE record_type='Account' AND record_id=1 AND name='logo'""").fetchone()[0]
+        else:
+            logo_identity = db.execute("SELECT stored_name FROM account_logos WHERE id=1").fetchone()[0]
+        account_stamp = db.execute("SELECT updated_at FROM accounts WHERE id=1").fetchone()[0]
+    status, location, payload = request(port, "PATCH", "/account?account%5Bunknown%5D=bar", cookie, csrf, body, content_type)
+    assert status == 302 and urllib.parse.urlsplit(location).path == "/account/edit", (status, payload[:300])
+    with sqlite3.connect(database) as db:
+        if campfire:
+            current_logo = db.execute("""SELECT blob_id FROM active_storage_attachments
+                WHERE record_type='Account' AND record_id=1 AND name='logo'""").fetchone()[0]
+        else:
+            current_logo = db.execute("SELECT stored_name FROM account_logos WHERE id=1").fetchone()[0]
+        assert current_logo == logo_identity
+        assert db.execute("SELECT updated_at FROM accounts WHERE id=1").fetchone()[0] == account_stamp
+    result["query_suppressed_upload"] = True
     custom_tags = []
     for size, path in (("large", "/account/logo"), ("small", "/account/logo?size=small")):
         etag, body = cached_logo(port, path, stock_tags[0])
