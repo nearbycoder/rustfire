@@ -339,6 +339,12 @@ def main():
             source.close()
         subprocess.run((binary, "--render-imported-rich-text"), env=environment, check=True)
         checkpoint = sqlite3.connect(stage_db)
+        counts["preserved_missing_search"] = checkpoint.execute("""SELECT count(*) FROM messages m
+            WHERE NOT EXISTS(SELECT 1 FROM message_search_index idx WHERE idx.rowid=m.id)""").fetchone()[0]
+        if counts["preserved_missing_search"] > counts["reindexed_messages"]:
+            checkpoint.close()
+            raise ValueError("import dropped existing Campfire search entries")
+        counts["reindexed_messages"] -= counts["preserved_missing_search"]
         checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         checkpoint.execute("PRAGMA journal_mode=DELETE")
         checkpoint.close()

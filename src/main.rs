@@ -13270,6 +13270,16 @@ fn render_imported_rich_text(
         }
         let tx = conn.transaction()?;
         for (id, source, missing_search) in &batch {
+            if malformed_action_text_sgid(source) == Some(MalformedActionTextSgid::AfterMessageSave) {
+                // Campfire commits a direct attachment tag before its search
+                // callback raises. Preserve both the failed rendering state
+                // and the absence of that source search-index row.
+                tx.execute("UPDATE messages SET body_html=?1 WHERE id=?2", params![UNRENDERABLE_ACTION_TEXT_BODY,id])?;
+                if *missing_search {
+                    tx.execute("DELETE FROM message_search_index WHERE rowid=?1", [id])?;
+                }
+                continue;
+            }
             let gallery = canonicalize_attachment_galleries(source);
             let cleaned = strip_disallowed_rich_tags(&gallery);
             let (inline, used) = render_imported_inline_files(cleaned.as_deref().unwrap_or(&gallery), &tx, *id, signing_key, imported_key, blob_key, true)
