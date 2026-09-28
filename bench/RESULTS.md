@@ -1934,3 +1934,7 @@ Commit `24a4370` repeated a ten-second, 32-client rich-mention bot API read in b
 | Campfire first | 952.2 | 2,819.7 | 2.96× | 64.63 / 15.85 ms |
 
 Campfire used 22 Puma workers and Rustfire one release process on the same host. These short reads exercise a signed-mention JSON page; they do not establish sustained capacity or a whole-app speed advantage.
+
+## Ordinary message push payloads
+
+`python bench/paired_push_message_payload.py` uses pinned Campfire's `Room::MessagePusher` and `WebPush::Notification` to build four actual notification JSON bodies, then checks Rustfire's production payload functions against them. Shared-room rich text, direct-room multiline text, and a file-only message matched. An unnamed shared room exposed a mismatch: Campfire encodes its missing title as JSON `null`, while Rustfire had converted the database null to an empty string. Rustfire now retains the null room name through payload construction. The four-case paired probe and all **53** Rust unit tests pass after the fix. This compares unencrypted payload bytes as parsed JSON; provider transport, delivery timing, and actual browser notifications remain unverified.

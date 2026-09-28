@@ -6750,9 +6750,9 @@ impl From<&'static str> for PushBody {
 }
 fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCode> {
     let db = pool(s)?;
-    let room_name: String = db
+    let room_name: Option<String> = db
         .query_row(
-            "SELECT COALESCE(name,'') FROM rooms WHERE id=?1",
+            "SELECT name FROM rooms WHERE id=?1",
             [message.room_id],
             |r| r.get(0),
         )
@@ -6760,19 +6760,13 @@ fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCo
     let cutoff = (Utc::now() - Duration::seconds(60)).to_rfc3339();
     let rows = push_recipients(&db, message.room_id, message.creator_id, &cutoff, &message.mention_ids)?;
     drop(db);
-    let direct = message.room_kind.as_deref() == Some("Rooms::Direct");
-    let title = if direct {
-        message.creator_name.clone()
-    } else {
-        room_name
-    };
-    let body = push_message_body(message, direct);
+    let (title, body) = push_message_content(message, room_name);
     for (subscription, badge) in rows {
         let Ok(queue_permit) = s.push_queue_slots.clone().try_acquire_owned() else {
             break;
         };
         let state = s.clone();
-        let payload=json!({"title":title,"options":{"body":body,"icon":"/account/logo","data":{"path":format!("/rooms/{}",message.room_id),"badge":badge}}}).to_string();
+        let payload = push_message_payload(title.as_deref(), &body, message.room_id, badge).to_string();
         tokio::spawn(async move {
             let _queue_permit = queue_permit;
             let Ok(_worker_permit) = state.push_slots.clone().acquire_owned().await else {
@@ -6784,6 +6778,14 @@ fn enqueue_push(s: &Arc<AppState>, message: &ChatMessage) -> Result<(), StatusCo
         });
     }
     Ok(())
+}
+fn push_message_content(message: &ChatMessage, room_name: Option<String>) -> (Option<String>, String) {
+    let direct = message.room_kind.as_deref() == Some("Rooms::Direct");
+    let title = if direct { Some(message.creator_name.clone()) } else { room_name };
+    (title, push_message_body(message, direct))
+}
+fn push_message_payload(title: Option<&str>, body: &str, room_id: i64, badge: i64) -> Value {
+    json!({"title":title,"options":{"body":body,"icon":"/account/logo","data":{"path":format!("/rooms/{room_id}"),"badge":badge}}})
 }
 fn push_message_body(message: &ChatMessage, direct: bool) -> String {
     let plain = if message.body.trim().is_empty() {
@@ -14333,6 +14335,58 @@ mod tests {
         assert_eq!(super::push_message_body(&message, false), "Alex: report.pdf");
         message.body = "x".repeat(3000);
         assert_eq!(super::push_message_body(&message, false).len(), 3006);
+    }
+
+    #[test]
+    fn push_message_payload_matches_pinned_campfire() {
+        let mut message = super::ChatMessage {
+            id: 1,
+            room_id: 1,
+            room_kind: Some("Rooms::Open".into()),
+            room_name: "All Talk".into(),
+            mention_ids: Vec::new(),
+            creator_id: 1,
+            creator_name: "Test Admin".into(),
+            creator_bio: None,
+            creator_role: 1,
+            creator_updated_at: String::new(),
+            body: super::rich_body("<div>Hello <strong>team</strong></div>", None).0,
+            body_html: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            client_message_id: String::new(),
+            attachment: None,
+            boosts: Vec::new(),
+        };
+        let mut payloads = Vec::new();
+        let (title, body) = super::push_message_content(&message, Some("All Talk".into()));
+        payloads.push(super::push_message_payload(title.as_deref(), &body, message.room_id, 3));
+        message.room_id = 2;
+        message.room_kind = Some("Rooms::Direct".into());
+        message.body = super::rich_body("<div>Line one<br>line two</div>", None).0;
+        let (title, body) = super::push_message_content(&message, None);
+        payloads.push(super::push_message_payload(title.as_deref(), &body, message.room_id, 3));
+        message.room_id = 1;
+        message.room_kind = Some("Rooms::Open".into());
+        message.body.clear();
+        message.attachment = Some(super::Attachment {
+            id: 1,
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            width: None,
+            height: None,
+        });
+        let (title, body) = super::push_message_content(&message, Some("All Talk".into()));
+        payloads.push(super::push_message_payload(title.as_deref(), &body, message.room_id, 3));
+        message.room_id = 3;
+        message.body = "Hello".into();
+        message.attachment = None;
+        let (title, body) = super::push_message_content(&message, None);
+        payloads.push(super::push_message_payload(title.as_deref(), &body, message.room_id, 0));
+        let expected = std::env::var("RUSTFIRE_EXPECTED_PUSH_MESSAGE_PAYLOADS").unwrap_or_else(|_| {
+            r#"[{"title":"All Talk","options":{"body":"Test Admin: Hello team","icon":"/account/logo","data":{"path":"/rooms/1","badge":3}}},{"title":"Test Admin","options":{"body":"Line one\nline two","icon":"/account/logo","data":{"path":"/rooms/2","badge":3}}},{"title":"All Talk","options":{"body":"Test Admin: report.pdf","icon":"/account/logo","data":{"path":"/rooms/1","badge":3}}},{"title":null,"options":{"body":"Test Admin: Hello","icon":"/account/logo","data":{"path":"/rooms/3","badge":0}}}]"#.into()
+        });
+        assert_eq!(payloads, serde_json::from_str::<Vec<serde_json::Value>>(&expected).unwrap());
     }
 
     #[test]
