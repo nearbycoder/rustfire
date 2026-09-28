@@ -2261,9 +2261,18 @@ fn rails_error_response(status: StatusCode, headers: &HeaderMap, uri: &Uri) -> R
 }
 fn rails_exception_500_response(headers: &HeaderMap, uri: &Uri) -> Response {
     let mut response = rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, headers, uri);
-    if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"text/html")) {
-        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=UTF-8"));
-    }
+    let media = if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"application/json")) {
+        "application/json; charset=UTF-8"
+    } else { "text/html; charset=UTF-8" };
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(media));
+    response
+}
+fn rails_exception_400_response(headers: &HeaderMap, uri: &Uri) -> Response {
+    let mut response = rails_error_response(StatusCode::BAD_REQUEST, headers, uri);
+    let media = if response.headers().get(header::CONTENT_TYPE).is_some_and(|value| value.as_bytes().starts_with(b"application/json")) {
+        "application/json; charset=UTF-8"
+    } else { "text/html; charset=UTF-8" };
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(media));
     response
 }
 fn path_record_id(value: &str) -> Result<i64, StatusCode> {
@@ -8084,13 +8093,16 @@ async fn search_get(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> AppResult {
     let u = user(&s, &headers)?;
+    let raw_query = match rails_scalar_query_value(uri.query().unwrap_or("").as_bytes(), "q") {
+        Ok(value) => value.unwrap_or_default(),
+        Err(StatusCode::BAD_REQUEST) => return Ok(rails_exception_400_response(&headers, &uri)),
+        Err(_) => return Ok(rails_exception_500_response(&headers, &uri)),
+    };
     if let Some(response) = reject_html_format(&headers, &uri) {
         return Ok(response);
     }
-    let raw_query = q.get("q").cloned().unwrap_or_default();
     let query = search_query(&raw_query);
     let db = pool(&s)?;
     let mut messages = Vec::new();
@@ -8168,6 +8180,22 @@ async fn search_get(
     let footer = format!("<div class=\"composer flex align-end gap\"><a class=\"btn flex-item-no-shrink margin-block-end\" style=\"view-transition-name: input-switcher; --btn-border-radius: 0.5em\" href=\"{back_href}\"><img aria-hidden=\"true\" src=\"/assets/arrow-left-abe40556.svg\"><span class=\"for-screen-reader\">Exit search </span></a><form class=\"margin-block flex-item-grow contain flex align-center gap\" data-controller=\"form\" data-action=\"keydown.esc-&gt;form#cancel\" action=\"/searches\" accept-charset=\"UTF-8\" method=\"post\"><input type=\"hidden\" name=\"authenticity_token\" value=\"{}\"><div class=\"composer__input flex align-center flex-item-grow gap full-width input input--actor min-width\"><img aria-hidden=\"true\" class=\"composer__input-hint colorize--black\" style=\"view-transition-name: input-btn;\" src=\"/assets/search-5f29565f.svg\" width=\"20\" height=\"20\"><input{input_value} class=\"searches__input input flex-item-grow\" role=\"searchbox\" aria-label=\"search\" autofocus=\"autofocus\" required=\"required\" type=\"text\" name=\"q\" id=\"q\"><a data-form-target=\"cancel\" role=\"button\" class=\"searches__reset\" href=\"/searches\"><img aria-hidden=\"true\" class=\"colorize--black\" src=\"/assets/remove-0e7a045d.svg\" width=\"14\" height=\"14\"><span class=\"for-screen-reader\">Clear search field</span></a><button name=\"button\" type=\"submit\" class=\"btn btn--reversed flex-item-no-shrink txt-small\" style=\"--btn-border-radius: 0.5em\"><img aria-hidden=\"true\" src=\"/assets/arrow-up-f96b3895.svg\"><span class=\"for-screen-reader\">Search</span></button></div></form></div>", esc(token));
     Ok(render_source_page_sections("Search", &body, &nav, &footer, &sidebar, "sidebar searches", "", "", Some(&u), token))
 }
+fn rails_scalar_query_value(raw: &[u8], name: &str) -> Result<Option<String>, StatusCode> {
+    let mut value = None;
+    let mut nested = false;
+    for (key, item) in form_urlencoded::parse(raw) {
+        if key == name {
+            value = Some(item.into_owned());
+            nested = false;
+        } else if key.starts_with(&format!("{name}[")) && key.ends_with(']') {
+            if value.is_some() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            nested = true;
+        }
+    }
+    if nested { Err(StatusCode::INTERNAL_SERVER_ERROR) } else { Ok(value) }
+}
 fn search_query(raw: &str) -> String {
     static NON_WORD: OnceLock<Regex> = OnceLock::new();
     NON_WORD
@@ -8179,13 +8207,19 @@ async fn search_post(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    Form(f): Form<HashMap<String, String>>,
+    RawForm(raw): RawForm,
 ) -> AppResult {
     let u = user(&s, &headers)?;
-    let Some(raw_query) = f.get("q") else {
-        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    let query_parameters = uri.query().unwrap_or("").as_bytes();
+    let parameters = if parameter_group_present(query_parameters, "q") { query_parameters } else { &raw };
+    let raw_query = match rails_scalar_query_value(parameters, "q") {
+        Ok(Some(value)) => value,
+        Ok(None) | Err(StatusCode::INTERNAL_SERVER_ERROR) => {
+            return Ok(rails_exception_500_response(&headers, &uri));
+        }
+        Err(_) => return Ok(rails_exception_400_response(&headers, &uri)),
     };
-    let query = search_query(raw_query);
+    let query = search_query(&raw_query);
     let mut db = pool(&s)?;
     let tx = db.transaction().map_err(db_err)?;
     tx.execute("INSERT INTO searches(user_id,query,created_at,updated_at) VALUES(?1,?2,?3,?3) ON CONFLICT(user_id,query) DO UPDATE SET updated_at=excluded.updated_at",params![u.id,query,now()]).map_err(db_err)?;
