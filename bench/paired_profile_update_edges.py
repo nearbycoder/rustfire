@@ -1,6 +1,7 @@
 """Compare profile update edge inputs with pinned Campfire and disposable accounts."""
 
 import hashlib
+import http.client
 import pathlib
 import sqlite3
 import subprocess
@@ -72,6 +73,23 @@ def verify_short_password_sign_in(port):
     assert session_request(opener, port, "/rooms/1")[0] == 200
 
 
+def json_missing_user(port, cookie, csrf, database, method):
+    before = profile_row(database)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.request(method, "/users/1/profile", b"foo=bar", {
+            "Cookie": cookie, "X-CSRF-Token": csrf, "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        })
+        response = connection.getresponse()
+        body = response.read()
+        result = (response.status, (response.getheader("Content-Type") or "").split(";", 1)[0],
+                  len(body), hashlib.sha256(body).hexdigest(), profile_row(database) == before)
+        return result
+    finally:
+        connection.close()
+
+
 def main():
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip() == REVISION
     with tempfile.TemporaryDirectory(prefix="paired-profile-update-edges-") as scratch:
@@ -104,6 +122,10 @@ def main():
                         if label == "short password":
                             for port in (rust_port, camp_port):
                                 verify_short_password_sign_in(port)
+                    for method in ("PATCH", "PUT"):
+                        rust_result = json_missing_user(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, method)
+                        camp_result = json_missing_user(camp_port, cookie, csrf, camp_db, method)
+                        results.append((f"{method} JSON unknown top-level", rust_result, camp_result))
                 except Exception:
                     log.flush()
                     log.seek(0)
@@ -120,7 +142,7 @@ def main():
     for label, rust, camp in mismatches:
         print(f"{label}: Rustfire={rust}, Campfire={camp}")
     assert not mismatches, f"{len(mismatches)} profile update edge cases differ"
-    print(f"PASS {len(CASES)} paired profile edge updates match Campfire's responses and saved fields")
+    print(f"PASS {len(results)} paired profile edge updates match Campfire's responses and saved fields")
 
 
 if __name__ == "__main__":

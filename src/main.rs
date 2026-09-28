@@ -10090,7 +10090,7 @@ async fn profile_post(
         return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
     }
     if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
-        return Ok((StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], "").into_response());
+        return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     let name = permitted_form_value(&f, "user[name]").unwrap_or(&u.name);
     let email = permitted_form_value(&f, "user[email_address]");
