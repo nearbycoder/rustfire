@@ -1992,3 +1992,14 @@ Campfire used 22 Puma workers and Rustfire one release process on the same host.
 ## Unread events across room and membership states
 
 `python bench/paired_unread_events.py` now compares **14** states against pinned Campfire: eight open-room combinations of notification involvement and fresh, absent, or stale presence, plus three states each in private and direct rooms. In every case, the author and member received the same `UnreadRoomsChannel` event, the outsider received none, and the member's saved unread-marker presence matched Campfire. In particular, a disconnected member with involvement set to `nothing` still gets an unread marker, while an invisible or freshly connected member does not; a stale connection counts as disconnected. The fixture changes one room's type between phases and verifies message posts and unread side effects, not room-creation workflows, exact timestamps, or sustained fanout.
+
+## Current-build 8,000-socket rich browser-channel load
+
+Commit `9e8c6d1` passed the same 30-second, four-room, four-user load in both server orders after the signed room-stream authorization change. Each of 8,000 sockets subscribed to eight source-shaped browser channels. Both apps saved all 60 rich posts within their writer deadlines, delivered all 120,000 expected message appends and 120,000 unread events, received all expected presence-read events, and had zero checked read errors. The harness compared 240 sampled append structures and found no paired validation errors. Full reports: [Campfire first](results/rich-browser-8k-current-2026-09-28-camp-first.json) and [Rustfire first](results/rich-browser-8k-current-2026-09-28-rust-first.json).
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Campfire / Rustfire sampled peak PSS |
+| --- | ---: | ---: | ---: | ---: |
+| Campfire first | 1,169.8 | 2,507.3 | 2.14× | 5,955.9 / 1,287.5 MiB |
+| Rustfire first | 1,166.7 | 2,562.6 | 2.20× | 6,030.5 / 1,281.4 MiB |
+
+Campfire ran 22 Puma workers plus Redis; Rustfire ran one release process. The load generator and servers shared one host. Socket setup was excluded from the timed interval. The result establishes an advantage for this checked workload on this build; it does not establish maximum connection capacity, longer-term stability, or a whole-app advantage at full behavior parity.
