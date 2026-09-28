@@ -1290,6 +1290,8 @@ Rustfire served about **2.26–2.53×** as many checked reads per second in thes
 
 ## Rich-text presentation and search text
 
+`python bench/paired_action_text_fallbacks.py` passed nine unsigned ActionText attachment cases against pinned Campfire `91d294f`, comparing complete parsed message presentation, FTS search text, and saved message counts. The cases include absent attachables with and without filename or caption, an unknown content type, remote images with and without captions, embedded HTML content, and a Trix figure. A separate `--include-malformed` run identifies two remaining differences: Campfire returns 500 for a malformed SGID in either a direct attachment tag or a Trix figure; Rustfire returns 200. Campfire saves the direct-tag message without a search row and saves no Trix-figure message, while Rustfire saves and indexes both. These are behavior samples, not complete ActionText parity or performance results.
+
 `python bench/paired_rich_filters.py --sweep` passed 155 paired create cases against the pinned Campfire build. The probe compares each message's parsed presentation and saved FTS search text. Four additional blank browser posts matched status, presentation, and search rows; two edits matched the 302 redirect and updated search text. Campfire retains text inside some disallowed presentation tags and leading whitespace in its searchable body; Rustfire now does the same. A separate importer regression confirms that a missing search row is rebuilt from the original rich text while its displayed HTML remains sanitized. This is a sampled behavior check, not a performance or complete ActionText parity claim.
 
 ## Thirty-second mixed workload with 400 browser-channel sockets

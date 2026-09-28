@@ -150,6 +150,7 @@ A separate controlled push-response probe now matches Campfire's saved subscript
 
 - Exact Campfire HTML, CSS, Turbo and ActionCable protocol behavior across untested page states; sampled room and message pages now match in complete parsed head and body structure after documented generated-value normalization
 - Remaining ActionText rich-text behavior, media format and metadata edge cases, and less common link preview cases; duplicate Open Graph fields with blank later values now retain the earlier value as in the pinned source
+- Unsigned ActionText attachment fallbacks now match nine sampled presentation, search, and persistence cases. Malformed SGID attachments remain different: Campfire returns 500, with a saved message for a direct attachment tag and no saved message for a Trix figure; Rustfire currently accepts both. Run `python bench/paired_action_text_fallbacks.py --include-malformed` to reproduce the gap.
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior, remaining browser profiles, and actual cross-browser push delivery validation
 - Real iOS and Android soft-keyboard behavior; the boost handoff currently matches Campfire only in touch-capability-emulated Chromium

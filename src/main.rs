@@ -662,8 +662,65 @@ fn campfire_safe_data_url(value: &str) -> bool {
     };
     matches!(media_type, "image/gif" | "image/jpeg" | "image/png" | "text/css" | "text/plain")
 }
+fn replace_unsigned_action_text_attachments(input: &str, display: bool) -> (String, bool) {
+    if !input.contains("action-text-attachment") {
+        return (input.to_string(), false);
+    }
+    static ATTACHMENT: OnceLock<Regex> = OnceLock::new();
+    let pattern = ATTACHMENT.get_or_init(|| Regex::new(r"(?is)<action-text-attachment\b[^>]*>.*?</action-text-attachment>").unwrap());
+    let selector = Selector::parse("action-text-attachment").unwrap();
+    let mut blank_display = false;
+    let replaced = pattern.replace_all(input, |capture: &regex::Captures<'_>| {
+        let fragment = ParsedHtml::parse_fragment(&capture[0]);
+        let Some(element) = fragment.select(&selector).next() else {
+            return capture[0].to_string();
+        };
+        let attributes = element.value();
+        if attributes.attr("sgid").is_some()
+            || attributes.attr("content-type") == Some("application/vnd.actiontext.opengraph-embed")
+        {
+            return capture[0].to_string();
+        }
+        let content_type = attributes.attr("content-type").unwrap_or("");
+        let caption = attributes.attr("caption");
+        if content_type.contains("html") {
+            if let Some(content) = attributes.attr("content").filter(|content| !content.trim().is_empty()) {
+                return strip_disallowed_rich_tags(content).unwrap_or_else(|| content.to_string());
+            }
+        }
+        if (content_type == "image" || content_type.starts_with("image/"))
+            && attributes.attr("url").is_some()
+        {
+            if !display {
+                return format!("[{}]", esc(caption.unwrap_or("Image")));
+            }
+            let url = html_escape::encode_double_quoted_attribute(attributes.attr("url").unwrap_or(""));
+            let mut image = format!("<img src=\"{url}\"");
+            for dimension in ["width", "height"] {
+                if let Some(value) = attributes.attr(dimension) {
+                    image.push_str(&format!(" {dimension}=\"{}\"", html_escape::encode_double_quoted_attribute(value)));
+                }
+            }
+            image.push('>');
+            if let Some(caption) = caption {
+                image.push_str(&format!("{}\n    \n", esc(caption)));
+            }
+            return image;
+        }
+        if !display {
+            return esc(caption.unwrap_or(""));
+        }
+        if attributes.attrs().next().is_none() {
+            blank_display = true;
+        }
+        "☒".to_string()
+    }).into_owned();
+    (replaced, blank_display)
+}
 fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String) {
-    let display_input = replace_preview_attachments(input, request_host, true);
+    let canonical = action_text_webhook_html(input);
+    let (display_input, blank_display) = replace_unsigned_action_text_attachments(&canonical, true);
+    let display_input = replace_preview_attachments(&display_input, request_host, true);
     let html = ammonia::Builder::default()
         .link_rel(None)
         .add_tags(&["action-text-attachment", "figure", "figcaption", "address", "big"])
@@ -691,13 +748,15 @@ fn rich_body_trusted(input: &str, request_host: Option<&str>) -> (String, String
         })
         .clean(&display_input)
         .to_string();
+    let html = if blank_display { String::new() } else { html };
     let plain_input =
-        if input.contains("action-text-attachment") || input.contains("data-trix-attachment") {
-            let without_previews = replace_preview_attachments(input, request_host, false);
+        if canonical.contains("action-text-attachment") || canonical.contains("data-trix-attachment") {
+            let without_previews = replace_preview_attachments(&canonical, request_host, false);
+            let (without_unsigned, _) = replace_unsigned_action_text_attachments(&without_previews, false);
             ammonia::Builder::default()
                 .add_tags(&["action-text-attachment"])
                 .add_tag_attributes("action-text-attachment", &["filename"])
-                .clean(&without_previews)
+                .clean(&without_unsigned)
                 .to_string()
         } else {
             html.clone()
@@ -4683,7 +4742,13 @@ fn message_presentation_html(s: &AppState, m: &ChatMessage) -> String {
             .or_else(|| {
                 m.body_html
                     .as_ref()
-                    .map(|html| format!("<div class='trix-content'>{}</div>", preview_presentation_body(&m.body, html)))
+                    .map(|html| {
+                        if html.is_empty() {
+                            String::new()
+                        } else {
+                            format!("<div class='trix-content'>{}</div>", preview_presentation_body(&m.body, html))
+                        }
+                    })
             })
             .unwrap_or_else(|| {
                 format!(
@@ -13814,8 +13879,8 @@ mod tests {
             ("<blockquote><div>Quoted text</div></blockquote>", "“Quoted text”"),
             ("<div>Before</div><ul><li>One</li><li>Two</li></ul><div>After</div>", "Before\n• One\n• Two\n\nAfter"),
             ("<p>A</p><p>B</p>", "A\n\nB"),
-            ("<div>Before <action-text-attachment filename='photo.png' content-type='image/png'></action-text-attachment> after</div>", "Before [photo.png] after"),
-            ("<div>Before <action-text-attachment filename='photo.png'><figure><figcaption>photo.png 1 KB</figcaption></figure></action-text-attachment> after</div>", "Before [photo.png] after"),
+            ("<div>Before <action-text-attachment filename='photo.png' content-type='image/png'></action-text-attachment> after</div>", "Before  after"),
+            ("<div>Before <action-text-attachment filename='photo.png'><figure><figcaption>photo.png 1 KB</figcaption></figure></action-text-attachment> after</div>", "Before  after"),
         ];
         for (input, expected) in cases {
             assert_eq!(super::rich_body(input, None).0, expected, "{input}");
