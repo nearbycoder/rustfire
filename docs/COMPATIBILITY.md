@@ -176,7 +176,7 @@ A paired unread-channel probe now matches fourteen member-presence and notificat
 - Remaining ActionText mention forms and webhook triggering edge cases; full migration of existing Campfire content, full presence integration and notification behavior; exact upstream typing and unread behavior
 - Complete PWA behavior, remaining browser profiles, and actual cross-browser push delivery validation
 - Real iOS and Android soft-keyboard behavior; the boost handoff currently matches Campfire only in touch-capability-emulated Chromium
-- Remaining webhook response and failure edge cases, longer delivery tests and capacity sweeps, and JSON API compatibility
+- Remaining webhook response and failure edge cases, longer delivery tests and capacity sweeps, and JSON API compatibility. A nineteen-case bot POST probe now matches Campfire's raw-body and multipart attachment selection, including zero-byte named files, raw multipart fallback when no file is supplied, URL attachment precedence, and missing-room validation order.
 - Remaining account/user administration and exact behavior for bans and profile/session-transfer edge cases
 - Remaining small interaction features
 - Broader security review, HTTPS deployment headers, and an optional Content Security Policy (the pinned Campfire policy is disabled)

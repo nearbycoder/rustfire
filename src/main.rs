@@ -11599,49 +11599,89 @@ async fn bot_messages_post(
     req: Request,
 ) -> AppResult {
     let u = bot_api_actor(&s, &headers, &key)?;
-    let (body, attachment) = if headers
+    if let Err(error) = room_for(&s, u.id, rid) {
+        return if error == StatusCode::NOT_FOUND {
+            Ok((StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html")]).into_response())
+        } else {
+            Err(error)
+        };
+    }
+    let content_type = headers
         .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .starts_with("multipart/form-data")
-    {
-        let mut multipart = Multipart::from_request(req, &s)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let query_attachment = fields(uri.query().unwrap_or("").as_bytes()).0.remove("attachment");
+    if query_attachment.as_ref().is_some_and(|value| !value.is_empty()) {
+        return Ok(rails_exception_500_response(&headers, &uri));
+    }
+    let blank_query_attachment = query_attachment.is_some();
+    let (body, attachment) = if blank_query_attachment {
+        let raw = axum::body::to_bytes(req.into_body(), 128 * 1024 * 1024)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "text/html")]).into_response());
+        }
+        (String::new(), None)
+    } else if content_type.starts_with("multipart/form-data") {
+        let boundary = multer::parse_boundary(content_type).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let captured = Arc::new(Mutex::new(Some(Vec::new())));
+        let stream_capture = captured.clone();
+        let mut received = 0usize;
+        let stream = req.into_body().into_data_stream().map(move |part| {
+            let bytes = part.map_err(|error| std::io::Error::other(error.to_string()))?;
+            received = received.saturating_add(bytes.len());
+            if received > 128 * 1024 * 1024 {
+                return Err(std::io::Error::other("multipart body exceeds limit"));
+            }
+            if let Some(raw) = stream_capture.lock().unwrap().as_mut() {
+                raw.extend_from_slice(&bytes);
+            }
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let mut multipart = multer::Multipart::new(stream, boundary);
         let mut attachment = None;
-        let mut body = String::new();
+        let mut invalid_attachment = false;
         while let Some(field) = multipart
             .next_field()
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?
         {
-            match field.name() {
-                Some("attachment") => {
-                    let filename = field.file_name().unwrap_or("attachment").to_string();
+            if field.name() == Some("attachment") {
+                if let Some(filename) = field.file_name().filter(|name| !name.is_empty()) {
+                    let filename = filename.to_string();
+                    *captured.lock().unwrap() = None;
                     let content_type = field
                         .content_type()
-                        .unwrap_or("application/octet-stream")
-                        .to_string();
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "application/octet-stream".to_string());
                     let bytes = field
                         .bytes()
                         .await
                         .map_err(|_| StatusCode::BAD_REQUEST)?
                         .to_vec();
-                    if !bytes.is_empty() {
-                        attachment = Some(Upload {
-                            filename,
-                            content_type,
-                            bytes,
-                            temporary: None,
-                        });
-                    }
+                    attachment = Some(Upload {
+                        filename,
+                        content_type,
+                        bytes,
+                        temporary: None,
+                    });
+                } else if field.file_name().is_none()
+                    && !field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?.is_empty()
+                {
+                    invalid_attachment = true;
                 }
-                Some("body") => {
-                    body = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-                }
-                _ => {}
             }
         }
+        if invalid_attachment {
+            return Ok(rails_exception_500_response(&headers, &uri));
+        }
+        let body = if attachment.is_some() {
+            String::new()
+        } else {
+            let raw = captured.lock().unwrap().take().unwrap_or_default();
+            String::from_utf8(raw).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?
+        };
         (body, attachment)
     } else {
         let bytes = axum::body::to_bytes(req.into_body(), 25 * 1024 * 1024)
@@ -11652,10 +11692,10 @@ async fn bot_messages_post(
             None,
         )
     };
-    if body.trim().is_empty() && attachment.is_none() {
-        return Ok((StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "text/html; charset=UTF-8")]).into_response());
+    if body.trim().is_empty() && attachment.is_none() && !blank_query_attachment {
+        return Ok((StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "text/html")]).into_response());
     }
-    let m = insert_message(&s, &u, rid, &body, None, attachment, true, Some(&headers), false)?;
+    let m = insert_message(&s, &u, rid, &body, None, attachment, true, Some(&headers), blank_query_attachment)?;
     if s.webhooks_enabled {
         if let Err(error) = enqueue_webhooks(&s, &m) {
             eprintln!("Rustfire webhook dispatch error: {error}");
