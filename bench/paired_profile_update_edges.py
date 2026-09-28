@@ -30,6 +30,15 @@ CASES = (
     ("unknown user field", {"user[unknown]": "bar"}),
     ("scalar user", {"user": "bar"}),
     ("array user", {"user[]": "bar"}),
+    ("query user only", {}, {"user[name]": "Query Name"}),
+    ("query and body user names", {"user[name]": "Body Name"}, {"user[name]": "Query Name"}),
+    ("query user scalar", {"user[name]": "Body Name"}, {"user": "scalar"}),
+    ("body user scalar with query group", {"user": "scalar"}, {"user[name]": "Query Name"}),
+    ("query unknown user field", {"user[name]": "Body Name"}, {"user[unknown]": "bar"}),
+    ("scalar avatar field", {"user[avatar]": "bogus"}),
+    ("query scalar avatar field", {"user[name]": "Body Name"}, {"user[avatar]": "bogus"}),
+    ("blank avatar field", {"user[avatar]": ""}),
+    ("query blank avatar field", {"user[name]": "Body Name"}, {"user[avatar]": ""}),
 )
 
 
@@ -38,10 +47,11 @@ def profile_row(database):
         return db.execute("SELECT name,email_address,bio,password_digest,updated_at FROM users WHERE id=1").fetchone()
 
 
-def update(port, cookie, csrf, database, fields):
+def update(port, cookie, csrf, database, fields, query=None):
     before = profile_row(database)
     body = urllib.parse.urlencode({"_method": "patch", **fields}).encode()
-    status, location, response = request(port, "POST", "/users/me/profile", cookie, csrf, body,
+    path = "/users/me/profile" + ("?" + urllib.parse.urlencode(query) if query else "")
+    status, location, response = request(port, "POST", path, cookie, csrf, body,
                                          "application/x-www-form-urlencoded")
     after = profile_row(database)
     response_body = (len(response), hashlib.sha256(response).hexdigest()) if response else None
@@ -84,9 +94,9 @@ def main():
                     wait_for_server(camp_port, camp)
                     cookie, csrf = login_campfire(camp_port)
                     results = []
-                    for label, fields in CASES:
-                        rust_result = update(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, fields)
-                        camp_result = update(camp_port, cookie, csrf, camp_db, fields)
+                    for label, fields, *query in CASES:
+                        rust_result = update(rust_port, "session_token=benchmark-session", "benchmark-csrf", rust_db, fields, query[0] if query else None)
+                        camp_result = update(camp_port, cookie, csrf, camp_db, fields, query[0] if query else None)
                         results.append((label, rust_result, camp_result))
                         if label == "short password":
                             for port in (rust_port, camp_port):

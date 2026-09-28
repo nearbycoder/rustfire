@@ -32,7 +32,17 @@ def profile_row(database):
         return db.execute("SELECT name,email_address,bio FROM users WHERE id=1").fetchone()
 
 
-def request(port, database, cookie, csrf, fields, valid_csrf, encoding, method_header=None):
+def avatar_identity(database):
+    with sqlite3.connect(database) as db:
+        if db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='active_storage_attachments')").fetchone()[0]:
+            row = db.execute("""SELECT blob_id FROM active_storage_attachments
+                WHERE record_type='User' AND record_id=1 AND name='avatar'""").fetchone()
+        else:
+            row = db.execute("SELECT stored_name FROM avatars WHERE user_id=1").fetchone()
+        return row[0] if row else None
+
+
+def request(port, database, cookie, csrf, fields, valid_csrf, encoding, method_header=None, query=None):
     body, content_type = (
         multipart(fields) if encoding == "multipart"
         else (urllib.parse.urlencode(fields).encode(), "application/x-www-form-urlencoded")
@@ -40,6 +50,7 @@ def request(port, database, cookie, csrf, fields, valid_csrf, encoding, method_h
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
         before = profile_row(database)
+        avatar_before = avatar_identity(database)
         headers = {
             "Cookie": cookie,
             "Accept": "text/html",
@@ -48,7 +59,8 @@ def request(port, database, cookie, csrf, fields, valid_csrf, encoding, method_h
         }
         if method_header:
             headers["X-HTTP-Method-Override"] = method_header
-        connection.request("POST", "/users/me/profile", body=body, headers=headers)
+        path = "/users/me/profile" + ("?" + urllib.parse.urlencode(query) if query else "")
+        connection.request("POST", path, body=body, headers=headers)
         response = connection.getresponse()
         data = response.read()
         location = response.getheader("Location")
@@ -59,6 +71,7 @@ def request(port, database, cookie, csrf, fields, valid_csrf, encoding, method_h
             (len(data), hashlib.sha256(data).hexdigest()) if data else None,
             profile_row(database) != before,
             profile_row(database),
+            avatar_identity(database) != avatar_before,
         )
     finally:
         connection.close()
@@ -84,6 +97,8 @@ CASES = (
     ("multipart scalar user", [("_method", "patch"), ("user", "bar")], True, "multipart"),
     ("multipart array user", [("_method", "patch"), ("user[]", "bar")], True, "multipart"),
     ("multipart unscoped avatar", [("_method", "patch"), ("avatar", ("avatar.png", "image/png", PNG))], True, "multipart"),
+    ("query suppresses multipart avatar", [("_method", "patch"), ("user[avatar]", ("avatar.png", "image/png", PNG))], True, "multipart", None, {"user[unknown]": "bar"}),
+    ("query scalar overrides multipart avatar", [("_method", "patch"), ("user[avatar]", ("avatar.png", "image/png", PNG))], True, "multipart", None, {"user": "scalar"}),
 )
 
 
@@ -113,8 +128,9 @@ def main():
                     comparisons = []
                     for label, fields, valid_csrf, encoding, *extra in CASES:
                         method_header = extra[0] if extra else None
-                        rust_result = request(rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", fields, valid_csrf, encoding, method_header)
-                        camp_result = request(camp_port, camp_db, cookie, csrf, fields, valid_csrf, encoding, method_header)
+                        query = extra[1] if len(extra) > 1 else None
+                        rust_result = request(rust_port, rust_db, "session_token=benchmark-session", "benchmark-csrf", fields, valid_csrf, encoding, method_header, query)
+                        camp_result = request(camp_port, camp_db, cookie, csrf, fields, valid_csrf, encoding, method_header, query)
                         comparisons.append((label, rust_result, camp_result))
                 finally:
                     stop_server(camp)

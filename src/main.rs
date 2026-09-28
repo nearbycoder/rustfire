@@ -9421,7 +9421,7 @@ async fn profile_post(
 ) -> AppResult {
     let u = user(&s, &headers)?;
     let mut avatar = None;
-    let f = if headers
+    let mut f = if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
@@ -9467,10 +9467,17 @@ async fn profile_post(
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         fields(&raw).0
     };
+    if let Some(query) = uri.query().filter(|query| parameter_group_present(query.as_bytes(), "user")) {
+        f = fields(query.as_bytes()).0;
+        avatar = None;
+    }
     if f.is_empty() && avatar.is_none() {
         return Ok(rails_error_response(StatusCode::BAD_REQUEST, &headers, &uri));
     }
     if f.contains_key("user") || f.contains_key("user[]") {
+        return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
+    }
+    if f.get("user[avatar]").is_some_and(|value| !value.is_empty()) {
         return Ok(rails_error_response(StatusCode::INTERNAL_SERVER_ERROR, &headers, &uri));
     }
     if avatar.is_none() && !f.keys().any(|key| key.starts_with("user[") && key.ends_with(']')) {
