@@ -1,0 +1,79 @@
+{
+  "campfire": {
+    "closed_early": 0,
+    "elapsed_ms": 4851,
+    "event_bytes": 1435,
+    "event_p50_ms": 521.9,
+    "event_p95_ms": 548.1,
+    "expected": 10000,
+    "members": 4,
+    "missed": 0,
+    "received": 10000,
+    "request_ms": [
+      549.9,
+      537.7,
+      550.6,
+      362.6,
+      545.6,
+      377.2,
+      510.3,
+      495.1,
+      539.5,
+      361.8
+    ],
+    "request_p50_ms": 510.3,
+    "request_p95_ms": 550.6,
+    "requests": 10,
+    "room_id": 1001,
+    "sockets": 1000,
+    "unexpected": 0
+  },
+  "campfire_revision": "91d294f4a09f9bbe37f9548959bfcb43645678fb",
+  "fixture": {
+    "campfire_workers": 22,
+    "direct_rooms": 1000,
+    "measured_reuse_requests": 10,
+    "members": [
+      1,
+      2,
+      32,
+      46
+    ],
+    "signed_sidebar_sockets": 1000,
+    "target_room_id": 1001,
+    "users": 51
+  },
+  "order": "campfire-first",
+  "rustfire": {
+    "closed_early": 0,
+    "elapsed_ms": 135,
+    "event_bytes": 1435,
+    "event_p50_ms": 7.4,
+    "event_p95_ms": 13,
+    "expected": 10000,
+    "members": 4,
+    "missed": 0,
+    "received": 10000,
+    "request_ms": [
+      17.6,
+      11.3,
+      10.7,
+      9.9,
+      10.8,
+      11.1,
+      11.8,
+      11.9,
+      11.6,
+      7.9
+    ],
+    "request_p50_ms": 11.1,
+    "request_p95_ms": 17.6,
+    "requests": 10,
+    "room_id": 1001,
+    "sockets": 1000,
+    "unexpected": 0
+  },
+  "rustfire_revision": "b4be988c3834248af8aa8007ac441686eba8b4d7",
+  "sample_bytes": 1435,
+  "sample_payload_equal": true
+}
