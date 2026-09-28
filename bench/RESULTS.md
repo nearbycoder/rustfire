@@ -2026,6 +2026,17 @@ Commit `e1d16d8` repeated the four-room, four-user workload for 120 measured sec
 
 Campfire used 22 Puma workers plus Redis; Rustfire used one release process. Both apps ran serially on the same host as the load generator. Socket setup was excluded from the measured interval. The two-minute passing result extends the sampled duration and shows 4.84–4.90× lower sampled peak server PSS for Rustfire at this load. It does not establish either app's maximum connection count, hours-long stability, cross-host deployment capacity, or a whole-app advantage at complete feature parity.
 
+## Checked 10,000-socket rich browser-channel load
+
+The same four-room, four-user browser-channel workload passed at 2,500 sockets per room for 30 measured seconds in both server orders on the release binary with SHA-256 `e771d684f1b808cd06c3a453ad1a5a7f3eaf7d3c843573539aca66b161db2326`. Each app saved all 60 scheduled rich posts within the writer deadline, delivered all 150,000 expected message appends, 150,000 unread events, and 3,130,000 presence-read events, and had zero checked read errors, missing or unexpected socket events, or early socket closes. All 240 sampled append structures and final page and saved-row checks matched. The [Campfire-first](results/rich-browser-10k-30s-camp-first.json) and [Rustfire-first](results/rich-browser-10k-30s-rust-first.json) reports retain the full strict-gate results and build identity.
+
+| Server order | Campfire checked reads/s | Rustfire checked reads/s | Rustfire / Campfire | Read p95, Campfire / Rustfire | Write p95, Campfire / Rustfire | Sampled peak server PSS, Campfire / Rustfire |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Campfire first | 1,106.9 | 2,585.9 | 2.34× | 138.54 / 34.96 ms | 527.23 / 39.70 ms | 6,461.8 / 1,590.6 MiB |
+| Rustfire first | 1,103.3 | 2,442.0 | 2.21× | 134.48 / 37.39 ms | 702.45 / 63.60 ms | 6,751.4 / 1,581.4 MiB |
+
+Campfire ran 22 Puma workers plus Redis and Rustfire one process on the same host as the load clients. Socket setup was outside the measured interval. Both apps passed at this point, so the result demonstrates a checked throughput and memory advantage at 10,000 connections but does not establish either app's maximum connection capacity or sustained multi-hour scale.
+
 ## Concurrent sign-in bursts
 
 On commit `c17cac1`, `python bench/paired_login_capacity.py` ran checked sign-ins against pinned Campfire `91d294f` in both server orders at 32 clients/128 logins and 64 clients/240 logins. Each client fetched a CSRF token and posted the same email and password from a distinct forwarded IP. Both apps used the same cost-12 bcrypt digest. Every request redirected successfully, and every session was saved under the expected IP. Campfire ran 22 Puma workers plus isolated Redis; Rustfire ran one release process with a persistent SQLite rate counter. The reports retain the Rustfire binary SHA-256.
